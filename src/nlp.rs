@@ -230,11 +230,38 @@ pub fn parse_response(json_str: &str) -> Result<NlpAction, String> {
 
 // -- Public API --
 
+fn log_debug(msg: &str) {
+    if let Ok(path) = std::env::var("TASK_NLP_LOG") {
+        use std::io::Write;
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+        {
+            let _ = writeln!(f, "[{}] {}", chrono::Local::now().format("%H:%M:%S"), msg);
+        }
+    }
+}
+
 pub fn interpret(tasks: &[Task], input: &str, api_key: &str) -> Result<NlpAction, String> {
     let task_context = build_task_context(tasks);
     let system_prompt = build_system_prompt(&task_context);
+
+    log_debug(&format!("--- NLP Request ---"));
+    log_debug(&format!("User input: {}", input));
+    log_debug(&format!("Task count: {}", tasks.len()));
+    log_debug(&format!("System prompt:\n{}", system_prompt));
+
     let response_text = call_claude_api(api_key, &system_prompt, input)?;
-    parse_response(&response_text)
+
+    log_debug(&format!("Claude response: {}", response_text));
+
+    let action = parse_response(&response_text)?;
+
+    log_debug(&format!("Parsed action: {:?}", action));
+    log_debug(&format!("--- End ---\n"));
+
+    Ok(action)
 }
 
 // -- Tests --
