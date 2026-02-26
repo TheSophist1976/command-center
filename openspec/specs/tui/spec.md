@@ -25,11 +25,15 @@ The TUI SHALL render a three-region layout: a header bar (1 line) showing the ti
 
 #### Scenario: Default layout rendering
 - **WHEN** the TUI is displayed with tasks loaded
-- **THEN** the header SHALL show "task-manager" and the footer SHALL show keybinding hints including `j/k:nav  Enter:toggle  a:add  d:delete  f:filter  p:priority  e:edit  t:tags  r:desc  q:quit`
+- **THEN** the header SHALL show "task-manager" and the footer SHALL show keybinding hints including `j/k:nav  Enter:toggle  a:add  d:delete  f:filter  p:priority  e:edit  t:tags  r:desc  v:view  i:import  D:set-dir  q:quit`
 
 #### Scenario: Filter active in header
 - **WHEN** a filter is active (e.g., status:open)
 - **THEN** the header SHALL display the active filter expression alongside the title
+
+#### Scenario: Status message in footer
+- **WHEN** a status message is set and the TUI is in Normal mode
+- **THEN** the footer SHALL display the status message text instead of keybinding hints
 
 ### Requirement: Task table display
 The task table SHALL display columns for ID, status (checkbox), priority, title, and tags — matching the information shown by `task list`. The currently selected row SHALL be visually highlighted.
@@ -122,7 +126,7 @@ The user SHALL press `f` or `/` to enter filter mode. The footer SHALL display a
 - **THEN** the table area SHALL display "No tasks match filter."
 
 ### Requirement: Mode-based input handling
-The TUI SHALL operate in distinct modes: Normal, Adding, Filtering, Confirming, EditingPriority, EditingTitle, EditingTags, EditingDescription, and EditingDefaultDir. Keyboard input SHALL be interpreted according to the current mode. Only Normal mode SHALL process navigation and action keys.
+The TUI SHALL operate in distinct modes: Normal, Adding, Filtering, Confirming, EditingPriority, EditingTitle, EditingTags, EditingDescription, and EditingDefaultDir. Keyboard input SHALL be interpreted according to the current mode. Only Normal mode SHALL process navigation and action keys. The `i` key in Normal mode SHALL trigger a Todoist import (handled outside the mode system via the status message pattern).
 
 #### Scenario: Input in add mode
 - **WHEN** the TUI is in Adding mode and the user presses `j`
@@ -131,6 +135,10 @@ The TUI SHALL operate in distinct modes: Normal, Adding, Filtering, Confirming, 
 #### Scenario: Escape returns to normal
 - **WHEN** the TUI is in any non-Normal mode and the user presses `Esc`
 - **THEN** the TUI SHALL return to Normal mode and discard any in-progress input
+
+#### Scenario: Import key in normal mode
+- **WHEN** the TUI is in Normal mode and the user presses `i`
+- **THEN** the system SHALL initiate a Todoist import as specified in the tui-todoist-import capability
 
 ### Requirement: Edit task priority
 The user SHALL press `p` in normal mode to enter priority-editing mode for the selected task. The footer SHALL display a picker prompt showing all four available priorities. The user SHALL press `c`, `h`, `m`, or `l` to set the priority to critical, high, medium, or low respectively. The change SHALL be persisted to disk immediately. Pressing `Esc` or any other key SHALL cancel without changing the task. The `p` key SHALL be a no-op when no task is selected.
