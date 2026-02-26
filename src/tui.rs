@@ -15,6 +15,7 @@ use ratatui::{
 
 use crate::auth;
 use crate::config;
+use crate::nlp::{self, NlpAction};
 use crate::storage;
 use crate::task::{Priority, Status, Task, TaskFile};
 use crate::todoist;
@@ -32,6 +33,8 @@ enum Mode {
     EditingTags,
     EditingDescription,
     EditingDefaultDir,
+    NlpInput,
+    ConfirmingNlp,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -129,11 +132,12 @@ struct Filter {
     priority: Option<Priority>,
     tag: Option<String>,
     project: Option<String>,
+    title_contains: Option<String>,
 }
 
 impl Filter {
     fn is_active(&self) -> bool {
-        self.status.is_some() || self.priority.is_some() || self.tag.is_some() || self.project.is_some()
+        self.status.is_some() || self.priority.is_some() || self.tag.is_some() || self.project.is_some() || self.title_contains.is_some()
     }
 
     fn matches(&self, task: &Task) -> bool {
@@ -158,6 +162,11 @@ impl Filter {
                 None => return false,
             }
         }
+        if let Some(ref needle) = self.title_contains {
+            if !task.title.to_lowercase().contains(&needle.to_lowercase()) {
+                return false;
+            }
+        }
         true
     }
 
@@ -174,6 +183,9 @@ impl Filter {
         }
         if let Some(ref p) = self.project {
             parts.push(format!("project:{}", p));
+        }
+        if let Some(ref t) = self.title_contains {
+            parts.push(format!("title:{}", t));
         }
         parts.join(" ")
     }
@@ -213,6 +225,7 @@ struct App {
     input_buffer: String,
     table_state: TableState,
     status_message: Option<String>,
+    pending_nlp_update: Option<(NlpAction, Vec<usize>)>,
 }
 
 impl App {
@@ -231,6 +244,7 @@ impl App {
             input_buffer: String::new(),
             table_state: TableState::default(),
             status_message: None,
+            pending_nlp_update: None,
         };
         app.table_state.select(Some(0));
         Ok(app)
@@ -354,6 +368,14 @@ fn handle_key(app: &mut App, key: KeyCode) -> Result<bool, String> {
             handle_input(app, key, InputAction::EditDefaultDir)?;
             Ok(false)
         }
+        Mode::NlpInput => {
+            handle_nlp_input(app, key)?;
+            Ok(false)
+        }
+        Mode::ConfirmingNlp => {
+            handle_nlp_confirm(app, key)?;
+            Ok(false)
+        }
     }
 }
 
@@ -456,6 +478,10 @@ fn handle_normal(app: &mut App, key: KeyCode) -> Result<bool, String> {
                     }
                 }
             }
+        }
+        KeyCode::Char(':') => {
+            app.mode = Mode::NlpInput;
+            app.input_buffer.clear();
         }
         KeyCode::Char('D') => {
             app.input_buffer = config::read_config_value("default-dir").unwrap_or_default();
@@ -621,6 +647,146 @@ fn handle_priority(app: &mut App, key: KeyCode) -> Result<(), String> {
     Ok(())
 }
 
+fn handle_nlp_input(app: &mut App, key: KeyCode) -> Result<(), String> {
+    match key {
+        KeyCode::Esc => {
+            app.mode = Mode::Normal;
+            app.input_buffer.clear();
+        }
+        KeyCode::Enter => {
+            let input = app.input_buffer.clone();
+            app.input_buffer.clear();
+
+            if input.trim().is_empty() {
+                app.mode = Mode::Normal;
+                return Ok(());
+            }
+
+            let api_key = match auth::read_claude_key() {
+                Some(k) => k,
+                None => {
+                    app.mode = Mode::Normal;
+                    app.status_message = Some("No Claude API key. Run `task auth claude` or set ANTHROPIC_API_KEY.".to_string());
+                    return Ok(());
+                }
+            };
+
+            match nlp::interpret(&app.task_file.tasks, &input, &api_key) {
+                Ok(NlpAction::Filter(criteria)) => {
+                    let mut filter = Filter::default();
+                    if let Some(ref s) = criteria.status {
+                        if let Ok(status) = s.parse::<Status>() {
+                            filter.status = Some(status);
+                        }
+                    }
+                    if let Some(ref p) = criteria.priority {
+                        if let Ok(priority) = p.parse::<Priority>() {
+                            filter.priority = Some(priority);
+                        }
+                    }
+                    if let Some(ref t) = criteria.tag {
+                        filter.tag = Some(t.clone());
+                    }
+                    if let Some(ref p) = criteria.project {
+                        filter.project = Some(p.clone());
+                    }
+                    if let Some(ref tc) = criteria.title_contains {
+                        filter.title_contains = Some(tc.clone());
+                    }
+                    app.filter = filter;
+                    app.selected = 0;
+                    app.table_state.select(Some(0));
+                    app.clamp_selection();
+                    app.mode = Mode::Normal;
+                }
+                Ok(ref action @ NlpAction::Update { ref match_criteria, .. }) => {
+                    // Find matching task indices
+                    let matching: Vec<usize> = app.task_file.tasks.iter().enumerate()
+                        .filter(|(_, t)| {
+                            if let Some(ref s) = match_criteria.status {
+                                if !t.status.to_string().eq_ignore_ascii_case(s) { return false; }
+                            }
+                            if let Some(ref p) = match_criteria.priority {
+                                if !t.priority.to_string().eq_ignore_ascii_case(p) { return false; }
+                            }
+                            if let Some(ref tag) = match_criteria.tag {
+                                if !t.tags.iter().any(|tg| tg.eq_ignore_ascii_case(tag)) { return false; }
+                            }
+                            if let Some(ref proj) = match_criteria.project {
+                                match &t.project {
+                                    Some(p) => if !p.eq_ignore_ascii_case(proj) { return false; },
+                                    None => return false,
+                                }
+                            }
+                            if let Some(ref tc) = match_criteria.title_contains {
+                                if !t.title.to_lowercase().contains(&tc.to_lowercase()) { return false; }
+                            }
+                            true
+                        })
+                        .map(|(i, _)| i)
+                        .collect();
+
+                    if matching.is_empty() {
+                        app.mode = Mode::Normal;
+                        app.status_message = Some("No tasks match the criteria.".to_string());
+                    } else {
+                        app.pending_nlp_update = Some((action.clone(), matching));
+                        app.mode = Mode::ConfirmingNlp;
+                    }
+                }
+                Err(e) => {
+                    app.mode = Mode::Normal;
+                    app.status_message = Some(e);
+                }
+            }
+        }
+        KeyCode::Backspace => {
+            app.input_buffer.pop();
+        }
+        KeyCode::Char(c) => {
+            app.input_buffer.push(c);
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn handle_nlp_confirm(app: &mut App, key: KeyCode) -> Result<(), String> {
+    match key {
+        KeyCode::Char('y') => {
+            if let Some((NlpAction::Update { set_fields, description, .. }, indices)) = app.pending_nlp_update.take() {
+                let count = indices.len();
+                for &idx in &indices {
+                    let task = &mut app.task_file.tasks[idx];
+                    if let Some(ref s) = set_fields.status {
+                        if let Ok(status) = s.parse::<Status>() {
+                            task.status = status;
+                        }
+                    }
+                    if let Some(ref p) = set_fields.priority {
+                        if let Ok(priority) = p.parse::<Priority>() {
+                            task.priority = priority;
+                        }
+                    }
+                    if let Some(ref tags) = set_fields.tags {
+                        task.tags = tags.clone();
+                    }
+                    task.updated = Some(Utc::now());
+                }
+                app.save()?;
+                app.clamp_selection();
+                app.status_message = Some(format!("{} ({} tasks)", description, count));
+            }
+            app.mode = Mode::Normal;
+        }
+        _ => {
+            app.pending_nlp_update = None;
+            app.mode = Mode::Normal;
+        }
+    }
+    Ok(())
+}
+
 // -- Rendering --
 
 fn draw(frame: &mut Frame, app: &mut App) {
@@ -748,7 +914,7 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
             if let Some(ref msg) = app.status_message {
                 format!(" {} ", msg)
             } else {
-                " j/k:nav  Enter:toggle  a:add  d:delete  f:filter  p:priority  e:edit  t:tags  r:desc  v:view  i:import  D:set-dir  q:quit ".to_string()
+                " j/k:nav  Enter:toggle  a:add  d:delete  f:filter  p:priority  e:edit  t:tags  r:desc  v:view  i:import  ::command  D:set-dir  q:quit ".to_string()
             }
         }
         Mode::Adding => {
@@ -780,6 +946,16 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
         }
         Mode::EditingDefaultDir => {
             format!(" Set default directory: {}_ ", app.input_buffer)
+        }
+        Mode::NlpInput => {
+            format!(" > {}_ ", app.input_buffer)
+        }
+        Mode::ConfirmingNlp => {
+            if let Some((NlpAction::Update { ref description, .. }, ref indices)) = app.pending_nlp_update {
+                format!(" {} ({} tasks) — y/n ", description, indices.len())
+            } else {
+                " Apply changes? y/n ".to_string()
+            }
         }
     };
 
@@ -1011,6 +1187,7 @@ mod tests {
             input_buffer: String::new(),
             table_state: TableState::default(),
             status_message: None,
+            pending_nlp_update: None,
         }
     }
 
@@ -1041,5 +1218,48 @@ mod tests {
                 "No Todoist token. Run `task auth todoist` from the CLI."
             );
         }
+    }
+
+    // -- NLP mode tests --
+
+    #[test]
+    fn colon_key_enters_nlp_input_mode() {
+        let mut app = make_app_with_tasks(vec![make_task(None)]);
+        let _ = handle_normal(&mut app, KeyCode::Char(':'));
+        assert_eq!(app.mode, Mode::NlpInput);
+        assert!(app.input_buffer.is_empty());
+    }
+
+    #[test]
+    fn esc_in_nlp_input_returns_to_normal() {
+        let mut app = make_app_with_tasks(vec![make_task(None)]);
+        app.mode = Mode::NlpInput;
+        app.input_buffer = "some query".to_string();
+        let _ = handle_nlp_input(&mut app, KeyCode::Esc);
+        assert_eq!(app.mode, Mode::Normal);
+        assert!(app.input_buffer.is_empty());
+    }
+
+    #[test]
+    fn title_contains_filter_matches_case_insensitively() {
+        let mut task = make_task(None);
+        task.title = "Deploy FLOW AI Service".to_string();
+        let filter = Filter {
+            title_contains: Some("flow ai".to_string()),
+            ..Filter::default()
+        };
+        assert!(filter.matches(&task));
+
+        let filter2 = Filter {
+            title_contains: Some("DEPLOY".to_string()),
+            ..Filter::default()
+        };
+        assert!(filter2.matches(&task));
+
+        let filter3 = Filter {
+            title_contains: Some("nonexistent".to_string()),
+            ..Filter::default()
+        };
+        assert!(!filter3.matches(&task));
     }
 }

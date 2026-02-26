@@ -1,6 +1,7 @@
 mod auth;
 mod cli;
 mod config;
+mod nlp;
 mod output;
 mod parser;
 mod storage;
@@ -224,20 +225,36 @@ fn run(cli: Cli) -> Result<(), (i32, String)> {
                 Ok(())
             }
 
+            AuthCommand::Claude { key } => {
+                let key = auth::prompt_for_claude_key(key).map_err(|e| (1, e))?;
+                auth::write_claude_key(&key).map_err(|e| (1, e))?;
+                output::print_success("Claude API key stored.", json);
+                Ok(())
+            }
+
             AuthCommand::Status => {
-                if auth::read_token().is_some() {
-                    output::print_success("Todoist token: present", json);
+                let todoist_status = if auth::read_token().is_some() {
+                    "Todoist token: present"
                 } else {
-                    output::print_success("Todoist token: not set", json);
-                }
+                    "Todoist token: not set"
+                };
+                let claude_status = match auth::read_claude_key_source() {
+                    Some(("env", _)) => "Claude API key: present (env)".to_string(),
+                    Some((_, _)) => "Claude API key: present".to_string(),
+                    None => "Claude API key: not set".to_string(),
+                };
+                output::print_success(&format!("{}\n{}", todoist_status, claude_status), json);
                 Ok(())
             }
 
             AuthCommand::Revoke => {
-                match auth::delete_token().map_err(|e| (1, e))? {
-                    true => output::print_success("Todoist token revoked.", json),
-                    false => output::print_success("No Todoist token found.", json),
-                }
+                let todoist_deleted = auth::delete_token().map_err(|e| (1, e))?;
+                let claude_deleted = auth::delete_claude_key().map_err(|e| (1, e))?;
+                let mut msgs = Vec::new();
+                if todoist_deleted { msgs.push("Todoist token revoked."); }
+                if claude_deleted { msgs.push("Claude API key revoked."); }
+                if msgs.is_empty() { msgs.push("No tokens found."); }
+                output::print_success(&msgs.join(" "), json);
                 Ok(())
             }
         },
