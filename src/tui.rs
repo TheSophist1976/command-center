@@ -693,6 +693,9 @@ fn handle_nlp_input(app: &mut App, key: KeyCode) -> Result<(), String> {
                     if let Some(ref tc) = criteria.title_contains {
                         filter.title_contains = Some(tc.clone());
                     }
+                    // NLP filters always switch to All view so time-based
+                    // views don't silently hide matching results
+                    app.view = View::All;
                     app.filter = filter;
                     app.selected = 0;
                     app.table_state.select(Some(0));
@@ -733,6 +736,10 @@ fn handle_nlp_input(app: &mut App, key: KeyCode) -> Result<(), String> {
                         app.pending_nlp_update = Some((action.clone(), matching));
                         app.mode = Mode::ConfirmingNlp;
                     }
+                }
+                Ok(NlpAction::Message(text)) => {
+                    app.mode = Mode::Normal;
+                    app.status_message = Some(text);
                 }
                 Err(e) => {
                     app.mode = Mode::Normal;

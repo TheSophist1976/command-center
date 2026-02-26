@@ -12,6 +12,7 @@ pub enum NlpAction {
         set_fields: SetFields,
         description: String,
     },
+    Message(String),
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]
@@ -84,11 +85,16 @@ Fill in non-null values for the fields the user wants to filter by. Values: stat
 {{"action":"update","match":{{"project":null,"status":null,"priority":null,"tag":null,"title_contains":null}},"set":{{"priority":null,"status":null,"tags":null}},"description":"Human-readable description of the change"}}
 Fill in "match" with criteria to find tasks, and "set" with fields to change. Only include non-null fields in "set".
 
+3. To respond with a message (for questions, unclear queries, or unsupported actions):
+{{"action":"message","text":"Your response text here"}}
+Use this when the query is ambiguous, conversational, asks a question about the tasks, or requests something you cannot do via filter/update. You can answer questions about the user's tasks using the task data above — including counts, summaries, and queries across all fields (id, title, status, priority, tags, due_date, project).
+
 Rules:
 - Respond with ONLY the JSON object, nothing else
 - Use null for fields that are not relevant
 - Match project and tag names case-insensitively against the task data
-- For ambiguous queries, prefer filter over update
+- For clear filter or update requests, prefer filter/update over message
+- For questions, ambiguous input, or unsupported requests, use message
 - The description field in update should say what will happen (e.g., "Set priority to high on 5 frontend tasks")"#,
         task_context
     )
@@ -192,6 +198,7 @@ struct RawAction {
     match_criteria: Option<FilterCriteria>,
     set: Option<SetFields>,
     description: Option<String>,
+    text: Option<String>,
 }
 
 pub fn parse_response(json_str: &str) -> Result<NlpAction, String> {
@@ -223,6 +230,10 @@ pub fn parse_response(json_str: &str) -> Result<NlpAction, String> {
                 set_fields,
                 description,
             })
+        }
+        "message" => {
+            let text = raw.text.unwrap_or_else(|| "No response from model".to_string());
+            Ok(NlpAction::Message(text))
         }
         other => Err(format!("Unknown action type: {}", other)),
     }
@@ -356,5 +367,27 @@ mod tests {
         let result = parse_response(json);
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("Unknown action type"));
+    }
+
+    #[test]
+    fn parse_response_valid_message() {
+        let json = r#"{"action":"message","text":"You have 5 high-priority tasks."}"#;
+        let result = parse_response(json).unwrap();
+        match result {
+            NlpAction::Message(text) => {
+                assert_eq!(text, "You have 5 high-priority tasks.");
+            }
+            _ => panic!("Expected Message"),
+        }
+    }
+
+    #[test]
+    fn parse_response_message_with_markdown_fences() {
+        let json = "```json\n{\"action\":\"message\",\"text\":\"I can't do that.\"}\n```";
+        let result = parse_response(json).unwrap();
+        match result {
+            NlpAction::Message(text) => assert_eq!(text, "I can't do that."),
+            _ => panic!("Expected Message"),
+        }
     }
 }
