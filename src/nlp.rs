@@ -13,6 +13,10 @@ pub enum NlpAction {
         description: String,
     },
     Message(String),
+    ShowTasks {
+        task_ids: Vec<u32>,
+        text: String,
+    },
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]
@@ -89,13 +93,19 @@ Fill in "match" with criteria to find tasks, and "set" with fields to change. On
 {{"action":"message","text":"Your response text here"}}
 Use this when the query is ambiguous, conversational, asks a question about the tasks, or requests something you cannot do via filter/update. You can answer questions about the user's tasks using the task data above — including counts, summaries, and queries across all fields (id, title, status, priority, tags, due_date, project).
 
+4. To show specific tasks inline in the conversation:
+{{"action":"show_tasks","task_ids":[1,3,7],"text":"Here are your high-priority tasks:"}}
+Use this when the user wants to see a specific group of tasks displayed. The task_ids array contains the IDs of tasks to display. Use this instead of filter when the user wants to see tasks as part of the conversation without changing the main table view.
+
 Rules:
 - Respond with ONLY the JSON object, nothing else
 - Use null for fields that are not relevant
 - Match project and tag names case-insensitively against the task data
 - For clear filter or update requests, prefer filter/update over message
 - For questions, ambiguous input, or unsupported requests, use message
-- The description field in update should say what will happen (e.g., "Set priority to high on 5 frontend tasks")"#,
+- When the user asks to "show" or "list" specific tasks, prefer show_tasks over filter
+- The description field in update should say what will happen (e.g., "Set priority to high on 5 frontend tasks")
+- This is a multi-turn conversation. Use context from prior messages to understand follow-up queries (e.g., "mark those as high priority" refers to previously discussed tasks)"#,
         task_context
     )
 }
@@ -110,10 +120,10 @@ struct ApiRequest {
     messages: Vec<ApiMessage>,
 }
 
-#[derive(Serialize)]
-struct ApiMessage {
-    role: String,
-    content: String,
+#[derive(Serialize, Clone, Debug)]
+pub struct ApiMessage {
+    pub role: String,
+    pub content: String,
 }
 
 #[derive(Deserialize)]
@@ -141,7 +151,7 @@ fn api_base_url() -> String {
         .unwrap_or_else(|_| "https://api.anthropic.com".to_string())
 }
 
-pub fn call_claude_api(api_key: &str, system_prompt: &str, user_input: &str) -> Result<String, String> {
+pub fn call_claude_api(api_key: &str, system_prompt: &str, messages: &[ApiMessage]) -> Result<String, String> {
     let client = reqwest::blocking::Client::new();
     let base = api_base_url();
 
@@ -149,10 +159,7 @@ pub fn call_claude_api(api_key: &str, system_prompt: &str, user_input: &str) -> 
         model: "claude-haiku-4-5-20251001".to_string(),
         max_tokens: 1024,
         system: system_prompt.to_string(),
-        messages: vec![ApiMessage {
-            role: "user".to_string(),
-            content: user_input.to_string(),
-        }],
+        messages: messages.to_vec(),
     };
 
     let response = client
@@ -199,6 +206,7 @@ struct RawAction {
     set: Option<SetFields>,
     description: Option<String>,
     text: Option<String>,
+    task_ids: Option<Vec<u32>>,
 }
 
 pub fn parse_response(json_str: &str) -> Result<NlpAction, String> {
@@ -235,6 +243,11 @@ pub fn parse_response(json_str: &str) -> Result<NlpAction, String> {
             let text = raw.text.unwrap_or_else(|| "No response from model".to_string());
             Ok(NlpAction::Message(text))
         }
+        "show_tasks" => {
+            let task_ids = raw.task_ids.unwrap_or_default();
+            let text = raw.text.unwrap_or_else(|| "Here are the matching tasks:".to_string());
+            Ok(NlpAction::ShowTasks { task_ids, text })
+        }
         other => Err(format!("Unknown action type: {}", other)),
     }
 }
@@ -254,16 +267,18 @@ fn log_debug(msg: &str) {
     }
 }
 
-pub fn interpret(tasks: &[Task], input: &str, api_key: &str) -> Result<NlpAction, String> {
+/// Interpret a conversation with the NLP model. Returns the parsed action and raw response text.
+/// The raw response text is returned so the caller can append it to the conversation history.
+pub fn interpret(tasks: &[Task], messages: &[ApiMessage], api_key: &str) -> Result<(NlpAction, String), String> {
     let task_context = build_task_context(tasks);
     let system_prompt = build_system_prompt(&task_context);
 
     log_debug(&format!("--- NLP Request ---"));
-    log_debug(&format!("User input: {}", input));
+    log_debug(&format!("Messages: {} total", messages.len()));
     log_debug(&format!("Task count: {}", tasks.len()));
     log_debug(&format!("System prompt:\n{}", system_prompt));
 
-    let response_text = call_claude_api(api_key, &system_prompt, input)?;
+    let response_text = call_claude_api(api_key, &system_prompt, messages)?;
 
     log_debug(&format!("Claude response: {}", response_text));
 
@@ -272,7 +287,7 @@ pub fn interpret(tasks: &[Task], input: &str, api_key: &str) -> Result<NlpAction
     log_debug(&format!("Parsed action: {:?}", action));
     log_debug(&format!("--- End ---\n"));
 
-    Ok(action)
+    Ok((action, response_text))
 }
 
 // -- Tests --
@@ -388,6 +403,32 @@ mod tests {
         match result {
             NlpAction::Message(text) => assert_eq!(text, "I can't do that."),
             _ => panic!("Expected Message"),
+        }
+    }
+
+    #[test]
+    fn parse_response_valid_show_tasks() {
+        let json = r#"{"action":"show_tasks","task_ids":[1,3,7],"text":"Here are your high-priority tasks:"}"#;
+        let result = parse_response(json).unwrap();
+        match result {
+            NlpAction::ShowTasks { task_ids, text } => {
+                assert_eq!(task_ids, vec![1, 3, 7]);
+                assert_eq!(text, "Here are your high-priority tasks:");
+            }
+            _ => panic!("Expected ShowTasks"),
+        }
+    }
+
+    #[test]
+    fn parse_response_show_tasks_empty_ids() {
+        let json = r#"{"action":"show_tasks","task_ids":[],"text":"No tasks match that criteria."}"#;
+        let result = parse_response(json).unwrap();
+        match result {
+            NlpAction::ShowTasks { task_ids, text } => {
+                assert!(task_ids.is_empty());
+                assert_eq!(text, "No tasks match that criteria.");
+            }
+            _ => panic!("Expected ShowTasks"),
         }
     }
 }

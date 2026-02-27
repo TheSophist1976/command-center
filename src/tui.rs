@@ -15,7 +15,7 @@ use ratatui::{
 
 use crate::auth;
 use crate::config;
-use crate::nlp::{self, NlpAction};
+use crate::nlp::{self, ApiMessage, NlpAction};
 use crate::storage;
 use crate::task::{Priority, Status, Task, TaskFile};
 use crate::todoist;
@@ -33,8 +33,19 @@ enum Mode {
     EditingTags,
     EditingDescription,
     EditingDefaultDir,
-    NlpInput,
+    NlpChat,
     ConfirmingNlp,
+}
+
+#[derive(Debug, Clone)]
+enum ChatMessage {
+    User(String),
+    Assistant(String),
+    TaskList {
+        text: String,
+        tasks: Vec<(u32, String, String, String)>, // (id, title, priority, status)
+    },
+    Error(String),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -226,6 +237,8 @@ struct App {
     table_state: TableState,
     status_message: Option<String>,
     pending_nlp_update: Option<(NlpAction, Vec<usize>)>,
+    chat_history: Vec<ChatMessage>,
+    nlp_messages: Vec<ApiMessage>,
 }
 
 impl App {
@@ -245,6 +258,8 @@ impl App {
             table_state: TableState::default(),
             status_message: None,
             pending_nlp_update: None,
+            chat_history: Vec::new(),
+            nlp_messages: Vec::new(),
         };
         app.table_state.select(Some(0));
         Ok(app)
@@ -368,8 +383,8 @@ fn handle_key(app: &mut App, key: KeyCode) -> Result<bool, String> {
             handle_input(app, key, InputAction::EditDefaultDir)?;
             Ok(false)
         }
-        Mode::NlpInput => {
-            handle_nlp_input(app, key)?;
+        Mode::NlpChat => {
+            handle_nlp_chat(app, key)?;
             Ok(false)
         }
         Mode::ConfirmingNlp => {
@@ -480,8 +495,10 @@ fn handle_normal(app: &mut App, key: KeyCode) -> Result<bool, String> {
             }
         }
         KeyCode::Char(':') => {
-            app.mode = Mode::NlpInput;
+            app.mode = Mode::NlpChat;
             app.input_buffer.clear();
+            app.chat_history.clear();
+            app.nlp_messages.clear();
         }
         KeyCode::Char('D') => {
             app.input_buffer = config::read_config_value("default-dir").unwrap_or_default();
@@ -647,32 +664,50 @@ fn handle_priority(app: &mut App, key: KeyCode) -> Result<(), String> {
     Ok(())
 }
 
-fn handle_nlp_input(app: &mut App, key: KeyCode) -> Result<(), String> {
+fn handle_nlp_chat(app: &mut App, key: KeyCode) -> Result<(), String> {
     match key {
         KeyCode::Esc => {
             app.mode = Mode::Normal;
             app.input_buffer.clear();
+            app.chat_history.clear();
+            app.nlp_messages.clear();
         }
         KeyCode::Enter => {
             let input = app.input_buffer.clone();
             app.input_buffer.clear();
 
             if input.trim().is_empty() {
-                app.mode = Mode::Normal;
                 return Ok(());
             }
 
             let api_key = match auth::read_claude_key() {
                 Some(k) => k,
                 None => {
-                    app.mode = Mode::Normal;
-                    app.status_message = Some("No Claude API key. Run `task auth claude` or set ANTHROPIC_API_KEY.".to_string());
+                    app.chat_history.push(ChatMessage::Error(
+                        "No Claude API key. Run `task auth claude` or set ANTHROPIC_API_KEY.".to_string(),
+                    ));
                     return Ok(());
                 }
             };
 
-            match nlp::interpret(&app.task_file.tasks, &input, &api_key) {
-                Ok(NlpAction::Filter(criteria)) => {
+            // Append user message to conversation
+            app.chat_history.push(ChatMessage::User(input.clone()));
+            app.nlp_messages.push(ApiMessage {
+                role: "user".to_string(),
+                content: input,
+            });
+
+            // Cap message history at 20
+            while app.nlp_messages.len() > 20 {
+                app.nlp_messages.remove(0);
+            }
+
+            match nlp::interpret(&app.task_file.tasks, &app.nlp_messages, &api_key) {
+                Ok((NlpAction::Filter(criteria), raw_response)) => {
+                    app.nlp_messages.push(ApiMessage {
+                        role: "assistant".to_string(),
+                        content: raw_response,
+                    });
                     let mut filter = Filter::default();
                     if let Some(ref s) = criteria.status {
                         if let Ok(status) = s.parse::<Status>() {
@@ -693,17 +728,18 @@ fn handle_nlp_input(app: &mut App, key: KeyCode) -> Result<(), String> {
                     if let Some(ref tc) = criteria.title_contains {
                         filter.title_contains = Some(tc.clone());
                     }
-                    // NLP filters always switch to All view so time-based
-                    // views don't silently hide matching results
                     app.view = View::All;
                     app.filter = filter;
                     app.selected = 0;
                     app.table_state.select(Some(0));
                     app.clamp_selection();
-                    app.mode = Mode::Normal;
+                    app.chat_history.push(ChatMessage::Assistant("Filter applied.".to_string()));
                 }
-                Ok(ref action @ NlpAction::Update { ref match_criteria, .. }) => {
-                    // Find matching task indices
+                Ok((ref action @ NlpAction::Update { ref match_criteria, .. }, raw_response)) => {
+                    app.nlp_messages.push(ApiMessage {
+                        role: "assistant".to_string(),
+                        content: raw_response,
+                    });
                     let matching: Vec<usize> = app.task_file.tasks.iter().enumerate()
                         .filter(|(_, t)| {
                             if let Some(ref s) = match_criteria.status {
@@ -730,20 +766,36 @@ fn handle_nlp_input(app: &mut App, key: KeyCode) -> Result<(), String> {
                         .collect();
 
                     if matching.is_empty() {
-                        app.mode = Mode::Normal;
-                        app.status_message = Some("No tasks match the criteria.".to_string());
+                        app.chat_history.push(ChatMessage::Assistant("No tasks match the criteria.".to_string()));
                     } else {
                         app.pending_nlp_update = Some((action.clone(), matching));
                         app.mode = Mode::ConfirmingNlp;
                     }
                 }
-                Ok(NlpAction::Message(text)) => {
-                    app.mode = Mode::Normal;
-                    app.status_message = Some(text);
+                Ok((NlpAction::Message(text), raw_response)) => {
+                    app.nlp_messages.push(ApiMessage {
+                        role: "assistant".to_string(),
+                        content: raw_response,
+                    });
+                    app.chat_history.push(ChatMessage::Assistant(text));
+                }
+                Ok((NlpAction::ShowTasks { task_ids, text }, raw_response)) => {
+                    app.nlp_messages.push(ApiMessage {
+                        role: "assistant".to_string(),
+                        content: raw_response,
+                    });
+                    let tasks: Vec<(u32, String, String, String)> = task_ids
+                        .iter()
+                        .filter_map(|&id| {
+                            app.task_file.tasks.iter().find(|t| t.id == id).map(|t| {
+                                (t.id, t.title.clone(), t.priority.to_string(), t.status.to_string())
+                            })
+                        })
+                        .collect();
+                    app.chat_history.push(ChatMessage::TaskList { text, tasks });
                 }
                 Err(e) => {
-                    app.mode = Mode::Normal;
-                    app.status_message = Some(e);
+                    app.chat_history.push(ChatMessage::Error(e));
                 }
             }
         }
@@ -782,13 +834,16 @@ fn handle_nlp_confirm(app: &mut App, key: KeyCode) -> Result<(), String> {
                 }
                 app.save()?;
                 app.clamp_selection();
-                app.status_message = Some(format!("{} ({} tasks)", description, count));
+                app.chat_history.push(ChatMessage::Assistant(
+                    format!("{} ({} tasks)", description, count),
+                ));
             }
-            app.mode = Mode::Normal;
+            app.mode = Mode::NlpChat;
         }
         _ => {
             app.pending_nlp_update = None;
-            app.mode = Mode::Normal;
+            app.chat_history.push(ChatMessage::Assistant("Update cancelled.".to_string()));
+            app.mode = Mode::NlpChat;
         }
     }
     Ok(())
@@ -797,18 +852,37 @@ fn handle_nlp_confirm(app: &mut App, key: KeyCode) -> Result<(), String> {
 // -- Rendering --
 
 fn draw(frame: &mut Frame, app: &mut App) {
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(1),
-            Constraint::Min(0),
-            Constraint::Length(1),
-        ])
-        .split(frame.area());
+    if app.mode == Mode::NlpChat || app.mode == Mode::ConfirmingNlp {
+        // 4-region layout for chat mode
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(1),
+                Constraint::Percentage(55),
+                Constraint::Min(3),
+                Constraint::Length(1),
+            ])
+            .split(frame.area());
 
-    draw_header(frame, app, chunks[0]);
-    draw_table(frame, app, chunks[1]);
-    draw_footer(frame, app, chunks[2]);
+        draw_header(frame, app, chunks[0]);
+        draw_table(frame, app, chunks[1]);
+        draw_chat_panel(frame, app, chunks[2]);
+        draw_footer(frame, app, chunks[3]);
+    } else {
+        // Standard 3-region layout
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(1),
+                Constraint::Min(0),
+                Constraint::Length(1),
+            ])
+            .split(frame.area());
+
+        draw_header(frame, app, chunks[0]);
+        draw_table(frame, app, chunks[1]);
+        draw_footer(frame, app, chunks[2]);
+    }
 }
 
 fn draw_header(frame: &mut Frame, app: &App, area: Rect) {
@@ -915,6 +989,54 @@ fn draw_table(frame: &mut Frame, app: &mut App, area: Rect) {
     frame.render_stateful_widget(table, area, &mut app.table_state);
 }
 
+fn draw_chat_panel(frame: &mut Frame, app: &App, area: Rect) {
+    let mut lines: Vec<Line> = Vec::new();
+
+    for msg in &app.chat_history {
+        match msg {
+            ChatMessage::User(text) => {
+                lines.push(Line::from(Span::styled(
+                    format!("> {}", text),
+                    Style::default().fg(Color::Cyan),
+                )));
+            }
+            ChatMessage::Assistant(text) => {
+                lines.push(Line::from(Span::raw(text.as_str())));
+            }
+            ChatMessage::TaskList { text, tasks } => {
+                lines.push(Line::from(Span::raw(text.as_str())));
+                for (id, title, priority, status) in tasks {
+                    lines.push(Line::from(Span::styled(
+                        format!("  #{} {} [{}] ({})", id, title, priority, status),
+                        Style::default().fg(Color::Yellow),
+                    )));
+                }
+            }
+            ChatMessage::Error(text) => {
+                lines.push(Line::from(Span::styled(
+                    format!("Error: {}", text),
+                    Style::default().fg(Color::Red),
+                )));
+            }
+        }
+        lines.push(Line::from(""));
+    }
+
+    // Auto-scroll: calculate offset so the last lines are visible
+    let visible_height = area.height.saturating_sub(2) as usize; // account for border
+    let scroll = if lines.len() > visible_height {
+        (lines.len() - visible_height) as u16
+    } else {
+        0
+    };
+
+    let paragraph = Paragraph::new(lines)
+        .block(Block::default().borders(Borders::TOP).title(" Chat "))
+        .scroll((scroll, 0));
+
+    frame.render_widget(paragraph, area);
+}
+
 fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
     let text = match &app.mode {
         Mode::Normal => {
@@ -954,7 +1076,7 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
         Mode::EditingDefaultDir => {
             format!(" Set default directory: {}_ ", app.input_buffer)
         }
-        Mode::NlpInput => {
+        Mode::NlpChat => {
             format!(" > {}_ ", app.input_buffer)
         }
         Mode::ConfirmingNlp => {
@@ -1195,6 +1317,8 @@ mod tests {
             table_state: TableState::default(),
             status_message: None,
             pending_nlp_update: None,
+            chat_history: Vec::new(),
+            nlp_messages: Vec::new(),
         }
     }
 
@@ -1230,21 +1354,30 @@ mod tests {
     // -- NLP mode tests --
 
     #[test]
-    fn colon_key_enters_nlp_input_mode() {
+    fn colon_key_enters_nlp_chat_mode() {
         let mut app = make_app_with_tasks(vec![make_task(None)]);
+        // Pre-populate to verify clearing
+        app.chat_history.push(ChatMessage::User("old".to_string()));
+        app.nlp_messages.push(ApiMessage { role: "user".to_string(), content: "old".to_string() });
         let _ = handle_normal(&mut app, KeyCode::Char(':'));
-        assert_eq!(app.mode, Mode::NlpInput);
+        assert_eq!(app.mode, Mode::NlpChat);
         assert!(app.input_buffer.is_empty());
+        assert!(app.chat_history.is_empty());
+        assert!(app.nlp_messages.is_empty());
     }
 
     #[test]
-    fn esc_in_nlp_input_returns_to_normal() {
+    fn esc_in_nlp_chat_clears_conversation() {
         let mut app = make_app_with_tasks(vec![make_task(None)]);
-        app.mode = Mode::NlpInput;
+        app.mode = Mode::NlpChat;
         app.input_buffer = "some query".to_string();
-        let _ = handle_nlp_input(&mut app, KeyCode::Esc);
+        app.chat_history.push(ChatMessage::User("test".to_string()));
+        app.nlp_messages.push(ApiMessage { role: "user".to_string(), content: "test".to_string() });
+        let _ = handle_nlp_chat(&mut app, KeyCode::Esc);
         assert_eq!(app.mode, Mode::Normal);
         assert!(app.input_buffer.is_empty());
+        assert!(app.chat_history.is_empty());
+        assert!(app.nlp_messages.is_empty());
     }
 
     #[test]
