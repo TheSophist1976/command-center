@@ -2,7 +2,7 @@ use std::io::{self, stdout};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use chrono::{Datelike, Local, NaiveDate, Utc};
+use chrono::{Datelike, Days, Local, Months, NaiveDate, Utc};
 use crossterm::{
     event::{self, Event, KeyCode, KeyEventKind},
     execute,
@@ -503,6 +503,32 @@ fn handle_normal(app: &mut App, key: KeyCode) -> Result<bool, String> {
         KeyCode::Char('D') => {
             app.input_buffer = config::read_config_value("default-dir").unwrap_or_default();
             app.mode = Mode::EditingDefaultDir;
+        }
+        KeyCode::Char('T') | KeyCode::Char('W') | KeyCode::Char('M') | KeyCode::Char('Q') | KeyCode::Char('X') => {
+            if let Some(&task_idx) = filtered.get(app.selected) {
+                let task = &mut app.task_file.tasks[task_idx];
+                let today = Local::now().date_naive();
+                if key == KeyCode::Char('X') {
+                    task.due_date = None;
+                    task.updated = Some(Utc::now());
+                    app.save()?;
+                    app.status_message = Some("Due date cleared".to_string());
+                } else {
+                    let date = match key {
+                        KeyCode::Char('T') => Some(today),
+                        KeyCode::Char('W') => today.checked_add_days(Days::new(7)),
+                        KeyCode::Char('M') => today.checked_add_months(Months::new(1)),
+                        KeyCode::Char('Q') => today.checked_add_months(Months::new(3)),
+                        _ => unreachable!(),
+                    };
+                    if let Some(d) = date {
+                        task.due_date = Some(d);
+                        task.updated = Some(Utc::now());
+                        app.save()?;
+                        app.status_message = Some(format!("Due: {}", d.format("%Y-%m-%d")));
+                    }
+                }
+            }
         }
         KeyCode::Esc => {
             if app.filter.is_active() {
@@ -1043,7 +1069,7 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
             if let Some(ref msg) = app.status_message {
                 format!(" {} ", msg)
             } else {
-                " j/k:nav  Enter:toggle  a:add  d:delete  f:filter  p:priority  e:edit  t:tags  r:desc  v:view  i:import  ::command  D:set-dir  q:quit ".to_string()
+                " j/k:nav  Enter:toggle  a:add  d:delete  f:filter  p:priority  e:edit  t:tags  r:desc  v:view  i:import  ::command  D:set-dir  T/W/M/Q:due  X:clr-due  q:quit ".to_string()
             }
         }
         Mode::Adding => {
@@ -1378,6 +1404,90 @@ mod tests {
         assert!(app.input_buffer.is_empty());
         assert!(app.chat_history.is_empty());
         assert!(app.nlp_messages.is_empty());
+    }
+
+    // -- Due date keybinding tests --
+
+    fn make_app_with_tmpfile(tasks: Vec<Task>) -> App {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let id = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let dir = PathBuf::from(format!("target/tmp/tui-test-{}-{}", std::process::id(), id));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("tasks.md");
+        let mut task_file = TaskFile::new();
+        task_file.tasks = tasks;
+        // Write initial file so save() works
+        let _ = storage::save(&path, &task_file);
+        App {
+            task_file,
+            file_path: path,
+            selected: 0,
+            filter: Filter::default(),
+            view: View::All,
+            mode: Mode::Normal,
+            input_buffer: String::new(),
+            table_state: TableState::default(),
+            status_message: None,
+            pending_nlp_update: None,
+            chat_history: Vec::new(),
+            nlp_messages: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn shift_t_sets_due_date_to_today() {
+        let mut app = make_app_with_tmpfile(vec![make_task(None)]);
+        let _ = handle_normal(&mut app, KeyCode::Char('T'));
+        let today = Local::now().date_naive();
+        assert_eq!(app.task_file.tasks[0].due_date, Some(today));
+        assert!(app.task_file.tasks[0].updated.is_some());
+        assert!(app.status_message.as_ref().unwrap().starts_with("Due: "));
+    }
+
+    #[test]
+    fn shift_w_sets_due_date_to_next_week() {
+        let mut app = make_app_with_tmpfile(vec![make_task(None)]);
+        let _ = handle_normal(&mut app, KeyCode::Char('W'));
+        let expected = Local::now().date_naive().checked_add_days(Days::new(7)).unwrap();
+        assert_eq!(app.task_file.tasks[0].due_date, Some(expected));
+        assert!(app.status_message.as_ref().unwrap().starts_with("Due: "));
+    }
+
+    #[test]
+    fn shift_m_sets_due_date_to_next_month() {
+        let mut app = make_app_with_tmpfile(vec![make_task(None)]);
+        let _ = handle_normal(&mut app, KeyCode::Char('M'));
+        let expected = Local::now().date_naive().checked_add_months(Months::new(1)).unwrap();
+        assert_eq!(app.task_file.tasks[0].due_date, Some(expected));
+        assert!(app.status_message.as_ref().unwrap().starts_with("Due: "));
+    }
+
+    #[test]
+    fn shift_q_sets_due_date_to_next_quarter() {
+        let mut app = make_app_with_tmpfile(vec![make_task(None)]);
+        let _ = handle_normal(&mut app, KeyCode::Char('Q'));
+        let expected = Local::now().date_naive().checked_add_months(Months::new(3)).unwrap();
+        assert_eq!(app.task_file.tasks[0].due_date, Some(expected));
+        assert!(app.status_message.as_ref().unwrap().starts_with("Due: "));
+    }
+
+    #[test]
+    fn shift_x_clears_due_date() {
+        let today = Local::now().date_naive();
+        let mut app = make_app_with_tmpfile(vec![make_task(Some(today))]);
+        let _ = handle_normal(&mut app, KeyCode::Char('X'));
+        assert_eq!(app.task_file.tasks[0].due_date, None);
+        assert_eq!(app.status_message.as_ref().unwrap(), "Due date cleared");
+    }
+
+    #[test]
+    fn due_date_keys_noop_on_empty_list() {
+        let mut app = make_app_with_tasks(vec![]);
+        for key in ['T', 'W', 'M', 'Q', 'X'] {
+            let _ = handle_normal(&mut app, KeyCode::Char(key));
+        }
+        assert!(app.status_message.is_none());
     }
 
     #[test]
