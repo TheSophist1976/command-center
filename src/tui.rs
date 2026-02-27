@@ -239,6 +239,7 @@ struct App {
     pending_nlp_update: Option<(NlpAction, Vec<usize>)>,
     chat_history: Vec<ChatMessage>,
     nlp_messages: Vec<ApiMessage>,
+    show_detail_panel: bool,
 }
 
 impl App {
@@ -260,6 +261,7 @@ impl App {
             pending_nlp_update: None,
             chat_history: Vec::new(),
             nlp_messages: Vec::new(),
+            show_detail_panel: false,
         };
         app.table_state.select(Some(0));
         Ok(app)
@@ -503,6 +505,9 @@ fn handle_normal(app: &mut App, key: KeyCode) -> Result<bool, String> {
         KeyCode::Char('D') => {
             app.input_buffer = config::read_config_value("default-dir").unwrap_or_default();
             app.mode = Mode::EditingDefaultDir;
+        }
+        KeyCode::Tab => {
+            app.show_detail_panel = !app.show_detail_panel;
         }
         KeyCode::Char('T') | KeyCode::Char('W') | KeyCode::Char('M') | KeyCode::Char('Q') | KeyCode::Char('X') => {
             if let Some(&task_idx) = filtered.get(app.selected) {
@@ -894,6 +899,22 @@ fn draw(frame: &mut Frame, app: &mut App) {
         draw_table(frame, app, chunks[1]);
         draw_chat_panel(frame, app, chunks[2]);
         draw_footer(frame, app, chunks[3]);
+    } else if app.show_detail_panel {
+        // Layout with detail panel
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(1),
+                Constraint::Percentage(70),
+                Constraint::Min(3),
+                Constraint::Length(1),
+            ])
+            .split(frame.area());
+
+        draw_header(frame, app, chunks[0]);
+        draw_table(frame, app, chunks[1]);
+        draw_detail_panel(frame, app, chunks[2]);
+        draw_footer(frame, app, chunks[3]);
     } else {
         // Standard 3-region layout
         let chunks = Layout::default()
@@ -926,6 +947,14 @@ fn draw_header(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(header, area);
 }
 
+fn truncate_desc(desc: Option<&str>) -> String {
+    match desc {
+        None | Some("") => String::new(),
+        Some(s) if s.len() > 30 => format!("{}…", &s[..29]),
+        Some(s) => s.to_string(),
+    }
+}
+
 fn draw_table(frame: &mut Frame, app: &mut App, area: Rect) {
     let filtered = app.filtered_indices();
 
@@ -942,10 +971,14 @@ fn draw_table(frame: &mut Frame, app: &mut App, area: Rect) {
         return;
     }
 
+    let show_desc = filtered.iter().any(|&i| {
+        app.task_file.tasks[i].description.as_ref().map_or(false, |d| !d.is_empty())
+    });
     let show_due = filtered.iter().any(|&i| app.task_file.tasks[i].due_date.is_some());
     let show_project = filtered.iter().any(|&i| app.task_file.tasks[i].project.is_some());
 
     let mut header_cells = vec!["ID", "Status", "Priority", "Title"];
+    if show_desc { header_cells.push("Desc"); }
     if show_due { header_cells.push("Due"); }
     if show_project { header_cells.push("Project"); }
     header_cells.push("Tags");
@@ -979,6 +1012,9 @@ fn draw_table(frame: &mut Frame, app: &mut App, area: Rect) {
                 Cell::from(format!("{}", task.priority)).style(priority_style),
                 Cell::from(task.title.as_str()),
             ];
+            if show_desc {
+                cells.push(Cell::from(truncate_desc(task.description.as_deref())));
+            }
             if show_due {
                 let due_str = task.due_date
                     .map(|d| d.format("%Y-%m-%d").to_string())
@@ -999,6 +1035,7 @@ fn draw_table(frame: &mut Frame, app: &mut App, area: Rect) {
         Constraint::Length(9),
         Constraint::Fill(1),
     ];
+    if show_desc { widths.push(Constraint::Length(30)); }
     if show_due { widths.push(Constraint::Length(12)); }
     if show_project { widths.push(Constraint::Length(15)); }
     widths.push(Constraint::Length(20));
@@ -1013,6 +1050,47 @@ fn draw_table(frame: &mut Frame, app: &mut App, area: Rect) {
         );
 
     frame.render_stateful_widget(table, area, &mut app.table_state);
+}
+
+fn draw_detail_panel(frame: &mut Frame, app: &App, area: Rect) {
+    let filtered = app.filtered_indices();
+    let content = if let Some(&task_idx) = filtered.get(app.selected) {
+        let task = &app.task_file.tasks[task_idx];
+        let desc = task.description.as_deref().unwrap_or("(none)");
+        let tags = if task.tags.is_empty() {
+            "(none)".to_string()
+        } else {
+            task.tags.join(", ")
+        };
+        let due = task.due_date
+            .map(|d| d.format("%Y-%m-%d").to_string())
+            .unwrap_or_else(|| "(none)".to_string());
+        let project = task.project.as_deref().unwrap_or("(none)");
+        let created = task.created.format("%Y-%m-%d %H:%M").to_string();
+        let updated = task.updated
+            .map(|u| u.format("%Y-%m-%d %H:%M").to_string())
+            .unwrap_or_else(|| "(never)".to_string());
+
+        format!(
+            "ID: {}  |  Status: {}  |  Priority: {}  |  Due: {}  |  Project: {}\n\
+             Title: {}\n\
+             Description: {}\n\
+             Tags: {}\n\
+             Created: {}  |  Updated: {}",
+            task.id, task.status, task.priority, due, project,
+            task.title,
+            desc,
+            tags,
+            created, updated,
+        )
+    } else {
+        "No task selected.".to_string()
+    };
+
+    let paragraph = Paragraph::new(content)
+        .wrap(ratatui::widgets::Wrap { trim: false })
+        .block(Block::default().borders(Borders::ALL).title(" Task Details "));
+    frame.render_widget(paragraph, area);
 }
 
 fn draw_chat_panel(frame: &mut Frame, app: &App, area: Rect) {
@@ -1069,7 +1147,7 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
             if let Some(ref msg) = app.status_message {
                 format!(" {} ", msg)
             } else {
-                " j/k:nav  Enter:toggle  a:add  d:delete  f:filter  p:priority  e:edit  t:tags  r:desc  v:view  i:import  ::command  D:set-dir  T/W/M/Q:due  X:clr-due  q:quit ".to_string()
+                " j/k:nav  Enter:toggle  a:add  d:delete  f:filter  p:priority  e:edit  t:tags  r:desc  v:view  i:import  ::command  D:set-dir  T/W/M/Q:due  X:clr-due  Tab:details  q:quit ".to_string()
             }
         }
         Mode::Adding => {
@@ -1345,6 +1423,7 @@ mod tests {
             pending_nlp_update: None,
             chat_history: Vec::new(),
             nlp_messages: Vec::new(),
+            show_detail_panel: false,
         }
     }
 
@@ -1432,6 +1511,7 @@ mod tests {
             pending_nlp_update: None,
             chat_history: Vec::new(),
             nlp_messages: Vec::new(),
+            show_detail_panel: false,
         }
     }
 
@@ -1488,6 +1568,36 @@ mod tests {
             let _ = handle_normal(&mut app, KeyCode::Char(key));
         }
         assert!(app.status_message.is_none());
+    }
+
+    // -- Detail panel tests --
+
+    #[test]
+    fn tab_toggles_detail_panel() {
+        let mut app = make_app_with_tasks(vec![make_task(None)]);
+        assert!(!app.show_detail_panel);
+        let _ = handle_normal(&mut app, KeyCode::Tab);
+        assert!(app.show_detail_panel);
+        let _ = handle_normal(&mut app, KeyCode::Tab);
+        assert!(!app.show_detail_panel);
+    }
+
+    // -- Description truncation tests --
+
+    #[test]
+    fn truncate_desc_handles_all_cases() {
+        // None → empty
+        assert_eq!(truncate_desc(None), "");
+        // Empty string → empty
+        assert_eq!(truncate_desc(Some("")), "");
+        // Short string (≤30 chars) → full
+        assert_eq!(truncate_desc(Some("short desc")), "short desc");
+        // Exactly 30 chars → full
+        let thirty = "a".repeat(30);
+        assert_eq!(truncate_desc(Some(&thirty)), thirty);
+        // 31 chars → truncated with …
+        let thirty_one = "a".repeat(31);
+        assert_eq!(truncate_desc(Some(&thirty_one)), format!("{}…", "a".repeat(29)));
     }
 
     #[test]
