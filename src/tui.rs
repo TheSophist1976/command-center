@@ -35,6 +35,8 @@ enum Mode {
     EditingDefaultDir,
     NlpChat,
     ConfirmingNlp,
+    EditingDetailPanel,
+    ConfirmingDetailSave,
 }
 
 #[derive(Debug, Clone)]
@@ -135,6 +137,52 @@ impl View {
             _ => View::Today,
         }
     }
+}
+
+#[derive(Debug, Clone)]
+struct DetailDraft {
+    title: String,
+    description: String,
+    priority: Priority,
+    status: Status,
+    due_date: String,
+    project: String,
+    tags: String,
+    #[allow(dead_code)]
+    original_task_id: u32,
+}
+
+impl DetailDraft {
+    fn from_task(task: &Task) -> Self {
+        Self {
+            title: task.title.clone(),
+            description: task.description.clone().unwrap_or_default(),
+            priority: task.priority,
+            status: task.status,
+            due_date: task.due_date
+                .map(|d| d.format("%Y-%m-%d").to_string())
+                .unwrap_or_default(),
+            project: task.project.clone().unwrap_or_default(),
+            tags: task.tags.join(" "),
+            original_task_id: task.id,
+        }
+    }
+
+    fn is_dirty(&self, task: &Task) -> bool {
+        self.title != task.title
+            || self.description != task.description.as_deref().unwrap_or("")
+            || self.priority != task.priority
+            || self.status != task.status
+            || self.due_date != task.due_date.map(|d| d.format("%Y-%m-%d").to_string()).unwrap_or_default()
+            || self.project != task.project.as_deref().unwrap_or("")
+            || self.tags != task.tags.join(" ")
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum NavDirection {
+    Up,
+    Down,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -240,6 +288,9 @@ struct App {
     chat_history: Vec<ChatMessage>,
     nlp_messages: Vec<ApiMessage>,
     show_detail_panel: bool,
+    detail_draft: Option<DetailDraft>,
+    detail_field_index: usize,
+    pending_navigation: Option<NavDirection>,
 }
 
 impl App {
@@ -262,6 +313,9 @@ impl App {
             chat_history: Vec::new(),
             nlp_messages: Vec::new(),
             show_detail_panel: false,
+            detail_draft: None,
+            detail_field_index: 0,
+            pending_navigation: None,
         };
         app.table_state.select(Some(0));
         Ok(app)
@@ -393,6 +447,14 @@ fn handle_key(app: &mut App, key: KeyCode) -> Result<bool, String> {
             handle_nlp_confirm(app, key)?;
             Ok(false)
         }
+        Mode::EditingDetailPanel => {
+            handle_detail_edit(app, key)?;
+            Ok(false)
+        }
+        Mode::ConfirmingDetailSave => {
+            handle_detail_confirm(app, key)?;
+            Ok(false)
+        }
     }
 }
 
@@ -404,18 +466,65 @@ fn handle_normal(app: &mut App, key: KeyCode) -> Result<bool, String> {
     match key {
         KeyCode::Char('q') => return Ok(true),
         KeyCode::Char('j') | KeyCode::Down => {
-            if !filtered.is_empty() && app.selected < filtered.len() - 1 {
+            if let Some(ref draft) = app.detail_draft {
+                let dirty = filtered.get(app.selected)
+                    .map(|&idx| draft.is_dirty(&app.task_file.tasks[idx]))
+                    .unwrap_or(false);
+                if dirty {
+                    app.pending_navigation = Some(NavDirection::Down);
+                    app.mode = Mode::ConfirmingDetailSave;
+                } else {
+                    app.detail_draft = None;
+                    if !filtered.is_empty() && app.selected < filtered.len() - 1 {
+                        app.selected += 1;
+                        app.table_state.select(Some(app.selected));
+                    }
+                }
+            } else if !filtered.is_empty() && app.selected < filtered.len() - 1 {
                 app.selected += 1;
                 app.table_state.select(Some(app.selected));
             }
         }
         KeyCode::Char('k') | KeyCode::Up => {
-            if app.selected > 0 {
+            if let Some(ref draft) = app.detail_draft {
+                let dirty = filtered.get(app.selected)
+                    .map(|&idx| draft.is_dirty(&app.task_file.tasks[idx]))
+                    .unwrap_or(false);
+                if dirty {
+                    app.pending_navigation = Some(NavDirection::Up);
+                    app.mode = Mode::ConfirmingDetailSave;
+                } else {
+                    app.detail_draft = None;
+                    if app.selected > 0 {
+                        app.selected -= 1;
+                        app.table_state.select(Some(app.selected));
+                    }
+                }
+            } else if app.selected > 0 {
                 app.selected -= 1;
                 app.table_state.select(Some(app.selected));
             }
         }
-        KeyCode::Enter | KeyCode::Char(' ') => {
+        KeyCode::Enter => {
+            if app.show_detail_panel {
+                if let Some(&task_idx) = filtered.get(app.selected) {
+                    let task = &app.task_file.tasks[task_idx];
+                    app.detail_draft = Some(DetailDraft::from_task(task));
+                    app.detail_field_index = 0;
+                    app.input_buffer = task.title.clone();
+                    app.mode = Mode::EditingDetailPanel;
+                }
+            } else if let Some(&task_idx) = filtered.get(app.selected) {
+                let task = &mut app.task_file.tasks[task_idx];
+                task.status = match task.status {
+                    Status::Open => Status::Done,
+                    Status::Done => Status::Open,
+                };
+                task.updated = Some(Utc::now());
+                app.save()?;
+            }
+        }
+        KeyCode::Char(' ') => {
             if let Some(&task_idx) = filtered.get(app.selected) {
                 let task = &mut app.task_file.tasks[task_idx];
                 task.status = match task.status {
@@ -841,6 +950,185 @@ fn handle_nlp_chat(app: &mut App, key: KeyCode) -> Result<(), String> {
     Ok(())
 }
 
+const DETAIL_FIELD_COUNT: usize = 7;
+
+fn commit_buffer_to_draft(app: &mut App) {
+    if let Some(ref mut draft) = app.detail_draft {
+        match app.detail_field_index {
+            0 => draft.title = app.input_buffer.clone(),
+            1 => draft.description = app.input_buffer.clone(),
+            4 => draft.due_date = app.input_buffer.clone(),
+            5 => draft.project = app.input_buffer.clone(),
+            6 => draft.tags = app.input_buffer.clone(),
+            _ => {} // Priority (2) and Status (3) don't use input_buffer
+        }
+    }
+}
+
+fn load_field_to_buffer(app: &mut App) {
+    if let Some(ref draft) = app.detail_draft {
+        app.input_buffer = match app.detail_field_index {
+            0 => draft.title.clone(),
+            1 => draft.description.clone(),
+            4 => draft.due_date.clone(),
+            5 => draft.project.clone(),
+            6 => draft.tags.clone(),
+            _ => String::new(), // Priority and Status don't use buffer
+        };
+    }
+}
+
+fn handle_detail_edit(app: &mut App, key: KeyCode) -> Result<(), String> {
+    match key {
+        KeyCode::Char('j') | KeyCode::Down | KeyCode::Tab => {
+            commit_buffer_to_draft(app);
+            app.detail_field_index = (app.detail_field_index + 1) % DETAIL_FIELD_COUNT;
+            load_field_to_buffer(app);
+        }
+        KeyCode::Char('k') | KeyCode::Up | KeyCode::BackTab => {
+            commit_buffer_to_draft(app);
+            app.detail_field_index = if app.detail_field_index == 0 {
+                DETAIL_FIELD_COUNT - 1
+            } else {
+                app.detail_field_index - 1
+            };
+            load_field_to_buffer(app);
+        }
+        KeyCode::Esc => {
+            commit_buffer_to_draft(app);
+            let dirty = if let Some(ref draft) = app.detail_draft {
+                let filtered = app.filtered_indices();
+                filtered.get(app.selected)
+                    .map(|&idx| draft.is_dirty(&app.task_file.tasks[idx]))
+                    .unwrap_or(false)
+            } else {
+                false
+            };
+            if dirty {
+                app.mode = Mode::ConfirmingDetailSave;
+            } else {
+                app.detail_draft = None;
+                app.input_buffer.clear();
+                app.mode = Mode::Normal;
+            }
+        }
+        _ => {
+            // Field-specific handling
+            match app.detail_field_index {
+                2 => {
+                    // Priority field
+                    if let Some(ref mut draft) = app.detail_draft {
+                        match key {
+                            KeyCode::Char('c') => draft.priority = Priority::Critical,
+                            KeyCode::Char('h') => draft.priority = Priority::High,
+                            KeyCode::Char('m') => draft.priority = Priority::Medium,
+                            KeyCode::Char('l') => draft.priority = Priority::Low,
+                            _ => {}
+                        }
+                    }
+                }
+                3 => {
+                    // Status field
+                    if let Some(ref mut draft) = app.detail_draft {
+                        match key {
+                            KeyCode::Enter | KeyCode::Char(' ') => {
+                                draft.status = match draft.status {
+                                    Status::Open => Status::Done,
+                                    Status::Done => Status::Open,
+                                };
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                _ => {
+                    // Text fields: title, description, due_date, project, tags
+                    match key {
+                        KeyCode::Backspace => { app.input_buffer.pop(); }
+                        KeyCode::Char(c) => { app.input_buffer.push(c); }
+                        _ => {}
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn apply_navigation(app: &mut App) {
+    if let Some(dir) = app.pending_navigation.take() {
+        let filtered = app.filtered_indices();
+        match dir {
+            NavDirection::Down => {
+                if !filtered.is_empty() && app.selected < filtered.len() - 1 {
+                    app.selected += 1;
+                    app.table_state.select(Some(app.selected));
+                }
+            }
+            NavDirection::Up => {
+                if app.selected > 0 {
+                    app.selected -= 1;
+                    app.table_state.select(Some(app.selected));
+                }
+            }
+        }
+    }
+}
+
+fn handle_detail_confirm(app: &mut App, key: KeyCode) -> Result<(), String> {
+    match key {
+        KeyCode::Char('s') => {
+            // Validate due date before saving
+            if let Some(ref draft) = app.detail_draft {
+                if !draft.due_date.trim().is_empty() {
+                    if NaiveDate::parse_from_str(draft.due_date.trim(), "%Y-%m-%d").is_err() {
+                        app.status_message = Some("Invalid date format (use YYYY-MM-DD)".to_string());
+                        app.detail_field_index = 4;
+                        load_field_to_buffer(app);
+                        app.mode = Mode::EditingDetailPanel;
+                        return Ok(());
+                    }
+                }
+            }
+            // Apply draft to task
+            if let Some(draft) = app.detail_draft.take() {
+                let filtered = app.filtered_indices();
+                if let Some(&task_idx) = filtered.get(app.selected) {
+                    let task = &mut app.task_file.tasks[task_idx];
+                    task.title = draft.title;
+                    task.description = if draft.description.trim().is_empty() { None } else { Some(draft.description) };
+                    task.priority = draft.priority;
+                    task.status = draft.status;
+                    task.due_date = if draft.due_date.trim().is_empty() {
+                        None
+                    } else {
+                        NaiveDate::parse_from_str(draft.due_date.trim(), "%Y-%m-%d").ok()
+                    };
+                    task.project = if draft.project.trim().is_empty() { None } else { Some(draft.project) };
+                    task.tags = draft.tags.split_whitespace().map(|s| s.to_string()).collect();
+                    task.updated = Some(Utc::now());
+                    app.save()?;
+                }
+            }
+            app.input_buffer.clear();
+            app.mode = Mode::Normal;
+            apply_navigation(app);
+        }
+        KeyCode::Char('d') => {
+            app.detail_draft = None;
+            app.input_buffer.clear();
+            app.mode = Mode::Normal;
+            apply_navigation(app);
+        }
+        KeyCode::Char('c') | KeyCode::Esc => {
+            app.pending_navigation = None;
+            app.mode = Mode::EditingDetailPanel;
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
 fn handle_nlp_confirm(app: &mut App, key: KeyCode) -> Result<(), String> {
     match key {
         KeyCode::Char('y') => {
@@ -899,7 +1187,7 @@ fn draw(frame: &mut Frame, app: &mut App) {
         draw_table(frame, app, chunks[1]);
         draw_chat_panel(frame, app, chunks[2]);
         draw_footer(frame, app, chunks[3]);
-    } else if app.show_detail_panel {
+    } else if app.show_detail_panel || app.mode == Mode::EditingDetailPanel || app.mode == Mode::ConfirmingDetailSave {
         // Layout with detail panel
         let chunks = Layout::default()
             .direction(Direction::Vertical)
@@ -1053,44 +1341,77 @@ fn draw_table(frame: &mut Frame, app: &mut App, area: Rect) {
 }
 
 fn draw_detail_panel(frame: &mut Frame, app: &App, area: Rect) {
-    let filtered = app.filtered_indices();
-    let content = if let Some(&task_idx) = filtered.get(app.selected) {
-        let task = &app.task_file.tasks[task_idx];
-        let desc = task.description.as_deref().unwrap_or("(none)");
-        let tags = if task.tags.is_empty() {
-            "(none)".to_string()
-        } else {
-            task.tags.join(", ")
-        };
-        let due = task.due_date
-            .map(|d| d.format("%Y-%m-%d").to_string())
-            .unwrap_or_else(|| "(none)".to_string());
-        let project = task.project.as_deref().unwrap_or("(none)");
-        let created = task.created.format("%Y-%m-%d %H:%M").to_string();
-        let updated = task.updated
-            .map(|u| u.format("%Y-%m-%d %H:%M").to_string())
-            .unwrap_or_else(|| "(never)".to_string());
-
-        format!(
-            "ID: {}  |  Status: {}  |  Priority: {}  |  Due: {}  |  Project: {}\n\
-             Title: {}\n\
-             Description: {}\n\
-             Tags: {}\n\
-             Created: {}  |  Updated: {}",
-            task.id, task.status, task.priority, due, project,
-            task.title,
-            desc,
-            tags,
-            created, updated,
-        )
+    if let Some(ref draft) = app.detail_draft {
+        // Edit mode rendering
+        let field_labels = ["Title", "Description", "Priority", "Status", "Due Date", "Project", "Tags"];
+        let mut lines: Vec<Line> = Vec::new();
+        for (i, label) in field_labels.iter().enumerate() {
+            let value = match i {
+                0 => if i == app.detail_field_index { format!("{}_ ", app.input_buffer) } else { draft.title.clone() },
+                1 => if i == app.detail_field_index { format!("{}_ ", app.input_buffer) } else { draft.description.clone() },
+                2 => format!("{}", draft.priority),
+                3 => format!("{}", draft.status),
+                4 => if i == app.detail_field_index { format!("{}_ ", app.input_buffer) } else { draft.due_date.clone() },
+                5 => if i == app.detail_field_index { format!("{}_ ", app.input_buffer) } else { draft.project.clone() },
+                6 => if i == app.detail_field_index { format!("{}_ ", app.input_buffer) } else { draft.tags.clone() },
+                _ => String::new(),
+            };
+            let display_value = if value.is_empty() && i != app.detail_field_index { "(empty)".to_string() } else { value };
+            let style = if i == app.detail_field_index {
+                Style::default().bg(Color::DarkGray).add_modifier(Modifier::BOLD)
+            } else {
+                Style::default()
+            };
+            let marker = if i == app.detail_field_index { ">> " } else { "   " };
+            lines.push(Line::from(Span::styled(
+                format!("{}{:>12}: {}", marker, label, display_value),
+                style,
+            )));
+        }
+        let paragraph = Paragraph::new(lines)
+            .block(Block::default().borders(Borders::ALL).title(" Edit Task "));
+        frame.render_widget(paragraph, area);
     } else {
-        "No task selected.".to_string()
-    };
+        // Read-only rendering
+        let filtered = app.filtered_indices();
+        let content = if let Some(&task_idx) = filtered.get(app.selected) {
+            let task = &app.task_file.tasks[task_idx];
+            let desc = task.description.as_deref().unwrap_or("(none)");
+            let tags = if task.tags.is_empty() {
+                "(none)".to_string()
+            } else {
+                task.tags.join(", ")
+            };
+            let due = task.due_date
+                .map(|d| d.format("%Y-%m-%d").to_string())
+                .unwrap_or_else(|| "(none)".to_string());
+            let project = task.project.as_deref().unwrap_or("(none)");
+            let created = task.created.format("%Y-%m-%d %H:%M").to_string();
+            let updated = task.updated
+                .map(|u| u.format("%Y-%m-%d %H:%M").to_string())
+                .unwrap_or_else(|| "(never)".to_string());
 
-    let paragraph = Paragraph::new(content)
-        .wrap(ratatui::widgets::Wrap { trim: false })
-        .block(Block::default().borders(Borders::ALL).title(" Task Details "));
-    frame.render_widget(paragraph, area);
+            format!(
+                "ID: {}  |  Status: {}  |  Priority: {}  |  Due: {}  |  Project: {}\n\
+                 Title: {}\n\
+                 Description: {}\n\
+                 Tags: {}\n\
+                 Created: {}  |  Updated: {}",
+                task.id, task.status, task.priority, due, project,
+                task.title,
+                desc,
+                tags,
+                created, updated,
+            )
+        } else {
+            "No task selected.".to_string()
+        };
+
+        let paragraph = Paragraph::new(content)
+            .wrap(ratatui::widgets::Wrap { trim: false })
+            .block(Block::default().borders(Borders::ALL).title(" Task Details "));
+        frame.render_widget(paragraph, area);
+    }
 }
 
 fn draw_chat_panel(frame: &mut Frame, app: &App, area: Rect) {
@@ -1146,6 +1467,8 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
         Mode::Normal => {
             if let Some(ref msg) = app.status_message {
                 format!(" {} ", msg)
+            } else if app.show_detail_panel {
+                " j/k:nav  Enter:edit  Space:toggle  a:add  d:delete  f:filter  p:priority  e:edit-title  t:tags  r:desc  v:view  Tab:details  q:quit ".to_string()
             } else {
                 " j/k:nav  Enter:toggle  a:add  d:delete  f:filter  p:priority  e:edit  t:tags  r:desc  v:view  i:import  ::command  D:set-dir  T/W/M/Q:due  X:clr-due  Tab:details  q:quit ".to_string()
             }
@@ -1189,6 +1512,12 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
             } else {
                 " Apply changes? y/n ".to_string()
             }
+        }
+        Mode::EditingDetailPanel => {
+            " j/k:field  c/h/m/l:priority  Enter/Space:status  Esc:done ".to_string()
+        }
+        Mode::ConfirmingDetailSave => {
+            " Unsaved changes. [s]ave  [d]iscard  [c]ancel ".to_string()
         }
     };
 
@@ -1424,6 +1753,9 @@ mod tests {
             chat_history: Vec::new(),
             nlp_messages: Vec::new(),
             show_detail_panel: false,
+            detail_draft: None,
+            detail_field_index: 0,
+            pending_navigation: None,
         }
     }
 
@@ -1512,6 +1844,9 @@ mod tests {
             chat_history: Vec::new(),
             nlp_messages: Vec::new(),
             show_detail_panel: false,
+            detail_draft: None,
+            detail_field_index: 0,
+            pending_navigation: None,
         }
     }
 
@@ -1598,6 +1933,160 @@ mod tests {
         // 31 chars → truncated with …
         let thirty_one = "a".repeat(31);
         assert_eq!(truncate_desc(Some(&thirty_one)), format!("{}…", "a".repeat(29)));
+    }
+
+    // -- Detail draft tests --
+
+    #[test]
+    fn detail_draft_from_task_and_is_dirty() {
+        let mut task = make_task(Some(NaiveDate::from_ymd_opt(2026, 3, 1).unwrap()));
+        task.title = "Buy milk".to_string();
+        task.description = Some("From the store".to_string());
+        task.project = Some("Shopping".to_string());
+        task.tags = vec!["errands".to_string()];
+
+        let draft = DetailDraft::from_task(&task);
+        assert_eq!(draft.title, "Buy milk");
+        assert_eq!(draft.description, "From the store");
+        assert_eq!(draft.priority, Priority::Medium);
+        assert_eq!(draft.status, Status::Open);
+        assert_eq!(draft.due_date, "2026-03-01");
+        assert_eq!(draft.project, "Shopping");
+        assert_eq!(draft.tags, "errands");
+        assert!(!draft.is_dirty(&task));
+
+        let mut modified_draft = draft.clone();
+        modified_draft.title = "Buy eggs".to_string();
+        assert!(modified_draft.is_dirty(&task));
+    }
+
+    #[test]
+    fn enter_with_panel_enters_editing_space_toggles() {
+        let mut app = make_app_with_tmpfile(vec![make_task(None)]);
+        app.show_detail_panel = true;
+
+        // Enter should enter editing mode
+        let _ = handle_normal(&mut app, KeyCode::Enter);
+        assert_eq!(app.mode, Mode::EditingDetailPanel);
+        assert!(app.detail_draft.is_some());
+        assert_eq!(app.detail_field_index, 0);
+        assert_eq!(app.input_buffer, "test");
+
+        // Reset to Normal
+        app.mode = Mode::Normal;
+        app.detail_draft = None;
+
+        // Space should toggle completion
+        let _ = handle_normal(&mut app, KeyCode::Char(' '));
+        assert_eq!(app.mode, Mode::Normal);
+        assert_eq!(app.task_file.tasks[0].status, Status::Done);
+    }
+
+    #[test]
+    fn detail_field_navigation_wraps() {
+        let mut app = make_app_with_tasks(vec![make_task(None)]);
+        app.show_detail_panel = true;
+        app.detail_draft = Some(DetailDraft::from_task(&app.task_file.tasks[0]));
+        app.detail_field_index = 0;
+        app.input_buffer = app.task_file.tasks[0].title.clone();
+        app.mode = Mode::EditingDetailPanel;
+
+        // Navigate forward through all fields
+        for i in 1..DETAIL_FIELD_COUNT {
+            let _ = handle_detail_edit(&mut app, KeyCode::Char('j'));
+            assert_eq!(app.detail_field_index, i);
+        }
+        // Wrap from 6 back to 0
+        let _ = handle_detail_edit(&mut app, KeyCode::Char('j'));
+        assert_eq!(app.detail_field_index, 0);
+
+        // Navigate backward: 0 -> 6
+        let _ = handle_detail_edit(&mut app, KeyCode::Char('k'));
+        assert_eq!(app.detail_field_index, 6);
+    }
+
+    #[test]
+    fn esc_from_clean_draft_exits_immediately() {
+        let mut app = make_app_with_tasks(vec![make_task(None)]);
+        app.detail_draft = Some(DetailDraft::from_task(&app.task_file.tasks[0]));
+        app.detail_field_index = 0;
+        app.input_buffer = app.task_file.tasks[0].title.clone();
+        app.mode = Mode::EditingDetailPanel;
+
+        let _ = handle_detail_edit(&mut app, KeyCode::Esc);
+        assert_eq!(app.mode, Mode::Normal);
+        assert!(app.detail_draft.is_none());
+    }
+
+    #[test]
+    fn esc_from_dirty_draft_enters_confirming() {
+        let mut app = make_app_with_tasks(vec![make_task(None)]);
+        app.detail_draft = Some(DetailDraft::from_task(&app.task_file.tasks[0]));
+        app.detail_field_index = 0;
+        app.input_buffer = "modified title".to_string(); // dirty
+        app.mode = Mode::EditingDetailPanel;
+
+        let _ = handle_detail_edit(&mut app, KeyCode::Esc);
+        assert_eq!(app.mode, Mode::ConfirmingDetailSave);
+        assert!(app.detail_draft.is_some());
+    }
+
+    #[test]
+    fn confirming_detail_save_discard_cancel() {
+        // Test save
+        let mut app = make_app_with_tmpfile(vec![make_task(None)]);
+        let mut draft = DetailDraft::from_task(&app.task_file.tasks[0]);
+        draft.title = "Updated".to_string();
+        app.detail_draft = Some(draft);
+        app.mode = Mode::ConfirmingDetailSave;
+        let _ = handle_detail_confirm(&mut app, KeyCode::Char('s'));
+        assert_eq!(app.mode, Mode::Normal);
+        assert!(app.detail_draft.is_none());
+        assert_eq!(app.task_file.tasks[0].title, "Updated");
+
+        // Test discard
+        let mut app2 = make_app_with_tmpfile(vec![make_task(None)]);
+        let mut draft2 = DetailDraft::from_task(&app2.task_file.tasks[0]);
+        draft2.title = "Should not save".to_string();
+        app2.detail_draft = Some(draft2);
+        app2.mode = Mode::ConfirmingDetailSave;
+        let _ = handle_detail_confirm(&mut app2, KeyCode::Char('d'));
+        assert_eq!(app2.mode, Mode::Normal);
+        assert!(app2.detail_draft.is_none());
+        assert_eq!(app2.task_file.tasks[0].title, "test"); // unchanged
+
+        // Test cancel
+        let mut app3 = make_app_with_tasks(vec![make_task(None)]);
+        let mut draft3 = DetailDraft::from_task(&app3.task_file.tasks[0]);
+        draft3.title = "In progress".to_string();
+        app3.detail_draft = Some(draft3);
+        app3.mode = Mode::ConfirmingDetailSave;
+        let _ = handle_detail_confirm(&mut app3, KeyCode::Char('c'));
+        assert_eq!(app3.mode, Mode::EditingDetailPanel);
+        assert!(app3.detail_draft.is_some());
+    }
+
+    #[test]
+    fn navigation_interception_with_dirty_draft() {
+        let mut app = make_app_with_tasks(vec![make_task(None), make_task(None)]);
+        let mut draft = DetailDraft::from_task(&app.task_file.tasks[0]);
+        draft.title = "dirty".to_string();
+        app.detail_draft = Some(draft);
+
+        // j with dirty draft should enter confirming
+        let _ = handle_normal(&mut app, KeyCode::Char('j'));
+        assert_eq!(app.mode, Mode::ConfirmingDetailSave);
+        assert_eq!(app.pending_navigation, Some(NavDirection::Down));
+        assert_eq!(app.selected, 0); // hasn't moved yet
+
+        // Reset and test clean draft navigates normally
+        app.mode = Mode::Normal;
+        app.detail_draft = Some(DetailDraft::from_task(&app.task_file.tasks[0])); // clean
+        app.pending_navigation = None;
+        let _ = handle_normal(&mut app, KeyCode::Char('j'));
+        assert_eq!(app.mode, Mode::Normal);
+        assert_eq!(app.selected, 1);
+        assert!(app.detail_draft.is_none()); // cleared
     }
 
     #[test]
