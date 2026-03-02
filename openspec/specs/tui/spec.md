@@ -25,7 +25,15 @@ The TUI SHALL render a three-region layout in Normal mode: a header bar (1 line)
 
 #### Scenario: Default layout rendering
 - **WHEN** the TUI is displayed with tasks loaded in Normal mode
-- **THEN** the header SHALL show "task-manager" and the footer SHALL show keybinding hints including `j/k:nav  Enter:toggle  a:add  d:delete  f:filter  p:priority  e:edit  t:tags  r:desc  v:view  i:import  ::command  D:set-dir  T/W/M/Q:due  X:clr-due  q:quit`
+- **THEN** the header SHALL show "task-manager" and the footer SHALL show keybinding hints including `j/k:nav  Enter:toggle  a:add  d:delete  f:filter  p:priority  e:edit  t:tags  r:desc  v:view  i:import  ::command  D:set-dir  T/W/M/Q:due  X:clr-due  Tab:details  q:quit`
+
+#### Scenario: Footer hints with detail panel visible
+- **WHEN** the detail panel is visible in Normal mode
+- **THEN** the footer SHALL show `Enter:edit` instead of `Enter:toggle` to indicate that Enter enters detail editing mode
+
+#### Scenario: Footer hints in detail editing mode
+- **WHEN** the TUI is in `EditingDetailPanel` mode
+- **THEN** the footer SHALL show hints for editing: `j/k:field  Enter:save  Esc:cancel` (or equivalent context-sensitive hints)
 
 #### Scenario: Filter active in header
 - **WHEN** a filter is active (e.g., status:open)
@@ -50,6 +58,22 @@ The task table SHALL display columns for ID, status (checkbox), priority, title,
 - **WHEN** the TUI loads a file with no tasks
 - **THEN** the table area SHALL display a message like "No tasks. Press 'a' to add one."
 
+#### Scenario: Description column shown conditionally
+- **WHEN** at least one visible task has a non-empty description
+- **THEN** the table SHALL include a "Desc" column after the Title column, displaying each task's description truncated to 30 characters with "…" appended if truncated
+
+#### Scenario: Description column hidden
+- **WHEN** no visible tasks have a description
+- **THEN** the "Desc" column SHALL be omitted to preserve table width
+
+#### Scenario: Description truncation
+- **WHEN** a task's description exceeds 30 characters
+- **THEN** the Desc cell SHALL display the first 29 characters followed by "…"
+
+#### Scenario: Short description displayed in full
+- **WHEN** a task's description is 30 characters or fewer
+- **THEN** the Desc cell SHALL display the full description without truncation
+
 ### Requirement: Keyboard navigation
 The user SHALL navigate the task list using `j` or `Down` to move the cursor down and `k` or `Up` to move the cursor up. The cursor SHALL wrap or clamp at list boundaries.
 
@@ -70,7 +94,7 @@ The user SHALL navigate the task list using `j` or `Down` to move the cursor dow
 - **THEN** the cursor SHALL remain on the first task (clamp behavior)
 
 ### Requirement: Toggle task completion
-The user SHALL toggle a task between open and done by pressing `Enter` or `Space` on the selected task. The change SHALL be persisted to disk immediately.
+The user SHALL toggle a task between open and done by pressing `Enter` or `Space` on the selected task. The change SHALL be persisted to disk immediately. When the detail panel is visible, `Enter` SHALL enter detail editing mode instead of toggling completion; `Space` SHALL continue to toggle completion.
 
 #### Scenario: Mark task as done
 - **WHEN** the user presses `Enter` on an open task
@@ -79,6 +103,14 @@ The user SHALL toggle a task between open and done by pressing `Enter` or `Space
 #### Scenario: Reopen a done task
 - **WHEN** the user presses `Enter` on a done task
 - **THEN** the task's status SHALL change to open, the display SHALL update, and the file SHALL be saved
+
+#### Scenario: Enter with detail panel visible
+- **WHEN** the detail panel is visible and the user presses `Enter` on a selected task
+- **THEN** the TUI SHALL enter `EditingDetailPanel` mode instead of toggling the task's completion status
+
+#### Scenario: Space with detail panel visible
+- **WHEN** the detail panel is visible and the user presses `Space` on a selected task
+- **THEN** the task's status SHALL toggle between open and done as usual (not entering edit mode)
 
 ### Requirement: Add task
 The user SHALL press `a` to enter add mode. The footer SHALL display a text input prompt. The user types a task title and presses `Enter` to confirm or `Esc` to cancel. The new task SHALL be added with default priority (medium) and no tags.
@@ -130,7 +162,7 @@ The user SHALL press `f` or `/` to enter filter mode. The footer SHALL display a
 - **THEN** the table area SHALL display "No tasks match filter."
 
 ### Requirement: Mode-based input handling
-The TUI SHALL operate in distinct modes: Normal, Adding, Filtering, Confirming, EditingPriority, EditingTitle, EditingTags, EditingDescription, EditingDefaultDir, NlpChat, and ConfirmingNlp. Keyboard input SHALL be interpreted according to the current mode. Only Normal mode SHALL process navigation and action keys. The `i` key in Normal mode SHALL trigger a Todoist import (handled outside the mode system via the status message pattern).
+The TUI SHALL operate in distinct modes: Normal, Adding, Filtering, Confirming, EditingPriority, EditingTitle, EditingTags, EditingDescription, EditingDefaultDir, EditingDetailPanel, ConfirmingDetailSave, NlpChat, and ConfirmingNlp. Keyboard input SHALL be interpreted according to the current mode. Only Normal mode SHALL process navigation and action keys. The `i` key in Normal mode SHALL trigger a Todoist import (handled outside the mode system via the status message pattern).
 
 #### Scenario: Input in add mode
 - **WHEN** the TUI is in Adding mode and the user presses `j`
@@ -231,6 +263,91 @@ The user SHALL press `r` in normal mode to enter description-editing mode for th
 #### Scenario: No-op when list is empty
 - **WHEN** the user presses `r` and no task is selected
 - **THEN** the TUI SHALL remain in normal mode with no change
+
+### Requirement: Task detail panel
+The TUI SHALL provide a toggleable bottom panel that displays all fields of the currently selected task. The panel SHALL be toggled by pressing `Tab` in Normal mode. When visible, the layout SHALL split into a task table (top ~70%) and detail panel (bottom ~30%). The panel SHALL display: ID, title, status, priority, description (full text, wrapped), tags, due date, project, created timestamp, and updated timestamp. The panel content SHALL update as the user navigates between tasks.
+
+#### Scenario: Toggle detail panel on
+- **WHEN** the user presses `Tab` in Normal mode with the detail panel hidden
+- **THEN** the layout SHALL split to show the task table above and the detail panel below, displaying all fields of the currently selected task
+
+#### Scenario: Toggle detail panel off
+- **WHEN** the user presses `Tab` in Normal mode with the detail panel visible
+- **THEN** the detail panel SHALL be hidden and the table SHALL expand to fill the available space
+
+#### Scenario: Panel updates on navigation
+- **WHEN** the detail panel is visible and the user presses `j` or `k` to navigate
+- **THEN** the panel SHALL update to show the details of the newly selected task
+
+#### Scenario: Panel with no task selected
+- **WHEN** the detail panel is visible and no task is selected (empty or fully filtered list)
+- **THEN** the panel SHALL display "No task selected."
+
+#### Scenario: Panel shows full description
+- **WHEN** the detail panel is visible and the selected task has a description
+- **THEN** the panel SHALL display the full description text (not truncated)
+
+### Requirement: Detail panel inline editing
+The TUI SHALL support inline editing of task fields within the detail panel. When the detail panel is visible and the user presses `Enter` on the selected task, the TUI SHALL enter `EditingDetailPanel` mode. The editable fields SHALL be: Title, Description, Priority, Status, Due Date, Project, and Tags. The user SHALL navigate between fields using `j`/`k` or `Tab`/`Shift-Tab`. Pressing `Esc` SHALL exit editing mode (with a dirty check if changes were made).
+
+#### Scenario: Enter detail editing mode
+- **WHEN** the detail panel is visible and the user presses `Enter` on a selected task
+- **THEN** the TUI SHALL enter `EditingDetailPanel` mode, populate a draft from the current task, focus the first field (Title), and display the panel in edit layout with the focused field highlighted
+
+#### Scenario: Navigate between fields
+- **WHEN** the user is in `EditingDetailPanel` mode and presses `j`, `Down`, or `Tab`
+- **THEN** the focus SHALL move to the next editable field (wrapping from Tags back to Title), saving the current input buffer value to the draft before moving
+
+#### Scenario: Navigate fields backward
+- **WHEN** the user is in `EditingDetailPanel` mode and presses `k`, `Up`, or `Shift-Tab`
+- **THEN** the focus SHALL move to the previous editable field (wrapping from Title to Tags), saving the current input buffer value to the draft before moving
+
+#### Scenario: Edit a text field
+- **WHEN** a text field (Title, Description, Due Date, Project, Tags) is focused in `EditingDetailPanel` mode
+- **THEN** the input buffer SHALL be loaded with the field's draft value, typing SHALL modify the buffer, and the panel SHALL render the current buffer with a cursor indicator
+
+#### Scenario: Edit priority field
+- **WHEN** the Priority field is focused and the user presses `c`, `h`, `m`, or `l`
+- **THEN** the draft priority SHALL be set to critical, high, medium, or low respectively, and the display SHALL update immediately
+
+#### Scenario: Toggle status field
+- **WHEN** the Status field is focused and the user presses `Enter` or `Space`
+- **THEN** the draft status SHALL toggle between open and done, and the display SHALL update immediately
+
+#### Scenario: Exit editing with no changes
+- **WHEN** the user presses `Esc` in `EditingDetailPanel` mode and the draft has no changes
+- **THEN** the TUI SHALL exit to Normal mode immediately with no prompt
+
+#### Scenario: Edit panel rendering
+- **WHEN** the TUI is in `EditingDetailPanel` mode
+- **THEN** the detail panel SHALL render each editable field on its own line with a label, the focused field SHALL be visually highlighted, and the footer SHALL show editing hints
+
+### Requirement: Save-on-navigate confirmation
+When the user attempts to leave the detail editing context with unsaved changes, the TUI SHALL prompt the user to save, discard, or cancel. This applies when pressing `Esc` to exit editing or when navigating to a different task while the draft is dirty.
+
+#### Scenario: Dirty exit triggers confirmation
+- **WHEN** the user presses `Esc` in `EditingDetailPanel` mode and the draft differs from the original task
+- **THEN** the TUI SHALL enter `ConfirmingDetailSave` mode and display a footer prompt: "Unsaved changes. [s]ave  [d]iscard  [c]ancel"
+
+#### Scenario: Save and exit
+- **WHEN** the user presses `s` in `ConfirmingDetailSave` mode
+- **THEN** the draft SHALL be applied to the task, the `updated` timestamp SHALL be set, the file SHALL be saved to disk, and the TUI SHALL exit to Normal mode
+
+#### Scenario: Discard and exit
+- **WHEN** the user presses `d` in `ConfirmingDetailSave` mode
+- **THEN** the draft SHALL be discarded and the TUI SHALL exit to Normal mode with no changes persisted
+
+#### Scenario: Cancel confirmation
+- **WHEN** the user presses `c` or `Esc` in `ConfirmingDetailSave` mode
+- **THEN** the TUI SHALL return to `EditingDetailPanel` mode with the draft intact
+
+#### Scenario: Navigate away with dirty draft
+- **WHEN** the detail panel is open with a dirty draft and the user presses `j` or `k` in Normal mode to navigate to a different task
+- **THEN** the TUI SHALL enter `ConfirmingDetailSave` mode, storing the intended navigation direction. After save or discard, the navigation SHALL proceed. After cancel, the selection SHALL remain unchanged.
+
+#### Scenario: Invalid due date on save
+- **WHEN** the user saves and the due date field contains an invalid date string (not YYYY-MM-DD format and not empty)
+- **THEN** the TUI SHALL display a status message indicating the invalid date, focus the due date field, and remain in `EditingDetailPanel` mode
 
 ### Requirement: Shared storage layer
 The TUI SHALL use the existing `storage::load` and `storage::save` functions for all file I/O. The TUI SHALL NOT implement its own file reading or writing logic.
