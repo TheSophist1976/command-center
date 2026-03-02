@@ -36,6 +36,7 @@ fn run(cli: Cli) -> Result<(), (i32, String)> {
     let json = cli.json;
     let strict = cli.strict;
     let path = storage::resolve_file_path(cli.file.as_deref());
+    storage::backup_daily(&path);
 
     match cli.command {
         Command::Init => {

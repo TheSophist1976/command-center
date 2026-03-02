@@ -81,6 +81,49 @@ pub fn save(path: &Path, task_file: &TaskFile) -> Result<(), String> {
     Ok(())
 }
 
+pub fn backup_daily(task_file_path: &Path) {
+    if !task_file_path.exists() {
+        return;
+    }
+    let parent = match task_file_path.parent() {
+        Some(p) => p,
+        None => return,
+    };
+    let backup_dir = parent.join(".backups");
+    if fs::create_dir_all(&backup_dir).is_err() {
+        return;
+    }
+    let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+    let backup_name = format!("tasks-{}.md", today);
+    let backup_path = backup_dir.join(&backup_name);
+    if fs::copy(task_file_path, &backup_path).is_err() {
+        return;
+    }
+    // Prune: keep only the 7 most recent backups
+    let entries = match fs::read_dir(&backup_dir) {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+    let mut backups: Vec<String> = entries
+        .filter_map(|e| e.ok())
+        .filter_map(|e| {
+            let name = e.file_name().to_string_lossy().to_string();
+            if name.starts_with("tasks-") && name.ends_with(".md") {
+                Some(name)
+            } else {
+                None
+            }
+        })
+        .collect();
+    backups.sort();
+    if backups.len() > 7 {
+        let to_remove = backups.len() - 7;
+        for name in &backups[..to_remove] {
+            let _ = fs::remove_file(backup_dir.join(name));
+        }
+    }
+}
+
 pub fn init_file(path: &Path) -> Result<(), String> {
     if path.exists() {
         return Err(format!("{} already exists. Will not overwrite.", path.display()));
@@ -387,5 +430,72 @@ mod tests {
         // Should fail because we can't open the file for locking
         // (or can't create temp file due to permission error)
         assert!(result.is_err(), "Expected save to fail on unreadable file");
+    }
+
+    // -- backup_daily --
+
+    #[test]
+    fn test_backup_daily_creates_backup_file() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("tasks.md");
+        fs::write(&path, "task file content").unwrap();
+        backup_daily(&path);
+        let backup_dir = dir.path().join(".backups");
+        assert!(backup_dir.exists());
+        let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+        let backup_path = backup_dir.join(format!("tasks-{}.md", today));
+        assert!(backup_path.exists());
+        let content = fs::read_to_string(&backup_path).unwrap();
+        assert_eq!(content, "task file content");
+    }
+
+    #[test]
+    fn test_backup_daily_prunes_old_files() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("tasks.md");
+        fs::write(&path, "current").unwrap();
+        let backup_dir = dir.path().join(".backups");
+        fs::create_dir(&backup_dir).unwrap();
+        // Create 9 old backup files
+        for i in 1..=9 {
+            fs::write(backup_dir.join(format!("tasks-2025-01-{:02}.md", i)), "old").unwrap();
+        }
+        backup_daily(&path);
+        let entries: Vec<_> = fs::read_dir(&backup_dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().starts_with("tasks-"))
+            .collect();
+        assert_eq!(entries.len(), 7);
+        // The 3 oldest (01, 02, 03) should be gone
+        assert!(!backup_dir.join("tasks-2025-01-01.md").exists());
+        assert!(!backup_dir.join("tasks-2025-01-02.md").exists());
+        assert!(!backup_dir.join("tasks-2025-01-03.md").exists());
+        // The rest should remain
+        assert!(backup_dir.join("tasks-2025-01-04.md").exists());
+    }
+
+    #[test]
+    fn test_backup_daily_no_file_no_error() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("nonexistent.md");
+        backup_daily(&path); // should not panic
+        let backup_dir = dir.path().join(".backups");
+        assert!(!backup_dir.exists());
+    }
+
+    #[test]
+    fn test_backup_daily_overwrites_same_day() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("tasks.md");
+        fs::write(&path, "version 1").unwrap();
+        backup_daily(&path);
+        let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+        let backup_path = dir.path().join(".backups").join(format!("tasks-{}.md", today));
+        assert_eq!(fs::read_to_string(&backup_path).unwrap(), "version 1");
+        // Update and backup again
+        fs::write(&path, "version 2").unwrap();
+        backup_daily(&path);
+        assert_eq!(fs::read_to_string(&backup_path).unwrap(), "version 2");
     }
 }

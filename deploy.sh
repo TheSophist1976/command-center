@@ -122,7 +122,12 @@ fi
 # =========================================================
 header "5. Configuration"
 
-CONFIG_DIR="$HOME/.config/task-manager"
+# Resolve config dir to match the Rust app (dirs::config_dir())
+if [[ "$(uname)" == "Darwin" ]]; then
+    CONFIG_DIR="$HOME/Library/Application Support/task-manager"
+else
+    CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/task-manager"
+fi
 CONFIG_FILE="$CONFIG_DIR/config.md"
 
 current_dir=""
