@@ -66,6 +66,14 @@ impl View {
         if task.status == Status::Done && *self != View::All {
             return false;
         }
+        // Overdue open tasks appear in all time-based views
+        if task.status == Status::Open {
+            if let Some(d) = task.due_date {
+                if d < today && *self != View::NoDueDate {
+                    return true;
+                }
+            }
+        }
         match self {
             View::All => true,
             View::Today => match task.due_date {
@@ -1575,11 +1583,52 @@ mod tests {
     }
 
     #[test]
-    fn today_view_hides_overdue_task() {
+    fn today_view_shows_overdue_open_task() {
         let today = NaiveDate::from_ymd_opt(2026, 2, 26).unwrap();
         let yesterday = NaiveDate::from_ymd_opt(2026, 2, 25).unwrap();
         let task = make_task(Some(yesterday));
+        assert!(View::Today.matches(&task, today));
+    }
+
+    #[test]
+    fn today_view_hides_overdue_completed_task() {
+        let today = NaiveDate::from_ymd_opt(2026, 2, 26).unwrap();
+        let yesterday = NaiveDate::from_ymd_opt(2026, 2, 25).unwrap();
+        let mut task = make_task(Some(yesterday));
+        task.status = Status::Done;
         assert!(!View::Today.matches(&task, today));
+    }
+
+    #[test]
+    fn weekly_view_shows_overdue_open_task() {
+        let today = NaiveDate::from_ymd_opt(2026, 2, 26).unwrap();
+        let last_week = NaiveDate::from_ymd_opt(2026, 2, 15).unwrap();
+        let task = make_task(Some(last_week));
+        assert!(View::Weekly.matches(&task, today));
+    }
+
+    #[test]
+    fn monthly_view_shows_overdue_open_task() {
+        let today = NaiveDate::from_ymd_opt(2026, 2, 26).unwrap();
+        let last_month = NaiveDate::from_ymd_opt(2026, 1, 10).unwrap();
+        let task = make_task(Some(last_month));
+        assert!(View::Monthly.matches(&task, today));
+    }
+
+    #[test]
+    fn yearly_view_shows_overdue_open_task() {
+        let today = NaiveDate::from_ymd_opt(2026, 2, 26).unwrap();
+        let last_year = NaiveDate::from_ymd_opt(2025, 6, 15).unwrap();
+        let task = make_task(Some(last_year));
+        assert!(View::Yearly.matches(&task, today));
+    }
+
+    #[test]
+    fn no_due_date_view_hides_overdue_task() {
+        let today = NaiveDate::from_ymd_opt(2026, 2, 26).unwrap();
+        let yesterday = NaiveDate::from_ymd_opt(2026, 2, 25).unwrap();
+        let task = make_task(Some(yesterday));
+        assert!(!View::NoDueDate.matches(&task, today));
     }
 
     #[test]
