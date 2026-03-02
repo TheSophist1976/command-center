@@ -72,9 +72,11 @@ pub fn build_task_context(tasks: &[Task]) -> String {
 
 // -- Prompt construction --
 
-fn build_system_prompt(task_context: &str) -> String {
+fn build_system_prompt(task_context: &str, today: &str) -> String {
     format!(
         r#"You are a task manager assistant. The user will give you a natural language command about their tasks. You must respond with ONLY a valid JSON object (no markdown, no explanation).
+
+Today's date is {}.
 
 The user's current tasks:
 {}
@@ -105,8 +107,9 @@ Rules:
 - For questions, ambiguous input, or unsupported requests, use message
 - When the user asks to "show" or "list" specific tasks, prefer show_tasks over filter
 - The description field in update should say what will happen (e.g., "Set priority to high on 5 frontend tasks")
-- This is a multi-turn conversation. Use context from prior messages to understand follow-up queries (e.g., "mark those as high priority" refers to previously discussed tasks)"#,
-        task_context
+- This is a multi-turn conversation. Use context from prior messages to understand follow-up queries (e.g., "mark those as high priority" refers to previously discussed tasks)
+- Use the provided current date to interpret relative time references such as "today", "this week", "overdue", "tomorrow", etc."#,
+        today, task_context
     )
 }
 
@@ -271,7 +274,8 @@ fn log_debug(msg: &str) {
 /// The raw response text is returned so the caller can append it to the conversation history.
 pub fn interpret(tasks: &[Task], messages: &[ApiMessage], api_key: &str) -> Result<(NlpAction, String), String> {
     let task_context = build_task_context(tasks);
-    let system_prompt = build_system_prompt(&task_context);
+    let today = chrono::Local::now().format("%Y-%m-%d (%A)").to_string();
+    let system_prompt = build_system_prompt(&task_context, &today);
 
     log_debug(&format!("--- NLP Request ---"));
     log_debug(&format!("Messages: {} total", messages.len()));
@@ -430,5 +434,13 @@ mod tests {
             }
             _ => panic!("Expected ShowTasks"),
         }
+    }
+
+    #[test]
+    fn system_prompt_includes_today_date() {
+        let tasks = vec![make_task(1, "Test task")];
+        let ctx = build_task_context(&tasks);
+        let prompt = build_system_prompt(&ctx, "2026-03-02 (Monday)");
+        assert!(prompt.contains("Today's date is 2026-03-02 (Monday)."));
     }
 }
