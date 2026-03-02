@@ -888,30 +888,39 @@ fn handle_nlp_chat(app: &mut App, key: KeyCode) -> Result<(), String> {
                         role: "assistant".to_string(),
                         content: raw_response,
                     });
-                    let matching: Vec<usize> = app.task_file.tasks.iter().enumerate()
-                        .filter(|(_, t)| {
-                            if let Some(ref s) = match_criteria.status {
-                                if !t.status.to_string().eq_ignore_ascii_case(s) { return false; }
-                            }
-                            if let Some(ref p) = match_criteria.priority {
-                                if !t.priority.to_string().eq_ignore_ascii_case(p) { return false; }
-                            }
-                            if let Some(ref tag) = match_criteria.tag {
-                                if !t.tags.iter().any(|tg| tg.eq_ignore_ascii_case(tag)) { return false; }
-                            }
-                            if let Some(ref proj) = match_criteria.project {
-                                match &t.project {
-                                    Some(p) => if !p.eq_ignore_ascii_case(proj) { return false; },
-                                    None => return false,
+                    let has_any_criteria = match_criteria.status.is_some()
+                        || match_criteria.priority.is_some()
+                        || match_criteria.tag.is_some()
+                        || match_criteria.project.is_some()
+                        || match_criteria.title_contains.is_some();
+                    let matching: Vec<usize> = if !has_any_criteria {
+                        vec![] // empty criteria matches nothing — prevents accidental bulk updates
+                    } else {
+                        app.task_file.tasks.iter().enumerate()
+                            .filter(|(_, t)| {
+                                if let Some(ref s) = match_criteria.status {
+                                    if !t.status.to_string().eq_ignore_ascii_case(s) { return false; }
                                 }
-                            }
-                            if let Some(ref tc) = match_criteria.title_contains {
-                                if !t.title.to_lowercase().contains(&tc.to_lowercase()) { return false; }
-                            }
-                            true
-                        })
-                        .map(|(i, _)| i)
-                        .collect();
+                                if let Some(ref p) = match_criteria.priority {
+                                    if !t.priority.to_string().eq_ignore_ascii_case(p) { return false; }
+                                }
+                                if let Some(ref tag) = match_criteria.tag {
+                                    if !t.tags.iter().any(|tg| tg.eq_ignore_ascii_case(tag)) { return false; }
+                                }
+                                if let Some(ref proj) = match_criteria.project {
+                                    match &t.project {
+                                        Some(p) => if !p.eq_ignore_ascii_case(proj) { return false; },
+                                        None => return false,
+                                    }
+                                }
+                                if let Some(ref tc) = match_criteria.title_contains {
+                                    if !t.title.to_lowercase().contains(&tc.to_lowercase()) { return false; }
+                                }
+                                true
+                            })
+                            .map(|(i, _)| i)
+                            .collect()
+                    };
 
                     if matching.is_empty() {
                         app.chat_history.push(ChatMessage::Assistant("No tasks match the criteria.".to_string()));
