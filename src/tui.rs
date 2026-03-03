@@ -838,6 +838,76 @@ fn handle_priority(app: &mut App, key: KeyCode) -> Result<(), String> {
     Ok(())
 }
 
+fn format_action_summary(action: &NlpAction) -> Option<String> {
+    match action {
+        NlpAction::Filter(criteria) => {
+            let mut parts = Vec::new();
+            if let Some(ref s) = criteria.status { parts.push(format!("status={}", s)); }
+            if let Some(ref p) = criteria.priority { parts.push(format!("priority={}", p)); }
+            if let Some(ref t) = criteria.tag { parts.push(format!("tag={}", t)); }
+            if let Some(ref p) = criteria.project { parts.push(format!("project={}", p)); }
+            if let Some(ref tc) = criteria.title_contains { parts.push(format!("title~{}", tc)); }
+            if parts.is_empty() {
+                Some("Filtering: (all tasks)".to_string())
+            } else {
+                Some(format!("Filtering: {}", parts.join(", ")))
+            }
+        }
+        NlpAction::Update { match_criteria, set_fields, .. } => {
+            let mut match_parts = Vec::new();
+            if let Some(ref s) = match_criteria.status { match_parts.push(format!("status={}", s)); }
+            if let Some(ref p) = match_criteria.priority { match_parts.push(format!("priority={}", p)); }
+            if let Some(ref t) = match_criteria.tag { match_parts.push(format!("tag={}", t)); }
+            if let Some(ref p) = match_criteria.project { match_parts.push(format!("project={}", p)); }
+            if let Some(ref tc) = match_criteria.title_contains { match_parts.push(format!("title~{}", tc)); }
+            let mut set_parts = Vec::new();
+            if let Some(ref p) = set_fields.priority { set_parts.push(format!("priority={}", p)); }
+            if let Some(ref s) = set_fields.status { set_parts.push(format!("status={}", s)); }
+            if let Some(ref t) = set_fields.tags { set_parts.push(format!("tags=[{}]", t.join(", "))); }
+            let match_str = if match_parts.is_empty() { "(all)".to_string() } else { match_parts.join(", ") };
+            let set_str = if set_parts.is_empty() { "(none)".to_string() } else { set_parts.join(", ") };
+            Some(format!("Updating: match {{{}}} → set {{{}}}", match_str, set_str))
+        }
+        NlpAction::Message(_) | NlpAction::ShowTasks { .. } => None,
+    }
+}
+
+fn format_update_preview(tasks: &[Task], indices: &[usize], set_fields: &nlp::SetFields) -> Vec<String> {
+    let mut lines = Vec::new();
+    let show_count = indices.len().min(10);
+    for &i in &indices[..show_count] {
+        let task = &tasks[i];
+        let mut changes = Vec::new();
+        if let Some(ref new_priority) = set_fields.priority {
+            let old = task.priority.to_string();
+            if !old.eq_ignore_ascii_case(new_priority) {
+                changes.push(format!("priority {} → {}", old, new_priority));
+            }
+        }
+        if let Some(ref new_status) = set_fields.status {
+            let old = task.status.to_string();
+            if !old.eq_ignore_ascii_case(new_status) {
+                changes.push(format!("status {} → {}", old, new_status));
+            }
+        }
+        if let Some(ref new_tags) = set_fields.tags {
+            let old = task.tags.join(", ");
+            let new = new_tags.join(", ");
+            if old != new {
+                changes.push(format!("tags [{}] → [{}]", old, new));
+            }
+        }
+        if changes.is_empty() {
+            continue; // no actual changes for this task
+        }
+        lines.push(format!("  #{} \"{}\": {}", task.id, task.title, changes.join(", ")));
+    }
+    if indices.len() > 10 {
+        lines.push(format!("  ... and {} more tasks", indices.len() - 10));
+    }
+    lines
+}
+
 fn handle_nlp_chat<B: Backend>(terminal: &mut Terminal<B>, app: &mut App, key: KeyCode) -> Result<(), String> {
     match key {
         KeyCode::Esc => {
@@ -882,11 +952,14 @@ fn handle_nlp_chat<B: Backend>(terminal: &mut Terminal<B>, app: &mut App, key: K
                 .map_err(|e| format!("Draw error: {}", e))?;
 
             match nlp::interpret(&app.task_file.tasks, &app.nlp_messages, &api_key) {
-                Ok((NlpAction::Filter(criteria), raw_response)) => {
+                Ok((ref action @ NlpAction::Filter(ref criteria), raw_response)) => {
                     app.nlp_messages.push(ApiMessage {
                         role: "assistant".to_string(),
                         content: raw_response,
                     });
+                    if let Some(summary) = format_action_summary(action) {
+                        app.chat_history.push(ChatMessage::Assistant(summary));
+                    }
                     let mut filter = Filter::default();
                     if let Some(ref s) = criteria.status {
                         if let Ok(status) = s.parse::<Status>() {
@@ -914,11 +987,14 @@ fn handle_nlp_chat<B: Backend>(terminal: &mut Terminal<B>, app: &mut App, key: K
                     app.clamp_selection();
                     app.chat_history.push(ChatMessage::Assistant("Filter applied.".to_string()));
                 }
-                Ok((ref action @ NlpAction::Update { ref match_criteria, .. }, raw_response)) => {
+                Ok((ref action @ NlpAction::Update { ref match_criteria, ref set_fields, .. }, raw_response)) => {
                     app.nlp_messages.push(ApiMessage {
                         role: "assistant".to_string(),
                         content: raw_response,
                     });
+                    if let Some(summary) = format_action_summary(action) {
+                        app.chat_history.push(ChatMessage::Assistant(summary));
+                    }
                     let has_any_criteria = match_criteria.status.is_some()
                         || match_criteria.priority.is_some()
                         || match_criteria.tag.is_some()
@@ -956,6 +1032,12 @@ fn handle_nlp_chat<B: Backend>(terminal: &mut Terminal<B>, app: &mut App, key: K
                     if matching.is_empty() {
                         app.chat_history.push(ChatMessage::Assistant("No tasks match the criteria.".to_string()));
                     } else {
+                        let preview_lines = format_update_preview(&app.task_file.tasks, &matching, set_fields);
+                        if !preview_lines.is_empty() {
+                            app.chat_history.push(ChatMessage::Assistant(
+                                format!("Changes:\n{}", preview_lines.join("\n"))
+                            ));
+                        }
                         app.pending_nlp_update = Some((action.clone(), matching));
                         app.mode = Mode::ConfirmingNlp;
                     }
