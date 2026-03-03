@@ -1077,6 +1077,7 @@ fn handle_nlp_chat<B: Backend>(terminal: &mut Terminal<B>, app: &mut App, key: K
             }
 
             // Redraw so the user's message appears before the blocking API call
+            app.status_message = Some("Thinking...".to_string());
             terminal
                 .draw(|frame| draw(frame, app))
                 .map_err(|e| format!("Draw error: {}", e))?;

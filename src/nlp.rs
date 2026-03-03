@@ -52,6 +52,8 @@ struct TaskSummary {
     due_date: Option<String>,
     project: Option<String>,
     recurrence: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    description: Option<String>,
 }
 
 pub fn build_task_context(tasks: &[Task]) -> String {
@@ -67,6 +69,7 @@ pub fn build_task_context(tasks: &[Task]) -> String {
             due_date: t.due_date.map(|d| d.format("%Y-%m-%d").to_string()),
             project: t.project.clone(),
             recurrence: t.recurrence.map(|r| r.to_string()),
+            description: t.description.clone(),
         })
         .collect();
 
@@ -100,7 +103,7 @@ Fill in "match" with criteria to find tasks, and "set" with fields to change. On
 
 3. To respond with a message (for questions, unclear queries, or unsupported actions):
 {{"action":"message","text":"Your response text here"}}
-Use this when the query is ambiguous, conversational, asks a question about the tasks, or requests something you cannot do via filter/update. You can answer questions about the user's tasks using the task data above — including counts, summaries, and queries across all fields (id, title, status, priority, tags, due_date, project).
+Use this when the query is ambiguous, conversational, asks a question about the tasks, or requests something you cannot do via filter/update. You can answer questions about the user's tasks using the task data above — including counts, summaries, and queries across all fields (id, title, status, priority, tags, due_date, project, description).
 
 4. To show specific tasks inline in the conversation:
 {{"action":"show_tasks","task_ids":[1,3,7],"text":"Here are your high-priority tasks:"}}
@@ -119,7 +122,8 @@ Rules:
 - When the user asks to "show" or "list" specific tasks, prefer show_tasks over filter
 - The description field in update should say what will happen (e.g., "Set priority to high on 5 frontend tasks")
 - This is a multi-turn conversation. Use context from prior messages to understand follow-up queries (e.g., "mark those as high priority" refers to previously discussed tasks)
-- Use the provided current date to interpret relative time references such as "today", "this week", "overdue", "tomorrow", etc."#,
+- Use the provided current date to interpret relative time references such as "today", "this week", "overdue", "tomorrow", etc.
+- You have access to a `fetch_url` tool that can read web pages. Use it when the user mentions a URL, asks to summarize a link, or needs information from a web page referenced in a task. After fetching, incorporate the content into your response using the message action."#,
         today, task_context
     )
 }
@@ -131,23 +135,57 @@ struct ApiRequest {
     model: String,
     max_tokens: u32,
     system: String,
-    messages: Vec<ApiMessage>,
+    messages: Vec<ApiMessageRaw>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tools: Option<Vec<ToolDef>>,
 }
 
+/// Public message type used by the TUI for conversation history.
+/// Content is always a plain string (user text or assistant JSON response).
 #[derive(Serialize, Clone, Debug)]
 pub struct ApiMessage {
     pub role: String,
     pub content: String,
 }
 
-#[derive(Deserialize)]
-struct ApiResponse {
-    content: Vec<ContentBlock>,
+/// Internal message type for the API that supports structured content blocks.
+#[derive(Serialize, Clone, Debug)]
+struct ApiMessageRaw {
+    role: String,
+    content: serde_json::Value,
 }
 
-#[derive(Deserialize)]
+impl From<&ApiMessage> for ApiMessageRaw {
+    fn from(msg: &ApiMessage) -> Self {
+        ApiMessageRaw {
+            role: msg.role.clone(),
+            content: serde_json::Value::String(msg.content.clone()),
+        }
+    }
+}
+
+#[derive(Serialize, Clone, Debug)]
+struct ToolDef {
+    name: String,
+    description: String,
+    input_schema: serde_json::Value,
+}
+
+#[derive(Deserialize, Debug)]
+struct ApiResponse {
+    content: Vec<ContentBlock>,
+    #[allow(dead_code)]
+    stop_reason: Option<String>,
+}
+
+#[derive(Deserialize, Debug, Clone)]
 struct ContentBlock {
+    #[serde(rename = "type")]
+    block_type: Option<String>,
     text: Option<String>,
+    id: Option<String>,
+    name: Option<String>,
+    input: Option<serde_json::Value>,
 }
 
 #[derive(Deserialize)]
@@ -165,48 +203,227 @@ fn api_base_url() -> String {
         .unwrap_or_else(|_| "https://api.anthropic.com".to_string())
 }
 
+fn fetch_url_tool_def() -> ToolDef {
+    ToolDef {
+        name: "fetch_url".to_string(),
+        description: "Fetch a web page and return its text content. Use when the user asks about a URL or wants content summarized.".to_string(),
+        input_schema: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "url": {
+                    "type": "string",
+                    "description": "The URL to fetch"
+                }
+            },
+            "required": ["url"]
+        }),
+    }
+}
+
+/// Fetch a URL and extract readable text from the HTML.
+/// Strips script/style tags, then removes remaining HTML tags.
+/// Truncates to 4000 characters.
+pub fn fetch_url(url: &str) -> Result<String, String> {
+    let client = reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .user_agent("task-manager/0.1 (URL summarizer)")
+        .build()
+        .map_err(|e| format!("Failed to create HTTP client: {}", e))?;
+
+    let response = client
+        .get(url)
+        .send()
+        .map_err(|e| {
+            if e.is_timeout() {
+                "Request timed out after 10 seconds".to_string()
+            } else {
+                format!("Failed to fetch URL: {}", e)
+            }
+        })?;
+
+    if !response.status().is_success() {
+        return Err(format!("HTTP error: {}", response.status()));
+    }
+
+    let body = response
+        .text()
+        .map_err(|e| format!("Failed to read response body: {}", e))?;
+
+    Ok(html_to_text(&body))
+}
+
+/// Extract readable text from HTML by stripping tags.
+fn html_to_text(html: &str) -> String {
+    // Remove script and style blocks
+    let mut result = html.to_string();
+    for tag in &["script", "style", "noscript"] {
+        loop {
+            let open = format!("<{}", tag);
+            let close = format!("</{}>", tag);
+            if let Some(start) = result.to_lowercase().find(&open) {
+                if let Some(end) = result.to_lowercase()[start..].find(&close) {
+                    result = format!("{}{}", &result[..start], &result[start + end + close.len()..]);
+                } else {
+                    break;
+                }
+            } else {
+                break;
+            }
+        }
+    }
+
+    // Remove all HTML tags
+    let mut text = String::with_capacity(result.len());
+    let mut in_tag = false;
+    for ch in result.chars() {
+        match ch {
+            '<' => in_tag = true,
+            '>' => in_tag = false,
+            _ if !in_tag => text.push(ch),
+            _ => {}
+        }
+    }
+
+    // Collapse whitespace and trim
+    let text: String = text
+        .lines()
+        .map(|line| line.split_whitespace().collect::<Vec<_>>().join(" "))
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    // Truncate to 4000 characters
+    if text.len() > 4000 {
+        format!("{}...\n\n[Content truncated at 4000 characters]", &text[..4000])
+    } else {
+        text
+    }
+}
+
+/// Execute a tool_use request from the model.
+fn execute_tool(name: &str, input: &serde_json::Value) -> String {
+    match name {
+        "fetch_url" => {
+            let url = input.get("url").and_then(|v| v.as_str()).unwrap_or("");
+            if url.is_empty() {
+                return "Error: No URL provided".to_string();
+            }
+            match fetch_url(url) {
+                Ok(text) => text,
+                Err(e) => format!("Error fetching URL: {}", e),
+            }
+        }
+        other => format!("Unknown tool: {}", other),
+    }
+}
+
 pub fn call_claude_api(api_key: &str, system_prompt: &str, messages: &[ApiMessage]) -> Result<String, String> {
     let client = reqwest::blocking::Client::new();
     let base = api_base_url();
 
-    let request = ApiRequest {
-        model: "claude-haiku-4-5-20251001".to_string(),
-        max_tokens: 1024,
-        system: system_prompt.to_string(),
-        messages: messages.to_vec(),
-    };
+    let mut conversation: Vec<ApiMessageRaw> = messages.iter().map(ApiMessageRaw::from).collect();
+    let tools = vec![fetch_url_tool_def()];
 
-    let response = client
-        .post(format!("{}/v1/messages", base))
-        .header("x-api-key", api_key)
-        .header("anthropic-version", "2023-06-01")
-        .header("content-type", "application/json")
-        .json(&request)
-        .send()
-        .map_err(|e| format!("Claude API request failed: {}", e))?;
+    for _iteration in 0..3 {
+        let request = ApiRequest {
+            model: "claude-haiku-4-5-20251001".to_string(),
+            max_tokens: 4096,
+            system: system_prompt.to_string(),
+            messages: conversation.clone(),
+            tools: Some(tools.clone()),
+        };
 
-    if !response.status().is_success() {
-        let status = response.status();
-        let body = response.text().unwrap_or_default();
-        if let Ok(err) = serde_json::from_str::<ApiError>(&body) {
-            if let Some(detail) = err.error {
-                if let Some(msg) = detail.message {
-                    return Err(format!("Claude API error ({}): {}", status, msg));
+        let response = client
+            .post(format!("{}/v1/messages", base))
+            .header("x-api-key", api_key)
+            .header("anthropic-version", "2023-06-01")
+            .header("content-type", "application/json")
+            .json(&request)
+            .send()
+            .map_err(|e| format!("Claude API request failed: {}", e))?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().unwrap_or_default();
+            if let Ok(err) = serde_json::from_str::<ApiError>(&body) {
+                if let Some(detail) = err.error {
+                    if let Some(msg) = detail.message {
+                        return Err(format!("Claude API error ({}): {}", status, msg));
+                    }
                 }
             }
+            return Err(format!("Claude API error: {}", status));
         }
-        return Err(format!("Claude API error: {}", status));
+
+        let api_response: ApiResponse = response
+            .json()
+            .map_err(|e| format!("Failed to parse Claude API response: {}", e))?;
+
+        // Check if the model wants to use tools
+        let tool_uses: Vec<&ContentBlock> = api_response
+            .content
+            .iter()
+            .filter(|b| b.block_type.as_deref() == Some("tool_use"))
+            .collect();
+
+        if tool_uses.is_empty() {
+            // No tool use — return the text response
+            return api_response
+                .content
+                .into_iter()
+                .find_map(|block| block.text)
+                .ok_or_else(|| "Claude returned empty response".to_string());
+        }
+
+        // Build the assistant message with all content blocks
+        let assistant_content: Vec<serde_json::Value> = api_response
+            .content
+            .iter()
+            .map(|block| {
+                if block.block_type.as_deref() == Some("tool_use") {
+                    serde_json::json!({
+                        "type": "tool_use",
+                        "id": block.id,
+                        "name": block.name,
+                        "input": block.input
+                    })
+                } else {
+                    serde_json::json!({
+                        "type": "text",
+                        "text": block.text.as_deref().unwrap_or("")
+                    })
+                }
+            })
+            .collect();
+
+        conversation.push(ApiMessageRaw {
+            role: "assistant".to_string(),
+            content: serde_json::Value::Array(assistant_content),
+        });
+
+        // Execute each tool and build tool_result blocks
+        let tool_results: Vec<serde_json::Value> = tool_uses
+            .iter()
+            .map(|block| {
+                let name = block.name.as_deref().unwrap_or("");
+                let input = block.input.as_ref().cloned().unwrap_or(serde_json::json!({}));
+                let result = execute_tool(name, &input);
+                log_debug(&format!("Tool {} result: {} chars", name, result.len()));
+                serde_json::json!({
+                    "type": "tool_result",
+                    "tool_use_id": block.id,
+                    "content": result
+                })
+            })
+            .collect();
+
+        conversation.push(ApiMessageRaw {
+            role: "user".to_string(),
+            content: serde_json::Value::Array(tool_results),
+        });
     }
 
-    let api_response: ApiResponse = response
-        .json()
-        .map_err(|e| format!("Failed to parse Claude API response: {}", e))?;
-
-    api_response
-        .content
-        .into_iter()
-        .find_map(|block| block.text)
-        .ok_or_else(|| "Claude returned empty response".to_string())
+    Err("Tool-use loop exceeded maximum iterations".to_string())
 }
 
 // -- Response parsing --
@@ -237,8 +454,15 @@ pub fn parse_response(json_str: &str) -> Result<NlpAction, String> {
         .unwrap_or(cleaned)
         .trim();
 
-    let raw: RawAction = serde_json::from_str(cleaned)
-        .map_err(|e| format!("Could not understand the response: {}", e))?;
+    let raw: RawAction = match serde_json::from_str(cleaned) {
+        Ok(r) => r,
+        Err(_) => {
+            // If the response isn't valid JSON, treat it as a plain text message.
+            // This happens when the model responds naturally after tool use
+            // instead of wrapping its answer in the JSON action format.
+            return Ok(NlpAction::Message(cleaned.to_string()));
+        }
+    };
 
     match raw.action.as_str() {
         "filter" => {
@@ -448,10 +672,12 @@ mod tests {
     }
 
     #[test]
-    fn parse_response_invalid_json() {
-        let result = parse_response("not json at all");
-        assert!(result.is_err());
-        assert!(result.unwrap_err().contains("Could not understand"));
+    fn parse_response_plain_text_becomes_message() {
+        let result = parse_response("not json at all").unwrap();
+        match result {
+            NlpAction::Message(text) => assert_eq!(text, "not json at all"),
+            _ => panic!("Expected Message for plain text response"),
+        }
     }
 
     #[test]
@@ -516,5 +742,68 @@ mod tests {
         let ctx = build_task_context(&tasks);
         let prompt = build_system_prompt(&ctx, "2026-03-02 (Monday)");
         assert!(prompt.contains("Today's date is 2026-03-02 (Monday)."));
+    }
+
+    #[test]
+    fn system_prompt_mentions_fetch_url() {
+        let tasks = vec![make_task(1, "Test task")];
+        let ctx = build_task_context(&tasks);
+        let prompt = build_system_prompt(&ctx, "2026-03-02 (Monday)");
+        assert!(prompt.contains("fetch_url"));
+    }
+
+    #[test]
+    fn html_to_text_strips_tags() {
+        let html = "<html><body><h1>Title</h1><p>Hello world</p></body></html>";
+        let text = html_to_text(html);
+        assert!(text.contains("Title"));
+        assert!(text.contains("Hello world"));
+        assert!(!text.contains("<h1>"));
+        assert!(!text.contains("<p>"));
+    }
+
+    #[test]
+    fn html_to_text_strips_script_and_style() {
+        let html = "<html><head><style>body { color: red; }</style></head><body><script>alert('hi');</script><p>Content</p></body></html>";
+        let text = html_to_text(html);
+        assert!(text.contains("Content"));
+        assert!(!text.contains("alert"));
+        assert!(!text.contains("color: red"));
+    }
+
+    #[test]
+    fn html_to_text_truncates_long_content() {
+        let html = format!("<p>{}</p>", "a".repeat(5000));
+        let text = html_to_text(&html);
+        assert!(text.len() < 5000);
+        assert!(text.contains("[Content truncated at 4000 characters]"));
+    }
+
+    #[test]
+    fn html_to_text_short_content_not_truncated() {
+        let html = "<p>Short content</p>";
+        let text = html_to_text(html);
+        assert_eq!(text, "Short content");
+        assert!(!text.contains("truncated"));
+    }
+
+    #[test]
+    fn execute_tool_fetch_url_empty_url() {
+        let result = execute_tool("fetch_url", &serde_json::json!({}));
+        assert!(result.contains("No URL provided"));
+    }
+
+    #[test]
+    fn execute_tool_unknown_tool() {
+        let result = execute_tool("unknown_tool", &serde_json::json!({}));
+        assert!(result.contains("Unknown tool"));
+    }
+
+    #[test]
+    fn fetch_url_tool_def_has_correct_name() {
+        let def = fetch_url_tool_def();
+        assert_eq!(def.name, "fetch_url");
+        assert!(def.description.contains("web page"));
+        assert!(def.input_schema["properties"]["url"].is_object());
     }
 }
