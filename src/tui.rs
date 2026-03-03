@@ -699,7 +699,7 @@ fn handle_normal(app: &mut App, key: KeyCode) -> Result<bool, String> {
         KeyCode::Tab => {
             app.show_detail_panel = !app.show_detail_panel;
         }
-        KeyCode::Char('T') | KeyCode::Char('Y') | KeyCode::Char('W') | KeyCode::Char('M') | KeyCode::Char('Q') | KeyCode::Char('X') => {
+        KeyCode::Char('T') | KeyCode::Char('N') | KeyCode::Char('W') | KeyCode::Char('M') | KeyCode::Char('Q') | KeyCode::Char('Y') | KeyCode::Char('X') => {
             if let Some(&task_idx) = filtered.get(app.selected) {
                 let task = &mut app.task_file.tasks[task_idx];
                 let today = Local::now().date_naive();
@@ -711,10 +711,11 @@ fn handle_normal(app: &mut App, key: KeyCode) -> Result<bool, String> {
                 } else {
                     let date = match key {
                         KeyCode::Char('T') => Some(today),
-                        KeyCode::Char('Y') => today.checked_add_days(Days::new(1)),
+                        KeyCode::Char('N') => today.checked_add_days(Days::new(1)),
                         KeyCode::Char('W') => today.checked_add_days(Days::new(7)),
                         KeyCode::Char('M') => today.checked_add_months(Months::new(1)),
                         KeyCode::Char('Q') => today.checked_add_months(Months::new(3)),
+                        KeyCode::Char('Y') => today.checked_add_months(Months::new(12)),
                         _ => unreachable!(),
                     };
                     if let Some(d) = date {
@@ -1835,7 +1836,7 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
             } else if app.show_detail_panel {
                 " j/k:nav  Enter:edit  Space:toggle  a:add  d:delete  f:filter  p:priority  e:edit-title  t:tags  r:desc  R:recur  v:view  Tab:details  q:quit ".to_string()
             } else {
-                " j/k:nav  Enter:toggle  a:add  d:delete  f:filter  p:priority  e:edit  t:tags  r:desc  R:recur  v:view  i:import  ::command  D:set-dir  T/Y/W/M/Q:due  X:clr-due  Tab:details  q:quit ".to_string()
+                " j/k:nav  Enter:toggle  a:add  d:delete  f:filter  p:priority  e:edit  t:tags  r:desc  R:recur  v:view  i:import  ::command  D:set-dir  T/N/W/M/Q/Y:due  X:clr-due  Tab:details  q:quit ".to_string()
             }
         }
         Mode::Adding => {
@@ -2302,10 +2303,19 @@ mod tests {
     }
 
     #[test]
-    fn shift_y_sets_due_date_to_tomorrow() {
+    fn shift_n_sets_due_date_to_tomorrow() {
+        let mut app = make_app_with_tmpfile(vec![make_task(None)]);
+        let _ = handle_normal(&mut app, KeyCode::Char('N'));
+        let expected = Local::now().date_naive().checked_add_days(Days::new(1)).unwrap();
+        assert_eq!(app.task_file.tasks[0].due_date, Some(expected));
+        assert!(app.status_message.as_ref().unwrap().starts_with("Due: "));
+    }
+
+    #[test]
+    fn shift_y_sets_due_date_to_next_year() {
         let mut app = make_app_with_tmpfile(vec![make_task(None)]);
         let _ = handle_normal(&mut app, KeyCode::Char('Y'));
-        let expected = Local::now().date_naive().checked_add_days(Days::new(1)).unwrap();
+        let expected = Local::now().date_naive().checked_add_months(Months::new(12)).unwrap();
         assert_eq!(app.task_file.tasks[0].due_date, Some(expected));
         assert!(app.status_message.as_ref().unwrap().starts_with("Due: "));
     }
