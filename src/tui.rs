@@ -403,7 +403,7 @@ fn event_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut A
                 if key.kind != KeyEventKind::Press {
                     continue;
                 }
-                if handle_key(app, key.code)? {
+                if handle_key(terminal, app, key.code)? {
                     return Ok(());
                 }
             }
@@ -412,7 +412,7 @@ fn event_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut A
 }
 
 /// Returns true if we should quit.
-fn handle_key(app: &mut App, key: KeyCode) -> Result<bool, String> {
+fn handle_key(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App, key: KeyCode) -> Result<bool, String> {
     match app.mode {
         Mode::Normal => handle_normal(app, key),
         Mode::Adding => {
@@ -448,7 +448,7 @@ fn handle_key(app: &mut App, key: KeyCode) -> Result<bool, String> {
             Ok(false)
         }
         Mode::NlpChat => {
-            handle_nlp_chat(app, key)?;
+            handle_nlp_chat(terminal, app, key)?;
             Ok(false)
         }
         Mode::ConfirmingNlp => {
@@ -812,7 +812,7 @@ fn handle_priority(app: &mut App, key: KeyCode) -> Result<(), String> {
     Ok(())
 }
 
-fn handle_nlp_chat(app: &mut App, key: KeyCode) -> Result<(), String> {
+fn handle_nlp_chat<B: Backend>(terminal: &mut Terminal<B>, app: &mut App, key: KeyCode) -> Result<(), String> {
     match key {
         KeyCode::Esc => {
             app.mode = Mode::Normal;
@@ -849,6 +849,11 @@ fn handle_nlp_chat(app: &mut App, key: KeyCode) -> Result<(), String> {
             while app.nlp_messages.len() > 20 {
                 app.nlp_messages.remove(0);
             }
+
+            // Redraw so the user's message appears before the blocking API call
+            terminal
+                .draw(|frame| draw(frame, app))
+                .map_err(|e| format!("Draw error: {}", e))?;
 
             match nlp::interpret(&app.task_file.tasks, &app.nlp_messages, &api_key) {
                 Ok((NlpAction::Filter(criteria), raw_response)) => {
@@ -1868,7 +1873,9 @@ mod tests {
         app.input_buffer = "some query".to_string();
         app.chat_history.push(ChatMessage::User("test".to_string()));
         app.nlp_messages.push(ApiMessage { role: "user".to_string(), content: "test".to_string() });
-        let _ = handle_nlp_chat(&mut app, KeyCode::Esc);
+        let backend = ratatui::backend::TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let _ = handle_nlp_chat(&mut terminal, &mut app, KeyCode::Esc);
         assert_eq!(app.mode, Mode::Normal);
         assert!(app.input_buffer.is_empty());
         assert!(app.chat_history.is_empty());
