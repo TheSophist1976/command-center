@@ -166,6 +166,7 @@ mod tests {
             description: None,
             due_date: None,
             project: None,
+            recurrence: None,
         }
     }
 

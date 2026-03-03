@@ -44,6 +44,10 @@ pub enum Command {
         /// Project name
         #[arg(long)]
         project: Option<String>,
+
+        /// Recurrence pattern: daily, weekly, monthly, yearly, or monthly:N:DAY (e.g., monthly:3:thu)
+        #[arg(long)]
+        recur: Option<String>,
     },
 
     /// List tasks with optional filters
@@ -95,6 +99,10 @@ pub enum Command {
         /// New project name
         #[arg(long)]
         project: Option<String>,
+
+        /// Recurrence pattern: daily, weekly, monthly, yearly, monthly:N:DAY, or "none" to clear
+        #[arg(long)]
+        recur: Option<String>,
     },
 
     /// Mark a task as done

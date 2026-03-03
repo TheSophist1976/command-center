@@ -17,6 +17,11 @@ pub enum NlpAction {
         task_ids: Vec<u32>,
         text: String,
     },
+    SetRecurrence {
+        task_id: u32,
+        recurrence: Option<String>,
+        description: String,
+    },
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]
@@ -46,6 +51,7 @@ struct TaskSummary {
     tags: Vec<String>,
     due_date: Option<String>,
     project: Option<String>,
+    recurrence: Option<String>,
 }
 
 pub fn build_task_context(tasks: &[Task]) -> String {
@@ -60,6 +66,7 @@ pub fn build_task_context(tasks: &[Task]) -> String {
             tags: t.tags.clone(),
             due_date: t.due_date.map(|d| d.format("%Y-%m-%d").to_string()),
             project: t.project.clone(),
+            recurrence: t.recurrence.map(|r| r.to_string()),
         })
         .collect();
 
@@ -98,6 +105,10 @@ Use this when the query is ambiguous, conversational, asks a question about the 
 4. To show specific tasks inline in the conversation:
 {{"action":"show_tasks","task_ids":[1,3,7],"text":"Here are your high-priority tasks:"}}
 Use this when the user wants to see a specific group of tasks displayed. The task_ids array contains the IDs of tasks to display. Use this instead of filter when the user wants to see tasks as part of the conversation without changing the main table view.
+
+5. To set or remove recurrence on a task:
+{{"action":"set_recurrence","task_id":5,"recurrence":"weekly","description":"Set task 5 to repeat weekly"}}
+Valid recurrence values: "daily", "weekly", "monthly", "yearly", "monthly:N:DAY" (e.g., "monthly:3:thu" for 3rd Thursday). Set "recurrence" to null to remove recurrence. The task_id must reference an existing task.
 
 Rules:
 - Respond with ONLY the JSON object, nothing else
@@ -210,6 +221,8 @@ struct RawAction {
     description: Option<String>,
     text: Option<String>,
     task_ids: Option<Vec<u32>>,
+    task_id: Option<u32>,
+    recurrence: Option<serde_json::Value>,
 }
 
 pub fn parse_response(json_str: &str) -> Result<NlpAction, String> {
@@ -250,6 +263,16 @@ pub fn parse_response(json_str: &str) -> Result<NlpAction, String> {
             let task_ids = raw.task_ids.unwrap_or_default();
             let text = raw.text.unwrap_or_else(|| "Here are the matching tasks:".to_string());
             Ok(NlpAction::ShowTasks { task_ids, text })
+        }
+        "set_recurrence" => {
+            let task_id = raw.task_id.ok_or("set_recurrence requires task_id")?;
+            let recurrence = match raw.recurrence {
+                Some(serde_json::Value::String(s)) => Some(s),
+                Some(serde_json::Value::Null) | None => None,
+                _ => None,
+            };
+            let description = raw.description.unwrap_or_else(|| "Set recurrence".to_string());
+            Ok(NlpAction::SetRecurrence { task_id, recurrence, description })
         }
         other => Err(format!("Unknown action type: {}", other)),
     }
@@ -294,6 +317,56 @@ pub fn interpret(tasks: &[Task], messages: &[ApiMessage], api_key: &str) -> Resu
     Ok((action, response_text))
 }
 
+/// Parse a natural language recurrence pattern into the internal format.
+/// Uses a focused NLP prompt that only parses recurrence, not general commands.
+/// Returns the recurrence string (e.g., "weekly", "monthly:3:thu") or None for "none"/"remove".
+pub fn parse_recurrence_nlp(input: &str, api_key: &str) -> Result<Option<String>, String> {
+    let system_prompt = r#"You are a recurrence pattern parser. The user will describe how often a task should repeat. Respond with ONLY a valid JSON object (no markdown, no explanation).
+
+Respond with exactly one of:
+{"recurrence":"daily"} - repeats every day
+{"recurrence":"weekly"} - repeats every week
+{"recurrence":"monthly"} - repeats every month
+{"recurrence":"yearly"} - repeats every year
+{"recurrence":"monthly:N:DAY"} - repeats on the Nth weekday of each month (e.g., "monthly:3:thu" for 3rd Thursday). DAY is mon/tue/wed/thu/fri/sat/sun. N is 1-5.
+{"recurrence":null} - remove recurrence (when user says "none", "stop", "remove", "clear", etc.)
+
+Rules:
+- "every day" / "daily" → "daily"
+- "every week" / "weekly" → "weekly"
+- "every month" / "monthly" → "monthly"
+- "every year" / "yearly" / "annually" → "yearly"
+- "every third thursday" / "3rd thursday of every month" → "monthly:3:thu"
+- "every first monday" / "1st monday" → "monthly:1:mon"
+- "none" / "clear" / "remove" / "stop repeating" → null
+- Respond with ONLY the JSON, nothing else"#;
+
+    let messages = vec![ApiMessage {
+        role: "user".to_string(),
+        content: input.to_string(),
+    }];
+
+    let response = call_claude_api(api_key, system_prompt, &messages)?;
+
+    // Parse the response
+    let cleaned = response
+        .trim()
+        .strip_prefix("```json")
+        .or_else(|| response.trim().strip_prefix("```"))
+        .unwrap_or(response.trim());
+    let cleaned = cleaned.strip_suffix("```").unwrap_or(cleaned).trim();
+
+    #[derive(Deserialize)]
+    struct RecurResponse {
+        recurrence: Option<String>,
+    }
+
+    let parsed: RecurResponse = serde_json::from_str(cleaned)
+        .map_err(|e| format!("Could not parse recurrence response: {}", e))?;
+
+    Ok(parsed.recurrence)
+}
+
 // -- Tests --
 
 #[cfg(test)]
@@ -314,6 +387,7 @@ mod tests {
             description: None,
             due_date: None,
             project: Some("TestProject".to_string()),
+            recurrence: None,
         }
     }
 

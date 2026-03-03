@@ -61,6 +61,7 @@ enum Mode {
     EditingDefaultDir,
     NlpChat,
     ConfirmingNlp,
+    EditingRecurrence,
     EditingDetailPanel,
     ConfirmingDetailSave,
 }
@@ -84,13 +85,18 @@ enum View {
     Monthly,
     Yearly,
     NoDueDate,
+    Recurring,
 }
 
 impl View {
     fn matches(&self, task: &Task, today: NaiveDate) -> bool {
-        // Completed tasks only appear in the All view
-        if task.status == Status::Done && *self != View::All {
+        // Completed tasks only appear in the All and Recurring views
+        if task.status == Status::Done && *self != View::All && *self != View::Recurring {
             return false;
+        }
+        // Recurring view: filter by recurrence presence only
+        if *self == View::Recurring {
+            return task.recurrence.is_some();
         }
         // Overdue open tasks appear in all time-based views
         if task.status == Status::Open {
@@ -124,6 +130,7 @@ impl View {
                 None => false,
             },
             View::NoDueDate => task.due_date.is_none(),
+            View::Recurring => unreachable!(), // handled above
         }
     }
 
@@ -134,18 +141,20 @@ impl View {
             View::Weekly => View::Monthly,
             View::Monthly => View::Yearly,
             View::Yearly => View::NoDueDate,
-            View::NoDueDate => View::Today,
+            View::NoDueDate => View::Recurring,
+            View::Recurring => View::Today,
         }
     }
 
     fn prev(&self) -> View {
         match self {
-            View::Today => View::NoDueDate,
+            View::Today => View::Recurring,
             View::All => View::Today,
             View::Weekly => View::All,
             View::Monthly => View::Weekly,
             View::Yearly => View::Monthly,
             View::NoDueDate => View::Yearly,
+            View::Recurring => View::NoDueDate,
         }
     }
 
@@ -157,6 +166,7 @@ impl View {
             View::Monthly => "This Month",
             View::Yearly => "This Year",
             View::NoDueDate => "No Due Date",
+            View::Recurring => "Recurring",
         }
     }
 
@@ -168,6 +178,7 @@ impl View {
             "monthly" => View::Monthly,
             "yearly" => View::Yearly,
             "no-due-date" => View::NoDueDate,
+            "recurring" => View::Recurring,
             _ => View::Today,
         }
     }
@@ -438,6 +449,44 @@ fn event_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut A
 }
 
 /// Returns true if we should quit.
+fn toggle_task_status(app: &mut App, task_idx: usize) -> Result<(), String> {
+    let was_open = app.task_file.tasks[task_idx].status == Status::Open;
+    {
+        let task = &mut app.task_file.tasks[task_idx];
+        task.status = match task.status {
+            Status::Open => Status::Done,
+            Status::Done => Status::Open,
+        };
+        task.updated = Some(Utc::now());
+    }
+    // If we just completed a recurring task, spawn the next occurrence
+    if was_open {
+        let task = &app.task_file.tasks[task_idx];
+        if let Some(recur) = task.recurrence {
+            let next_due = crate::task::next_due_date(&recur, task.due_date);
+            let new_id = app.task_file.next_id;
+            app.task_file.next_id += 1;
+            let new_task = Task {
+                id: new_id,
+                title: task.title.clone(),
+                status: Status::Open,
+                priority: task.priority,
+                tags: task.tags.clone(),
+                created: Utc::now(),
+                updated: None,
+                description: task.description.clone(),
+                due_date: Some(next_due),
+                project: task.project.clone(),
+                recurrence: Some(recur),
+            };
+            app.task_file.tasks.push(new_task);
+            app.status_message = Some(format!("Next occurrence: task {}, due {}", new_id, next_due));
+        }
+    }
+    app.save()?;
+    Ok(())
+}
+
 fn handle_key(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App, key: KeyCode) -> Result<bool, String> {
     match app.mode {
         Mode::Normal => handle_normal(app, key),
@@ -467,6 +516,10 @@ fn handle_key(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut A
         }
         Mode::EditingDescription => {
             handle_input(app, key, InputAction::EditDescription)?;
+            Ok(false)
+        }
+        Mode::EditingRecurrence => {
+            handle_recurrence_input(app, key)?;
             Ok(false)
         }
         Mode::EditingDefaultDir => {
@@ -549,24 +602,12 @@ fn handle_normal(app: &mut App, key: KeyCode) -> Result<bool, String> {
                     app.mode = Mode::EditingDetailPanel;
                 }
             } else if let Some(&task_idx) = filtered.get(app.selected) {
-                let task = &mut app.task_file.tasks[task_idx];
-                task.status = match task.status {
-                    Status::Open => Status::Done,
-                    Status::Done => Status::Open,
-                };
-                task.updated = Some(Utc::now());
-                app.save()?;
+                toggle_task_status(app, task_idx)?;
             }
         }
         KeyCode::Char(' ') => {
             if let Some(&task_idx) = filtered.get(app.selected) {
-                let task = &mut app.task_file.tasks[task_idx];
-                task.status = match task.status {
-                    Status::Open => Status::Done,
-                    Status::Done => Status::Open,
-                };
-                task.updated = Some(Utc::now());
-                app.save()?;
+                toggle_task_status(app, task_idx)?;
             }
         }
         KeyCode::Char('a') => {
@@ -603,6 +644,12 @@ fn handle_normal(app: &mut App, key: KeyCode) -> Result<bool, String> {
             if let Some(&task_idx) = filtered.get(app.selected) {
                 app.input_buffer = app.task_file.tasks[task_idx].description.clone().unwrap_or_default();
                 app.mode = Mode::EditingDescription;
+            }
+        }
+        KeyCode::Char('R') => {
+            if filtered.get(app.selected).is_some() {
+                app.input_buffer.clear();
+                app.mode = Mode::EditingRecurrence;
             }
         }
         KeyCode::Char('v') => {
@@ -726,6 +773,7 @@ fn handle_input(app: &mut App, key: KeyCode, action: InputAction) -> Result<(), 
                             description: None,
                             due_date: None,
                             project: None,
+                            recurrence: None,
                         });
                         app.save()?;
                         app.clamp_selection();
@@ -782,6 +830,83 @@ fn handle_input(app: &mut App, key: KeyCode, action: InputAction) -> Result<(), 
                         app.selected = 0;
                         app.table_state.select(Some(0));
                     }
+                }
+            }
+        }
+        KeyCode::Backspace => {
+            app.input_buffer.pop();
+        }
+        KeyCode::Char(c) => {
+            app.input_buffer.push(c);
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn handle_recurrence_input(app: &mut App, key: KeyCode) -> Result<(), String> {
+    match key {
+        KeyCode::Esc => {
+            app.mode = Mode::Normal;
+            app.input_buffer.clear();
+        }
+        KeyCode::Enter => {
+            let input = app.input_buffer.clone();
+            app.input_buffer.clear();
+            app.mode = Mode::Normal;
+
+            let trimmed = input.trim();
+            if trimmed.is_empty() {
+                return Ok(());
+            }
+
+            let filtered = app.filtered_indices();
+            let task_idx = match filtered.get(app.selected) {
+                Some(&idx) => idx,
+                None => return Ok(()),
+            };
+
+            // Check for direct patterns first (no NLP needed)
+            let recurrence_result = match trimmed.to_lowercase().as_str() {
+                "none" | "clear" | "remove" => Ok(None),
+                "daily" | "weekly" | "monthly" | "yearly" => {
+                    Ok(Some(trimmed.to_lowercase()))
+                }
+                _ => {
+                    // Use NLP to parse the recurrence pattern
+                    match auth::read_claude_key_source() {
+                        Some((_, key)) => nlp::parse_recurrence_nlp(trimmed, &key),
+                        None => Err("No Claude API key. Run `task auth claude` first.".to_string()),
+                    }
+                }
+            };
+
+            match recurrence_result {
+                Ok(Some(recur_str)) => {
+                    match recur_str.parse::<crate::task::Recurrence>() {
+                        Ok(recur) => {
+                            let task = &mut app.task_file.tasks[task_idx];
+                            task.recurrence = Some(recur);
+                            task.updated = Some(Utc::now());
+                            app.save()?;
+                            app.status_message = Some(format!(
+                                "Recurrence set to {}", format_recurrence_display(&recur)
+                            ));
+                        }
+                        Err(e) => {
+                            app.status_message = Some(format!("Invalid recurrence: {}", e));
+                        }
+                    }
+                }
+                Ok(None) => {
+                    let task = &mut app.task_file.tasks[task_idx];
+                    task.recurrence = None;
+                    task.updated = Some(Utc::now());
+                    app.save()?;
+                    app.status_message = Some("Recurrence removed".to_string());
+                }
+                Err(e) => {
+                    app.status_message = Some(e);
                 }
             }
         }
@@ -867,6 +992,9 @@ fn format_action_summary(action: &NlpAction) -> Option<String> {
             let match_str = if match_parts.is_empty() { "(all)".to_string() } else { match_parts.join(", ") };
             let set_str = if set_parts.is_empty() { "(none)".to_string() } else { set_parts.join(", ") };
             Some(format!("Updating: match {{{}}} → set {{{}}}", match_str, set_str))
+        }
+        NlpAction::SetRecurrence { description, .. } => {
+            Some(description.clone())
         }
         NlpAction::Message(_) | NlpAction::ShowTasks { .. } => None,
     }
@@ -1063,6 +1191,45 @@ fn handle_nlp_chat<B: Backend>(terminal: &mut Terminal<B>, app: &mut App, key: K
                         })
                         .collect();
                     app.chat_history.push(ChatMessage::TaskList { text, tasks });
+                }
+                Ok((ref action @ NlpAction::SetRecurrence { task_id, ref recurrence, description: _ }, raw_response)) => {
+                    app.nlp_messages.push(ApiMessage {
+                        role: "assistant".to_string(),
+                        content: raw_response,
+                    });
+                    if let Some(summary) = format_action_summary(action) {
+                        app.chat_history.push(ChatMessage::Assistant(summary));
+                    }
+                    // Apply the recurrence change
+                    if let Some(task) = app.task_file.find_task_mut(task_id) {
+                        match recurrence {
+                            Some(recur_str) => {
+                                match recur_str.parse::<crate::task::Recurrence>() {
+                                    Ok(recur) => {
+                                        task.recurrence = Some(recur);
+                                        task.updated = Some(Utc::now());
+                                        app.save()?;
+                                        app.chat_history.push(ChatMessage::Assistant(
+                                            format!("Set recurrence on task {} to {}", task_id, format_recurrence_display(&recur))
+                                        ));
+                                    }
+                                    Err(e) => {
+                                        app.chat_history.push(ChatMessage::Error(format!("Invalid recurrence: {}", e)));
+                                    }
+                                }
+                            }
+                            None => {
+                                task.recurrence = None;
+                                task.updated = Some(Utc::now());
+                                app.save()?;
+                                app.chat_history.push(ChatMessage::Assistant(
+                                    format!("Removed recurrence from task {}", task_id)
+                                ));
+                            }
+                        }
+                    } else {
+                        app.chat_history.push(ChatMessage::Error(format!("Task {} not found", task_id)));
+                    }
                 }
                 Err(e) => {
                     app.chat_history.push(ChatMessage::Error(e));
@@ -1365,6 +1532,38 @@ fn draw_header(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(header, area);
 }
 
+fn format_recurrence_display(r: &crate::task::Recurrence) -> String {
+    use crate::task::{IntervalUnit, Recurrence};
+    match r {
+        Recurrence::Interval(unit) => match unit {
+            IntervalUnit::Daily => "Daily".to_string(),
+            IntervalUnit::Weekly => "Weekly".to_string(),
+            IntervalUnit::Monthly => "Monthly".to_string(),
+            IntervalUnit::Yearly => "Yearly".to_string(),
+        },
+        Recurrence::NthWeekday { n, weekday } => {
+            let ordinal = match n {
+                1 => "1st",
+                2 => "2nd",
+                3 => "3rd",
+                4 => "4th",
+                5 => "5th",
+                _ => "?",
+            };
+            let day = match weekday {
+                chrono::Weekday::Mon => "Mon",
+                chrono::Weekday::Tue => "Tue",
+                chrono::Weekday::Wed => "Wed",
+                chrono::Weekday::Thu => "Thu",
+                chrono::Weekday::Fri => "Fri",
+                chrono::Weekday::Sat => "Sat",
+                chrono::Weekday::Sun => "Sun",
+            };
+            format!("Monthly ({} {})", ordinal, day)
+        }
+    }
+}
+
 fn truncate_desc(desc: Option<&str>) -> String {
     match desc {
         None | Some("") => String::new(),
@@ -1394,11 +1593,13 @@ fn draw_table(frame: &mut Frame, app: &mut App, area: Rect) {
     });
     let show_due = filtered.iter().any(|&i| app.task_file.tasks[i].due_date.is_some());
     let show_project = filtered.iter().any(|&i| app.task_file.tasks[i].project.is_some());
+    let show_recur = filtered.iter().any(|&i| app.task_file.tasks[i].recurrence.is_some());
 
     let mut header_cells = vec!["ID", "Status", "Priority", "Title"];
     if show_desc { header_cells.push("Desc"); }
     if show_due { header_cells.push("Due"); }
     if show_project { header_cells.push("Project"); }
+    if show_recur { header_cells.push("↻"); }
     header_cells.push("Tags");
 
     let header = Row::new(header_cells)
@@ -1444,6 +1645,9 @@ fn draw_table(frame: &mut Frame, app: &mut App, area: Rect) {
             if show_project {
                 cells.push(Cell::from(task.project.as_deref().unwrap_or("").to_string()));
             }
+            if show_recur {
+                cells.push(Cell::from(if task.recurrence.is_some() { "↻" } else { "" }));
+            }
             cells.push(Cell::from(tags_str));
             let row = Row::new(cells);
             if task.status == Status::Done {
@@ -1465,6 +1669,7 @@ fn draw_table(frame: &mut Frame, app: &mut App, area: Rect) {
     if show_desc { widths.push(Constraint::Length(30)); }
     if show_due { widths.push(Constraint::Length(12)); }
     if show_project { widths.push(Constraint::Length(15)); }
+    if show_recur { widths.push(Constraint::Length(3)); }
     widths.push(Constraint::Length(20));
 
     let table = Table::new(rows, widths)
@@ -1525,6 +1730,10 @@ fn draw_detail_panel(frame: &mut Frame, app: &App, area: Rect) {
                 .map(|d| d.format("%Y-%m-%d").to_string())
                 .unwrap_or_else(|| "(none)".to_string());
             let project = task.project.as_deref().unwrap_or("(none)");
+            let recurrence_str = match &task.recurrence {
+                Some(r) => format_recurrence_display(r),
+                None => "-".to_string(),
+            };
             let created = task.created.format("%Y-%m-%d %H:%M").to_string();
             let updated = task.updated
                 .map(|u| u.format("%Y-%m-%d %H:%M").to_string())
@@ -1534,12 +1743,12 @@ fn draw_detail_panel(frame: &mut Frame, app: &App, area: Rect) {
                 "ID: {}  |  Status: {}  |  Priority: {}  |  Due: {}  |  Project: {}\n\
                  Title: {}\n\
                  Description: {}\n\
-                 Tags: {}\n\
+                 Tags: {}  |  Recurrence: {}\n\
                  Created: {}  |  Updated: {}",
                 task.id, task.status, task.priority, due, project,
                 task.title,
                 desc,
-                tags,
+                tags, recurrence_str,
                 created, updated,
             )
         } else {
@@ -1559,16 +1768,22 @@ fn draw_chat_panel(frame: &mut Frame, app: &App, area: Rect) {
     for msg in &app.chat_history {
         match msg {
             ChatMessage::User(text) => {
-                lines.push(Line::from(Span::styled(
-                    format!("> {}", text),
-                    Style::default().fg(theme::CHAT_USER),
-                )));
+                for line in text.lines() {
+                    lines.push(Line::from(Span::styled(
+                        format!("> {}", line),
+                        Style::default().fg(theme::CHAT_USER),
+                    )));
+                }
             }
             ChatMessage::Assistant(text) => {
-                lines.push(Line::from(Span::raw(text.as_str())));
+                for line in text.lines() {
+                    lines.push(Line::from(Span::raw(line.to_string())));
+                }
             }
             ChatMessage::TaskList { text, tasks } => {
-                lines.push(Line::from(Span::raw(text.as_str())));
+                for line in text.lines() {
+                    lines.push(Line::from(Span::raw(line.to_string())));
+                }
                 for (id, title, priority, status) in tasks {
                     lines.push(Line::from(Span::styled(
                         format!("  #{} {} [{}] ({})", id, title, priority, status),
@@ -1577,25 +1792,35 @@ fn draw_chat_panel(frame: &mut Frame, app: &App, area: Rect) {
                 }
             }
             ChatMessage::Error(text) => {
-                lines.push(Line::from(Span::styled(
-                    format!("Error: {}", text),
-                    Style::default().fg(theme::CHAT_ERROR),
-                )));
+                for line in text.lines() {
+                    lines.push(Line::from(Span::styled(
+                        format!("Error: {}", line),
+                        Style::default().fg(theme::CHAT_ERROR),
+                    )));
+                }
             }
         }
         lines.push(Line::from(""));
     }
 
-    // Auto-scroll: calculate offset so the last lines are visible
-    let visible_height = area.height.saturating_sub(2) as usize; // account for border
-    let scroll = if lines.len() > visible_height {
-        (lines.len() - visible_height) as u16
+    let content_width = area.width.saturating_sub(2) as usize; // account for border
+    let visible_height = area.height.saturating_sub(2) as usize;
+
+    // Estimate wrapped line count for scroll calculation
+    let wrapped_count: usize = lines.iter().map(|line| {
+        let len = line.width();
+        if content_width == 0 || len == 0 { 1 } else { (len + content_width - 1) / content_width }
+    }).sum();
+
+    let scroll = if wrapped_count > visible_height {
+        (wrapped_count - visible_height) as u16
     } else {
         0
     };
 
     let paragraph = Paragraph::new(lines)
         .block(Block::default().borders(Borders::TOP).title(" Chat "))
+        .wrap(ratatui::widgets::Wrap { trim: false })
         .scroll((scroll, 0));
 
     frame.render_widget(paragraph, area);
@@ -1607,9 +1832,9 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
             if let Some(ref msg) = app.status_message {
                 format!(" {} ", msg)
             } else if app.show_detail_panel {
-                " j/k:nav  Enter:edit  Space:toggle  a:add  d:delete  f:filter  p:priority  e:edit-title  t:tags  r:desc  v:view  Tab:details  q:quit ".to_string()
+                " j/k:nav  Enter:edit  Space:toggle  a:add  d:delete  f:filter  p:priority  e:edit-title  t:tags  r:desc  R:recur  v:view  Tab:details  q:quit ".to_string()
             } else {
-                " j/k:nav  Enter:toggle  a:add  d:delete  f:filter  p:priority  e:edit  t:tags  r:desc  v:view  i:import  ::command  D:set-dir  T/W/M/Q:due  X:clr-due  Tab:details  q:quit ".to_string()
+                " j/k:nav  Enter:toggle  a:add  d:delete  f:filter  p:priority  e:edit  t:tags  r:desc  R:recur  v:view  i:import  ::command  D:set-dir  T/W/M/Q:due  X:clr-due  Tab:details  q:quit ".to_string()
             }
         }
         Mode::Adding => {
@@ -1638,6 +1863,9 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
         }
         Mode::EditingDescription => {
             format!(" Edit description: {}_ ", app.input_buffer)
+        }
+        Mode::EditingRecurrence => {
+            format!(" Recurrence (e.g. daily, weekly, every 3rd thu, none): {}_ ", app.input_buffer)
         }
         Mode::EditingDefaultDir => {
             format!(" Set default directory: {}_ ", app.input_buffer)
@@ -1686,6 +1914,7 @@ mod tests {
             description: None,
             due_date: due,
             project: None,
+            recurrence: None,
         }
     }
 
@@ -1866,6 +2095,32 @@ mod tests {
         assert!(!View::NoDueDate.matches(&task, today));
     }
 
+    // -- Recurring view tests --
+
+    #[test]
+    fn recurring_view_shows_recurring_open_task() {
+        let today = NaiveDate::from_ymd_opt(2026, 2, 26).unwrap();
+        let mut task = make_task(Some(today));
+        task.recurrence = Some(crate::task::Recurrence::Interval(crate::task::IntervalUnit::Weekly));
+        assert!(View::Recurring.matches(&task, today));
+    }
+
+    #[test]
+    fn recurring_view_shows_recurring_done_task() {
+        let today = NaiveDate::from_ymd_opt(2026, 2, 26).unwrap();
+        let mut task = make_task(Some(today));
+        task.status = Status::Done;
+        task.recurrence = Some(crate::task::Recurrence::Interval(crate::task::IntervalUnit::Daily));
+        assert!(View::Recurring.matches(&task, today));
+    }
+
+    #[test]
+    fn recurring_view_hides_non_recurring_task() {
+        let today = NaiveDate::from_ymd_opt(2026, 2, 26).unwrap();
+        let task = make_task(Some(today));
+        assert!(!View::Recurring.matches(&task, today));
+    }
+
     // -- View::next / View::prev tests --
 
     #[test]
@@ -1876,12 +2131,14 @@ mod tests {
         v = v.next(); assert_eq!(v, View::Monthly);
         v = v.next(); assert_eq!(v, View::Yearly);
         v = v.next(); assert_eq!(v, View::NoDueDate);
+        v = v.next(); assert_eq!(v, View::Recurring);
         v = v.next(); assert_eq!(v, View::Today); // wrap
     }
 
     #[test]
     fn prev_cycles_through_all_views() {
         let mut v = View::Today;
+        v = v.prev(); assert_eq!(v, View::Recurring);
         v = v.prev(); assert_eq!(v, View::NoDueDate);
         v = v.prev(); assert_eq!(v, View::Yearly);
         v = v.prev(); assert_eq!(v, View::Monthly);
@@ -1900,6 +2157,7 @@ mod tests {
         assert_eq!(View::from_config("monthly"), View::Monthly);
         assert_eq!(View::from_config("yearly"), View::Yearly);
         assert_eq!(View::from_config("no-due-date"), View::NoDueDate);
+        assert_eq!(View::from_config("recurring"), View::Recurring);
     }
 
     #[test]

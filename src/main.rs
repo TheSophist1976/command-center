@@ -16,7 +16,7 @@ use chrono::{NaiveDate, Utc};
 use clap::Parser;
 
 use cli::{AuthCommand, Cli, Command, ConfigCommand, ImportCommand};
-use task::{Priority, Status, Task};
+use task::{Priority, Recurrence, Status, Task};
 
 fn main() {
     let cli = Cli::parse();
@@ -48,13 +48,14 @@ fn run(cli: Cli) -> Result<(), (i32, String)> {
             Ok(())
         }
 
-        Command::Add { title, priority, tags, due, project } => {
+        Command::Add { title, priority, tags, due, project, recur } => {
             let priority = match priority {
                 Some(p) => Priority::from_str(&p).map_err(|e| (1, e))?,
                 None => Priority::Medium,
             };
             let tags = validate_and_parse_tags(tags.as_deref())?;
             let due_date = parse_due_date(due.as_deref())?;
+            let recurrence = parse_recurrence(recur.as_deref())?;
 
             let mut tf = storage::load(&path, strict).map_err(|e| (1, e))?;
             let id = tf.next_id;
@@ -71,6 +72,7 @@ fn run(cli: Cli) -> Result<(), (i32, String)> {
                 description: None,
                 due_date,
                 project,
+                recurrence,
             });
 
             storage::save(&path, &tf).map_err(|e| (1, e))?;
@@ -125,9 +127,9 @@ fn run(cli: Cli) -> Result<(), (i32, String)> {
             }
         }
 
-        Command::Edit { id, title, priority, tags, due, project } => {
-            if title.is_none() && priority.is_none() && tags.is_none() && due.is_none() && project.is_none() {
-                return Err((1, "Nothing to edit. Provide --title, --priority, --tags, --due, or --project.".to_string()));
+        Command::Edit { id, title, priority, tags, due, project, recur } => {
+            if title.is_none() && priority.is_none() && tags.is_none() && due.is_none() && project.is_none() && recur.is_none() {
+                return Err((1, "Nothing to edit. Provide --title, --priority, --tags, --due, --project, or --recur.".to_string()));
             }
 
             let mut tf = storage::load(&path, strict).map_err(|e| (1, e))?;
@@ -148,6 +150,13 @@ fn run(cli: Cli) -> Result<(), (i32, String)> {
             }
             if let Some(proj) = project {
                 task.project = Some(proj);
+            }
+            if let Some(ref r) = recur {
+                if r.eq_ignore_ascii_case("none") {
+                    task.recurrence = None;
+                } else {
+                    task.recurrence = parse_recurrence(Some(r))?.or(task.recurrence);
+                }
             }
             task.updated = Some(Utc::now());
 
@@ -170,9 +179,39 @@ fn run(cli: Cli) -> Result<(), (i32, String)> {
             task.status = Status::Done;
             task.updated = Some(Utc::now());
 
+            // Collect data for potential next occurrence before dropping the borrow
             let task_title = task.title.clone();
-            storage::save(&path, &tf).map_err(|e| (1, e))?;
-            output::print_success(&format!("Completed task {}: {}", id, task_title), json);
+            let spawn_info = task.recurrence.map(|recur| {
+                let next_due = task::next_due_date(&recur, task.due_date);
+                (task.title.clone(), task.priority, task.tags.clone(),
+                 task.description.clone(), task.project.clone(), recur, next_due)
+            });
+
+            if let Some((title, priority, tags, description, project, recur, next_due)) = spawn_info {
+                let new_id = tf.next_id;
+                tf.next_id += 1;
+                tf.tasks.push(Task {
+                    id: new_id,
+                    title,
+                    status: Status::Open,
+                    priority,
+                    tags,
+                    created: Utc::now(),
+                    updated: None,
+                    description,
+                    due_date: Some(next_due),
+                    project,
+                    recurrence: Some(recur),
+                });
+                storage::save(&path, &tf).map_err(|e| (1, e))?;
+                output::print_success(
+                    &format!("Completed task {}: {}. Next occurrence: task {}, due {}", id, task_title, new_id, next_due),
+                    json,
+                );
+            } else {
+                storage::save(&path, &tf).map_err(|e| (1, e))?;
+                output::print_success(&format!("Completed task {}: {}", id, task_title), json);
+            }
             Ok(())
         }
 
@@ -297,6 +336,15 @@ fn run(cli: Cli) -> Result<(), (i32, String)> {
                 Ok(())
             }
         },
+    }
+}
+
+fn parse_recurrence(input: Option<&str>) -> Result<Option<Recurrence>, (i32, String)> {
+    match input {
+        None => Ok(None),
+        Some(s) => Recurrence::from_str(s)
+            .map(Some)
+            .map_err(|e| (1, e)),
     }
 }
 

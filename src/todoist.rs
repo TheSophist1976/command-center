@@ -194,6 +194,7 @@ pub fn map_task(t: &TodoistTask, project_map: &HashMap<String, String>) -> Task 
         description,
         due_date,
         project,
+        recurrence: None,
     }
 }
 

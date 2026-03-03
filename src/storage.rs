@@ -283,6 +283,7 @@ mod tests {
             description: Some("Some description".to_string()),
             due_date: None,
             project: None,
+            recurrence: None,
         });
         tf.next_id = 2;
         save(&path, &tf).unwrap();
@@ -314,6 +315,7 @@ mod tests {
             description: None,
             due_date: None,
             project: None,
+            recurrence: None,
         });
         save(&path, &tf).unwrap();
 

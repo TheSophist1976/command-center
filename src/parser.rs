@@ -1,7 +1,7 @@
 use chrono::{DateTime, NaiveDate, Utc};
 use std::str::FromStr;
 
-use crate::task::{Priority, Status, Task, TaskFile};
+use crate::task::{Priority, Recurrence, Status, Task, TaskFile};
 
 #[derive(Debug)]
 pub struct ParseError {
@@ -90,6 +90,7 @@ pub fn parse(content: &str, strict: bool) -> Result<TaskFile, Vec<ParseError>> {
                         description,
                         due_date: metadata.due_date,
                         project: metadata.project,
+                        recurrence: metadata.recurrence,
                     });
                 } else if strict {
                     errors.push(ParseError {
@@ -162,6 +163,7 @@ struct Metadata {
     updated: Option<DateTime<Utc>>,
     due_date: Option<NaiveDate>,
     project: Option<String>,
+    recurrence: Option<Recurrence>,
 }
 
 fn parse_metadata_comment(line: &str) -> Option<Metadata> {
@@ -175,22 +177,30 @@ fn parse_metadata_comment(line: &str) -> Option<Metadata> {
     let mut updated: Option<DateTime<Utc>> = None;
     let mut due_date: Option<NaiveDate> = None;
     let mut project: Option<String> = None;
+    let mut recurrence: Option<Recurrence> = None;
 
     for pair in inner.split_whitespace() {
-        if let Some((key, value)) = pair.split_once(':') {
+        if let Some((key, rest)) = pair.split_once(':') {
             match key {
-                "id" => id = value.parse().ok(),
-                "priority" => priority = Priority::from_str(value).unwrap_or(Priority::Medium),
+                "id" => id = rest.parse().ok(),
+                "priority" => priority = Priority::from_str(rest).unwrap_or(Priority::Medium),
                 "tags" => {
-                    tags = value.split(',')
+                    tags = rest.split(',')
                         .map(|s| s.trim().to_string())
                         .filter(|s| !s.is_empty())
                         .collect();
                 }
-                "created" => created = DateTime::parse_from_rfc3339(value).ok().map(|dt| dt.with_timezone(&Utc)),
-                "updated" => updated = DateTime::parse_from_rfc3339(value).ok().map(|dt| dt.with_timezone(&Utc)),
-                "due" => due_date = NaiveDate::parse_from_str(value, "%Y-%m-%d").ok(),
-                "project" => project = Some(value.replace("%20", " ").replace("%3A", ":")),
+                "created" => created = DateTime::parse_from_rfc3339(rest).ok().map(|dt| dt.with_timezone(&Utc)),
+                "updated" => updated = DateTime::parse_from_rfc3339(rest).ok().map(|dt| dt.with_timezone(&Utc)),
+                "due" => due_date = NaiveDate::parse_from_str(rest, "%Y-%m-%d").ok(),
+                "project" => project = Some(rest.replace("%20", " ").replace("%3A", ":")),
+                "recur" => {
+                    // The recur value may contain colons (e.g., "monthly:3:thu"),
+                    // but split_once on the first ':' only gives us "recur" and the rest.
+                    // However, the outer split_whitespace splits by whitespace, so
+                    // "recur:monthly:3:thu" is one token. split_once(':') gives key="recur", rest="monthly:3:thu".
+                    recurrence = Recurrence::from_str(rest).ok();
+                }
                 _ => {}
             }
         }
@@ -204,6 +214,7 @@ fn parse_metadata_comment(line: &str) -> Option<Metadata> {
         updated,
         due_date,
         project,
+        recurrence,
     })
 }
 
@@ -237,6 +248,9 @@ pub fn serialize(task_file: &TaskFile) -> String {
         if let Some(ref proj) = task.project {
             let encoded = proj.replace('%', "%25").replace(' ', "%20").replace(':', "%3A");
             meta_parts.push(format!("project:{}", encoded));
+        }
+        if let Some(ref recur) = task.recurrence {
+            meta_parts.push(format!("recur:{}", recur));
         }
         meta_parts.push(format!("created:{}", task.created.to_rfc3339()));
         if let Some(updated) = task.updated {
@@ -507,6 +521,7 @@ Some description here.
             description: None,
             due_date: None,
             project: None,
+            recurrence: None,
         });
         let out = serialize(&tf);
         assert!(out.contains("## [ ] Open task"));
@@ -528,6 +543,7 @@ Some description here.
             description: None,
             due_date: None,
             project: None,
+            recurrence: None,
         });
         let out = serialize(&tf);
         assert!(out.contains("## [x] Done task"));
@@ -549,6 +565,7 @@ Some description here.
             description: Some("My description".to_string()),
             due_date: Some(NaiveDate::from_ymd_opt(2025, 12, 31).unwrap()),
             project: Some("My Project".to_string()),
+            recurrence: None,
         });
         let out = serialize(&tf);
         assert!(out.contains("tags:alpha,beta"));
@@ -575,6 +592,7 @@ Some description here.
             description: None,
             due_date: None,
             project: Some("Work:Project".to_string()),
+            recurrence: None,
         });
         let out = serialize(&tf);
         assert!(out.contains("project:Work%3AProject"));
@@ -596,6 +614,7 @@ Some description here.
             description: None,
             due_date: None,
             project: Some("My Project".to_string()),
+            recurrence: None,
         });
         let serialized = serialize(&tf);
         let parsed = parse(&serialized, false).unwrap();
