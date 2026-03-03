@@ -13,6 +13,32 @@ use ratatui::{
     widgets::{Block, Borders, Cell, Paragraph, Row, Table, TableState},
 };
 
+mod theme {
+    use ratatui::style::Color;
+
+    // Bar (header/footer)
+    pub const BAR_FG: Color = Color::White;
+    pub const BAR_BG: Color = Color::Rgb(30, 60, 114);
+
+    // Selection
+    pub const HIGHLIGHT_BG: Color = Color::Rgb(40, 50, 80);
+
+    // Priority colors
+    pub const PRIORITY_CRITICAL: Color = Color::Rgb(255, 85, 85);
+    pub const PRIORITY_HIGH: Color = Color::Rgb(255, 150, 50);
+    pub const PRIORITY_MEDIUM: Color = Color::Rgb(255, 215, 0);
+    pub const PRIORITY_LOW: Color = Color::Rgb(100, 200, 100);
+
+    // Chat
+    pub const CHAT_USER: Color = Color::Rgb(100, 180, 255);
+    pub const CHAT_TASK_LIST: Color = Color::Rgb(255, 215, 0);
+    pub const CHAT_ERROR: Color = Color::Rgb(255, 85, 85);
+
+    // Task states
+    pub const DONE_TEXT: Color = Color::Rgb(100, 100, 100);
+    pub const OVERDUE: Color = Color::Rgb(255, 85, 85);
+}
+
 use crate::auth;
 use crate::config;
 use crate::nlp::{self, ApiMessage, NlpAction};
@@ -1250,8 +1276,8 @@ fn draw_header(frame: &mut Frame, app: &App, area: Rect) {
     };
     let header = Paragraph::new(title).style(
         Style::default()
-            .fg(Color::Black)
-            .bg(Color::Cyan)
+            .fg(theme::BAR_FG)
+            .bg(theme::BAR_BG)
             .add_modifier(Modifier::BOLD),
     );
     frame.render_widget(header, area);
@@ -1301,15 +1327,17 @@ fn draw_table(frame: &mut Frame, app: &mut App, area: Rect) {
         .iter()
         .map(|&i| {
             let task = &app.task_file.tasks[i];
+            let is_overdue = task.status == Status::Open
+                && task.due_date.map_or(false, |d| d < Local::now().date_naive());
             let status_str = match task.status {
-                Status::Open => "[ ]",
+                Status::Open => if is_overdue { "[!]" } else { "[ ]" },
                 Status::Done => "[x]",
             };
             let priority_style = match task.priority {
-                Priority::Critical => Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD),
-                Priority::High => Style::default().fg(Color::Red),
-                Priority::Medium => Style::default().fg(Color::Yellow),
-                Priority::Low => Style::default().fg(Color::Green),
+                Priority::Critical => Style::default().fg(theme::PRIORITY_CRITICAL).add_modifier(Modifier::BOLD),
+                Priority::High => Style::default().fg(theme::PRIORITY_HIGH),
+                Priority::Medium => Style::default().fg(theme::PRIORITY_MEDIUM),
+                Priority::Low => Style::default().fg(theme::PRIORITY_LOW),
             };
             let tags_str = if task.tags.is_empty() {
                 String::new()
@@ -1335,7 +1363,14 @@ fn draw_table(frame: &mut Frame, app: &mut App, area: Rect) {
                 cells.push(Cell::from(task.project.as_deref().unwrap_or("").to_string()));
             }
             cells.push(Cell::from(tags_str));
-            Row::new(cells)
+            let row = Row::new(cells);
+            if task.status == Status::Done {
+                row.style(Style::default().fg(theme::DONE_TEXT))
+            } else if is_overdue {
+                row.style(Style::default().fg(theme::OVERDUE))
+            } else {
+                row
+            }
         })
         .collect();
 
@@ -1355,7 +1390,7 @@ fn draw_table(frame: &mut Frame, app: &mut App, area: Rect) {
         .block(Block::default().borders(Borders::ALL))
         .row_highlight_style(
             Style::default()
-                .bg(Color::DarkGray)
+                .bg(theme::HIGHLIGHT_BG)
                 .add_modifier(Modifier::BOLD),
         );
 
@@ -1380,7 +1415,7 @@ fn draw_detail_panel(frame: &mut Frame, app: &App, area: Rect) {
             };
             let display_value = if value.is_empty() && i != app.detail_field_index { "(empty)".to_string() } else { value };
             let style = if i == app.detail_field_index {
-                Style::default().bg(Color::DarkGray).add_modifier(Modifier::BOLD)
+                Style::default().bg(theme::HIGHLIGHT_BG).add_modifier(Modifier::BOLD)
             } else {
                 Style::default()
             };
@@ -1444,7 +1479,7 @@ fn draw_chat_panel(frame: &mut Frame, app: &App, area: Rect) {
             ChatMessage::User(text) => {
                 lines.push(Line::from(Span::styled(
                     format!("> {}", text),
-                    Style::default().fg(Color::Cyan),
+                    Style::default().fg(theme::CHAT_USER),
                 )));
             }
             ChatMessage::Assistant(text) => {
@@ -1455,14 +1490,14 @@ fn draw_chat_panel(frame: &mut Frame, app: &App, area: Rect) {
                 for (id, title, priority, status) in tasks {
                     lines.push(Line::from(Span::styled(
                         format!("  #{} {} [{}] ({})", id, title, priority, status),
-                        Style::default().fg(Color::Yellow),
+                        Style::default().fg(theme::CHAT_TASK_LIST),
                     )));
                 }
             }
             ChatMessage::Error(text) => {
                 lines.push(Line::from(Span::styled(
                     format!("Error: {}", text),
-                    Style::default().fg(Color::Red),
+                    Style::default().fg(theme::CHAT_ERROR),
                 )));
             }
         }
@@ -1545,8 +1580,8 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
 
     let footer = Paragraph::new(text).style(
         Style::default()
-            .fg(Color::Black)
-            .bg(Color::Cyan),
+            .fg(theme::BAR_FG)
+            .bg(theme::BAR_BG),
     );
     frame.render_widget(footer, area);
 }
