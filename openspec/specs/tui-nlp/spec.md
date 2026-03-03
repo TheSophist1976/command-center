@@ -1,5 +1,5 @@
 ### Requirement: NLP intent interpretation
-The system SHALL provide an `nlp::interpret` function that accepts the current task list, a natural language input string, and a Claude API key, and returns a structured `NlpAction` result. The function SHALL call the Claude API (`claude-haiku-4-5-20251001`) with a system prompt that includes a JSON summary of the current tasks (capped at 200 tasks), the current date formatted as `YYYY-MM-DD (DayOfWeek)`, and instructions to return a JSON object describing the intended action. The system prompt SHALL instruct the model to use the provided date for interpreting relative time references such as "today", "this week", "overdue", "tomorrow", etc.
+The system SHALL provide an `nlp::interpret` function that accepts the current task list, a natural language input string, and a Claude API key, and returns a structured `NlpAction` result. The function SHALL call the Claude API (`claude-haiku-4-5-20251001`) with a system prompt that includes a JSON summary of the current tasks (capped at 200 tasks), the current date formatted as `YYYY-MM-DD (DayOfWeek)`, and instructions to return a JSON object describing the intended action. The system prompt SHALL instruct the model to use the provided date for interpreting relative time references such as "today", "this week", "overdue", "tomorrow", etc. The task context SHALL include a `recurrence` field for each task (null if no recurrence, otherwise the recurrence string).
 
 #### Scenario: System prompt includes current date
 - **WHEN** the NLP system prompt is constructed
@@ -17,8 +17,16 @@ The system SHALL provide an `nlp::interpret` function that accepts the current t
 - **WHEN** the user inputs "mark all frontend tasks as high priority"
 - **THEN** `interpret` SHALL return an `NlpAction::Update` with match criteria for tag "frontend" and set fields for priority "high", including a human-readable description of the change
 
+#### Scenario: Set recurrence action returned
+- **WHEN** the user inputs "make task 5 repeat every third thursday"
+- **THEN** `interpret` SHALL return an `NlpAction::SetRecurrence` with `task_id: 5`, `recurrence: Some("monthly:3:thu")`, and a description
+
+#### Scenario: Remove recurrence action returned
+- **WHEN** the user inputs "stop task 3 from repeating"
+- **THEN** `interpret` SHALL return an `NlpAction::SetRecurrence` with `task_id: 3`, `recurrence: None`, and a description
+
 #### Scenario: Unrecognized input
-- **WHEN** the user inputs something that cannot be mapped to a filter or update action
+- **WHEN** the user inputs something that cannot be mapped to a filter, update, or set_recurrence action
 - **THEN** `interpret` SHALL return an error string describing that the input could not be understood
 
 #### Scenario: API error
@@ -29,8 +37,12 @@ The system SHALL provide an `nlp::interpret` function that accepts the current t
 - **WHEN** the task list exceeds 200 tasks
 - **THEN** the system SHALL include only the first 200 tasks in the prompt context and note the truncation
 
+#### Scenario: Task context includes recurrence
+- **WHEN** the task context is built for the NLP prompt
+- **THEN** each task summary SHALL include a `recurrence` field (null if no recurrence, otherwise the serialized recurrence string)
+
 ### Requirement: NLP action types
-The `NlpAction` enum SHALL have two variants: `Filter` containing criteria fields (project, status, priority, tag, title_contains — all optional) and `Update` containing match criteria, set fields, and a human-readable description string.
+The `NlpAction` enum SHALL have five variants: `Filter` containing criteria fields (project, status, priority, tag, title_contains — all optional), `Update` containing match criteria, set fields, and a human-readable description string, `Message` containing a text string, `ShowTasks` containing task IDs and text, and `SetRecurrence` containing a task_id, an optional recurrence string, and a description string.
 
 #### Scenario: Filter variant fields
 - **WHEN** an `NlpAction::Filter` is constructed
@@ -39,6 +51,10 @@ The `NlpAction` enum SHALL have two variants: `Filter` containing criteria field
 #### Scenario: Update variant fields
 - **WHEN** an `NlpAction::Update` is constructed
 - **THEN** it SHALL contain `match_criteria` (same fields as Filter), `set_fields` (priority, status, tags — all optional), and a `description` string
+
+#### Scenario: SetRecurrence variant fields
+- **WHEN** an `NlpAction::SetRecurrence` is constructed
+- **THEN** it SHALL contain `task_id` (u32), `recurrence` (Option<String> — None to remove, Some to set), and `description` (String)
 
 ### Requirement: NLP input mode in TUI
 The user SHALL press `:` in Normal mode to enter `NlpInput` mode. The footer SHALL display a text input prompt. The user SHALL type a natural language command and press `Enter` to submit or `Esc` to cancel.
@@ -198,3 +214,22 @@ The conversation state SHALL be initialized when entering NlpChat mode and clear
 #### Scenario: NlpChat update confirmation
 - **WHEN** the model returns an Update action while in NlpChat mode
 - **THEN** the TUI SHALL enter ConfirmingNlp mode. After confirmation or cancellation, the TUI SHALL return to NlpChat mode (not Normal mode)
+
+### Requirement: NLP recurrence execution in TUI
+When `nlp::interpret` returns an `NlpAction::SetRecurrence`, the TUI SHALL find the task by ID, set or clear its recurrence, save the file, and display a status message. If the task ID does not exist, a status error message SHALL be shown.
+
+#### Scenario: Set recurrence via NLP chat
+- **WHEN** the NLP returns `SetRecurrence { task_id: 5, recurrence: Some("weekly"), description: "Set task 5 to repeat weekly" }`
+- **THEN** the TUI SHALL set task 5's recurrence to `Interval(Weekly)`, save the file, display the action summary and status message, and remain in NlpChat mode
+
+#### Scenario: Clear recurrence via NLP chat
+- **WHEN** the NLP returns `SetRecurrence { task_id: 3, recurrence: None, description: "Removed recurrence from task 3" }`
+- **THEN** the TUI SHALL set task 3's recurrence to `None`, save the file, display the status message, and remain in NlpChat mode
+
+#### Scenario: Invalid task ID in SetRecurrence
+- **WHEN** the NLP returns `SetRecurrence { task_id: 999, ... }` and task 999 does not exist
+- **THEN** the TUI SHALL display a status error "Task 999 not found" and remain in NlpChat mode
+
+#### Scenario: Invalid recurrence string in SetRecurrence
+- **WHEN** the NLP returns `SetRecurrence { recurrence: Some("biweekly"), ... }` which cannot be parsed
+- **THEN** the TUI SHALL display a status error with the parse failure and remain in NlpChat mode
