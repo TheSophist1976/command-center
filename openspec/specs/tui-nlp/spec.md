@@ -70,8 +70,35 @@ When `nlp::interpret` returns an `NlpAction::Filter`, the TUI SHALL apply the fi
 - **WHEN** the NLP result is a Filter with project "FLOW AI" and status "open"
 - **THEN** the task table SHALL show only open tasks in the "FLOW AI" project
 
+### Requirement: Action summary in chat
+After parsing an NLP response, the chat panel SHALL display a human-readable summary of the interpreted action before executing it.
+
+#### Scenario: Filter action summary
+- **WHEN** the NLP returns a filter action
+- **THEN** the chat panel SHALL show a message like `Filtering: status=open, priority=high` listing the non-null filter criteria
+
+#### Scenario: Update action summary
+- **WHEN** the NLP returns an update action
+- **THEN** the chat panel SHALL show a message like `Updating: match {tag=frontend} → set {priority=high}` describing match criteria and fields to set
+
+#### Scenario: Null fields omitted
+- **WHEN** an action has null criteria fields
+- **THEN** those fields SHALL NOT appear in the summary
+
 ### Requirement: NLP bulk update execution with confirmation
-When `nlp::interpret` returns an `NlpAction::Update`, the TUI SHALL enter a `ConfirmingNlp` mode. The footer SHALL display the action description and the count of tasks matching the criteria, followed by "y/n". Pressing `y` SHALL apply the update to all matching tasks, save the file, and show a status message with the result. Any other key SHALL cancel.
+When `nlp::interpret` returns an `NlpAction::Update`, the TUI SHALL enter a `ConfirmingNlp` mode. The chat panel SHALL display per-task before→after changes. The footer SHALL display the action description and the count of tasks matching the criteria, followed by "y/n". Pressing `y` SHALL apply the update to all matching tasks, save the file, and show a status message with the result. Any other key SHALL cancel.
+
+#### Scenario: Task changes listed in chat
+- **WHEN** the NLP returns an update action and matching tasks are found
+- **THEN** the chat panel SHALL list each affected task with its field changes (e.g., `#3 "Fix bug": priority Medium → High`)
+
+#### Scenario: Only changed fields shown
+- **WHEN** a set_field value matches the task's current value
+- **THEN** that field SHALL NOT be shown in the change preview for that task
+
+#### Scenario: Large match set truncated
+- **WHEN** more than 10 tasks match the update criteria
+- **THEN** the chat panel SHALL show the first 10 tasks and a line `... and N more tasks`
 
 #### Scenario: Confirm bulk priority update
 - **WHEN** the NLP result is an Update setting priority to high on 5 matching tasks and the user presses `y`

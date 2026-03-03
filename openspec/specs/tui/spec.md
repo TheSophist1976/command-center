@@ -25,7 +25,7 @@ The TUI SHALL render a three-region layout in Normal mode: a header bar (1 line)
 
 #### Scenario: Default layout rendering
 - **WHEN** the TUI is displayed with tasks loaded in Normal mode
-- **THEN** the header SHALL show "task-manager" and the footer SHALL show keybinding hints including `j/k:nav  Enter:toggle  a:add  d:delete  f:filter  p:priority  e:edit  t:tags  r:desc  v:view  i:import  ::command  D:set-dir  T/W/M/Q:due  X:clr-due  Tab:details  q:quit`
+- **THEN** the header SHALL use `theme::BAR_FG` foreground and `theme::BAR_BG` background, and the footer SHALL show keybinding hints with the same theme colors. The header SHALL show "task-manager" and the footer SHALL show keybinding hints including `j/k:nav  Enter:toggle  a:add  d:delete  f:filter  p:priority  e:edit  t:tags  r:desc  v:view  i:import  ::command  D:set-dir  T/W/M/Q:due  X:clr-due  Tab:details  q:quit`
 
 #### Scenario: Footer hints with detail panel visible
 - **WHEN** the detail panel is visible in Normal mode
@@ -52,7 +52,15 @@ The task table SHALL display columns for ID, status (checkbox), priority, title,
 
 #### Scenario: Table with tasks
 - **WHEN** the TUI loads a file containing tasks
-- **THEN** the table SHALL display each task as a row with ID, a checkbox (checked for done), priority, title, and tags columns
+- **THEN** the table SHALL display each task as a row with ID, a checkbox (checked for done), priority, title, and tags columns. Priority cells SHALL use colors from the `theme` module.
+
+#### Scenario: Done task row styling
+- **WHEN** a task with status Done is rendered in the table
+- **THEN** all cells in that row SHALL use `theme::DONE_TEXT` foreground color, overriding priority coloring
+
+#### Scenario: Overdue row styling
+- **WHEN** an open task's due date is before today's date
+- **THEN** the entire row SHALL be rendered in `theme::OVERDUE` foreground color and the status column SHALL display `[!]` instead of `[ ]`
 
 #### Scenario: Empty task file
 - **WHEN** the TUI loads a file with no tasks
@@ -292,7 +300,7 @@ The TUI SHALL support inline editing of task fields within the detail panel. Whe
 
 #### Scenario: Enter detail editing mode
 - **WHEN** the detail panel is visible and the user presses `Enter` on a selected task
-- **THEN** the TUI SHALL enter `EditingDetailPanel` mode, populate a draft from the current task, focus the first field (Title), and display the panel in edit layout with the focused field highlighted
+- **THEN** the TUI SHALL enter `EditingDetailPanel` mode, populate a draft from the current task, focus the first field (Title), and display the panel in edit layout with the focused field highlighted using `theme::HIGHLIGHT_BG`
 
 #### Scenario: Navigate between fields
 - **WHEN** the user is in `EditingDetailPanel` mode and presses `j`, `Down`, or `Tab`
