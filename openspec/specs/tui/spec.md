@@ -59,8 +59,12 @@ The task table SHALL display columns for ID, status (checkbox), priority, title,
 - **THEN** all cells in that row SHALL use `theme::DONE_TEXT` foreground color, overriding priority coloring
 
 #### Scenario: Overdue row styling
-- **WHEN** an open task's due date is before today's date
+- **WHEN** an open task's due date is strictly before today's date (tasks due today are NOT overdue)
 - **THEN** the entire row SHALL be rendered in `theme::OVERDUE` foreground color and the status column SHALL display `[!]` instead of `[ ]`
+
+#### Scenario: Task due today is not overdue
+- **WHEN** an open task has a due date equal to today
+- **THEN** it SHALL be displayed with normal styling, not overdue styling
 
 #### Scenario: Empty task file
 - **WHEN** the TUI loads a file with no tasks
@@ -435,6 +439,21 @@ The TUI filter mode SHALL support a `project:<name>` filter expression that show
 #### Scenario: No matching project
 - **WHEN** the user applies a `project:` filter that matches no tasks
 - **THEN** the table area SHALL display "No tasks match filter."
+
+### Requirement: NLP loading indicator
+While waiting for an NLP API response, the TUI SHALL display an animated loading indicator in the status bar. The indicator SHALL cycle through "Thinking", "Thinking.", "Thinking..", "Thinking..." at approximately 200ms intervals. The NLP call SHALL run on a background thread so the main event loop can continue redrawing.
+
+#### Scenario: Loading animation starts
+- **WHEN** the user submits an NLP query
+- **THEN** the TUI SHALL spawn the NLP call on a background thread and begin showing the animated "Thinking" indicator
+
+#### Scenario: Loading animation cycles
+- **WHEN** the NLP call is in progress
+- **THEN** the status message SHALL cycle through dot variants on each redraw tick
+
+#### Scenario: Loading animation stops on result
+- **WHEN** the NLP call completes (success or error)
+- **THEN** the animated indicator SHALL stop and the result SHALL be processed normally
 
 ### Requirement: NLP message responses
 When the NLP model determines that the user's query is unclear, conversational, does not map to a filter, update, or show_tasks action, or is a question about the user's tasks, the system SHALL return a `Message(String)` action containing the model's plain-text response. The model SHALL use the task context (all fields: id, title, status, priority, tags, due_date, project) to answer task queries. The TUI SHALL display this message text in the chat panel and remain in NlpChat mode.
