@@ -48,7 +48,7 @@ The TUI SHALL render a three-region layout in Normal mode: a header bar (1 line)
 - **THEN** the layout SHALL split into header, task table (top portion), chat panel (bottom portion), and an input prompt line at the bottom
 
 ### Requirement: Task table display
-The task table SHALL display columns for ID, status (checkbox), priority, title, and tags — matching the information shown by `task list`. The currently selected row SHALL be visually highlighted. When at least one visible task has a recurrence set, a recurrence indicator column SHALL be displayed showing `↻` for recurring tasks and blank for non-recurring tasks.
+The task table SHALL display columns for ID, status (checkbox), priority, title, and tags — matching the information shown by `task list`. The currently selected row SHALL be visually highlighted. When at least one visible task has a recurrence set, a recurrence indicator column SHALL be displayed showing `↻` for recurring tasks and blank for non-recurring tasks, followed by a "Pattern" column showing the human-readable recurrence pattern (e.g., "Weekly", "Daily", "3rd Thu") for recurring tasks and blank for non-recurring tasks.
 
 #### Scenario: Table with tasks
 - **WHEN** the TUI loads a file containing tasks
@@ -77,6 +77,14 @@ The task table SHALL display columns for ID, status (checkbox), priority, title,
 #### Scenario: Description column hidden
 - **WHEN** no visible tasks have a description
 - **THEN** the "Desc" column SHALL be omitted to preserve table width
+
+#### Scenario: Recurrence pattern column shown
+- **WHEN** at least one visible task has a recurrence set
+- **THEN** the table SHALL include a "Pattern" column after the "↻" column, displaying the recurrence pattern text (e.g., "Weekly", "Daily", "3rd Thu") for recurring tasks and blank for non-recurring tasks
+
+#### Scenario: Recurrence columns hidden
+- **WHEN** no visible tasks have a recurrence
+- **THEN** both the "↻" column and the "Pattern" column SHALL be omitted
 
 #### Scenario: Description truncation
 - **WHEN** a task's description exceeds 30 characters
