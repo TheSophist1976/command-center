@@ -991,6 +991,7 @@ fn format_action_summary(action: &NlpAction) -> Option<String> {
             if let Some(ref p) = set_fields.priority { set_parts.push(format!("priority={}", p)); }
             if let Some(ref s) = set_fields.status { set_parts.push(format!("status={}", s)); }
             if let Some(ref t) = set_fields.tags { set_parts.push(format!("tags=[{}]", t.join(", "))); }
+            if let Some(ref d) = set_fields.due_date { set_parts.push(format!("due_date={}", if d.is_empty() { "none" } else { d })); }
             let match_str = if match_parts.is_empty() { "(all)".to_string() } else { match_parts.join(", ") };
             let set_str = if set_parts.is_empty() { "(none)".to_string() } else { set_parts.join(", ") };
             Some(format!("Updating: match {{{}}} → set {{{}}}", match_str, set_str))
@@ -1025,6 +1026,13 @@ fn format_update_preview(tasks: &[Task], indices: &[usize], set_fields: &nlp::Se
             let new = new_tags.join(", ");
             if old != new {
                 changes.push(format!("tags [{}] → [{}]", old, new));
+            }
+        }
+        if let Some(ref new_due) = set_fields.due_date {
+            let old = task.due_date.map(|d| d.format("%Y-%m-%d").to_string()).unwrap_or_else(|| "none".to_string());
+            let new_display = if new_due.is_empty() { "none".to_string() } else { new_due.clone() };
+            if old != new_display {
+                changes.push(format!("due_date {} → {}", old, new_display));
             }
         }
         if changes.is_empty() {
@@ -1448,6 +1456,20 @@ fn handle_nlp_confirm(app: &mut App, key: KeyCode) -> Result<(), String> {
                     }
                     if let Some(ref tags) = set_fields.tags {
                         task.tags = tags.clone();
+                    }
+                    if let Some(ref due) = set_fields.due_date {
+                        if due.is_empty() {
+                            task.due_date = None;
+                        } else {
+                            match NaiveDate::parse_from_str(due, "%Y-%m-%d") {
+                                Ok(d) => task.due_date = Some(d),
+                                Err(_) => {
+                                    app.status_message = Some(format!("Invalid due date format: {}", due));
+                                    app.mode = Mode::NlpChat;
+                                    return Ok(());
+                                }
+                            }
+                        }
                     }
                     task.updated = Some(Utc::now());
                 }

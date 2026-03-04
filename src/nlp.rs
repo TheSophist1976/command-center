@@ -38,6 +38,7 @@ pub struct SetFields {
     pub priority: Option<String>,
     pub status: Option<String>,
     pub tags: Option<Vec<String>>,
+    pub due_date: Option<String>,
 }
 
 // -- Task context for prompt --
@@ -98,8 +99,8 @@ Respond with exactly one of these JSON formats:
 Fill in non-null values for the fields the user wants to filter by. Values: status is "open" or "done", priority is "critical"/"high"/"medium"/"low", project and tag are strings, title_contains is a substring to match.
 
 2. To bulk-update tasks:
-{{"action":"update","match":{{"project":null,"status":null,"priority":null,"tag":null,"title_contains":null}},"set":{{"priority":null,"status":null,"tags":null}},"description":"Human-readable description of the change"}}
-Fill in "match" with criteria to find tasks, and "set" with fields to change. Only include non-null fields in "set".
+{{"action":"update","match":{{"project":null,"status":null,"priority":null,"tag":null,"title_contains":null}},"set":{{"priority":null,"status":null,"tags":null,"due_date":null}},"description":"Human-readable description of the change"}}
+Fill in "match" with criteria to find tasks, and "set" with fields to change. Only include non-null fields in "set". The due_date field should be in YYYY-MM-DD format — resolve relative dates like "today", "tomorrow", "next monday" to absolute dates using the provided current date. Set due_date to "" to clear a task's due date.
 
 3. To respond with a message (for questions, unclear queries, or unsupported actions):
 {{"action":"message","text":"Your response text here"}}
@@ -805,5 +806,38 @@ mod tests {
         assert_eq!(def.name, "fetch_url");
         assert!(def.description.contains("web page"));
         assert!(def.input_schema["properties"]["url"].is_object());
+    }
+
+    #[test]
+    fn parse_response_update_with_due_date() {
+        let json = r#"{"action":"update","match":{"project":null,"status":"open","priority":null,"tag":null,"title_contains":null},"set":{"priority":null,"status":null,"tags":null,"due_date":"2026-03-10"},"description":"Set due date to March 10"}"#;
+        let result = parse_response(json).unwrap();
+        match result {
+            NlpAction::Update { set_fields, .. } => {
+                assert_eq!(set_fields.due_date, Some("2026-03-10".to_string()));
+            }
+            _ => panic!("Expected Update action"),
+        }
+    }
+
+    #[test]
+    fn parse_response_update_without_due_date() {
+        let json = r#"{"action":"update","match":{"project":null,"status":"open","priority":null,"tag":null,"title_contains":null},"set":{"priority":"high","status":null,"tags":null},"description":"Set priority"}"#;
+        let result = parse_response(json).unwrap();
+        match result {
+            NlpAction::Update { set_fields, .. } => {
+                assert!(set_fields.due_date.is_none());
+                assert_eq!(set_fields.priority, Some("high".to_string()));
+            }
+            _ => panic!("Expected Update action"),
+        }
+    }
+
+    #[test]
+    fn system_prompt_includes_due_date_in_update_format() {
+        let ctx = build_task_context(&[make_task(1, "Test")]);
+        let prompt = build_system_prompt(&ctx, "2026-03-04 (Wednesday)");
+        assert!(prompt.contains("\"due_date\":null"));
+        assert!(prompt.contains("YYYY-MM-DD"));
     }
 }
