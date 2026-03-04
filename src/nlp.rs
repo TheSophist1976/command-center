@@ -126,7 +126,8 @@ Rules:
 - This is a multi-turn conversation. Use context from prior messages to understand follow-up queries (e.g., "mark those as high priority" refers to previously discussed tasks)
 - Use the provided current date to interpret relative time references such as "today", "this week", "overdue", "tomorrow", etc.
 - You have access to a `fetch_url` tool that can read web pages. Use it when the user mentions a URL, asks to summarize a link, or needs information from a web page referenced in a task. After fetching, incorporate the content into your response using the message action.
-- You have access to a `query_tasks` tool that can search and filter tasks. Use it for date-based queries (overdue tasks, tasks due this week, due before/after a date) as it performs accurate date comparison. Also useful for complex filtering. This is more reliable than scanning the task list manually. After querying, use the results to construct your response (show_tasks, update, filter, or message)."#,
+- You have access to a `query_tasks` tool that can search and filter tasks. ALWAYS use it for date-based queries (overdue tasks, tasks due this week, due before/after a date) — it performs accurate date comparison in code, which is more reliable than you scanning the task list. After calling query_tasks, use the returned task IDs to construct your response (e.g., an update action with "task_ids":[...], or a show_tasks action).
+- IMPORTANT: When the user asks to update overdue tasks or tasks based on dates, you MUST first call query_tasks to get the matching task IDs, then return an update action with those task_ids. Do NOT try to determine overdue tasks by reading the task list yourself — use the tool."#,
         today, task_context
     )
 }
@@ -452,7 +453,7 @@ pub fn call_claude_api(api_key: &str, tasks: &[Task], system_prompt: &str, messa
 
     for _iteration in 0..3 {
         let request = ApiRequest {
-            model: "claude-haiku-4-5-20251001".to_string(),
+            model: "claude-sonnet-4-6".to_string(),
             max_tokens: 4096,
             system: system_prompt.to_string(),
             messages: conversation.clone(),
