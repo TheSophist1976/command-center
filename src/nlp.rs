@@ -44,7 +44,7 @@ pub struct SetFields {
 
 // -- Task context for prompt --
 
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize)]
 struct TaskSummary {
     id: u32,
     title: String,
@@ -125,7 +125,8 @@ Rules:
 - The description field in update should say what will happen (e.g., "Set priority to high on 5 frontend tasks")
 - This is a multi-turn conversation. Use context from prior messages to understand follow-up queries (e.g., "mark those as high priority" refers to previously discussed tasks)
 - Use the provided current date to interpret relative time references such as "today", "this week", "overdue", "tomorrow", etc.
-- You have access to a `fetch_url` tool that can read web pages. Use it when the user mentions a URL, asks to summarize a link, or needs information from a web page referenced in a task. After fetching, incorporate the content into your response using the message action."#,
+- You have access to a `fetch_url` tool that can read web pages. Use it when the user mentions a URL, asks to summarize a link, or needs information from a web page referenced in a task. After fetching, incorporate the content into your response using the message action.
+- You have access to a `query_tasks` tool that can search and filter tasks. Use it for date-based queries (overdue tasks, tasks due this week, due before/after a date) as it performs accurate date comparison. Also useful for complex filtering. This is more reliable than scanning the task list manually. After querying, use the results to construct your response (show_tasks, update, filter, or message)."#,
         today, task_context
     )
 }
@@ -222,6 +223,52 @@ fn fetch_url_tool_def() -> ToolDef {
     }
 }
 
+fn query_tasks_tool_def() -> ToolDef {
+    ToolDef {
+        name: "query_tasks".to_string(),
+        description: "Search and filter the user's tasks. Use this for date-based queries (overdue, due this week), or when you need to find tasks matching specific criteria. More reliable than scanning the task list manually.".to_string(),
+        input_schema: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "status": {
+                    "type": "string",
+                    "description": "Filter by status: \"open\" or \"done\"",
+                    "enum": ["open", "done"]
+                },
+                "priority": {
+                    "type": "string",
+                    "description": "Filter by priority: \"critical\", \"high\", \"medium\", or \"low\"",
+                    "enum": ["critical", "high", "medium", "low"]
+                },
+                "project": {
+                    "type": "string",
+                    "description": "Filter by project name (case-insensitive)"
+                },
+                "tag": {
+                    "type": "string",
+                    "description": "Filter by tag (case-insensitive)"
+                },
+                "title_contains": {
+                    "type": "string",
+                    "description": "Filter by title substring (case-insensitive)"
+                },
+                "overdue": {
+                    "type": "boolean",
+                    "description": "If true, return only open tasks with due_date before today"
+                },
+                "has_due_date": {
+                    "type": "boolean",
+                    "description": "If true, return tasks with a due date; if false, tasks without"
+                },
+                "has_recurrence": {
+                    "type": "boolean",
+                    "description": "If true, return recurring tasks; if false, non-recurring tasks"
+                }
+            }
+        }),
+    }
+}
+
 /// Fetch a URL and extract readable text from the HTML.
 /// Strips script/style tags, then removes remaining HTML tags.
 /// Truncates to 4000 characters.
@@ -302,8 +349,84 @@ fn html_to_text(html: &str) -> String {
     }
 }
 
+/// Execute a query_tasks tool call: filter tasks by criteria and return JSON.
+fn execute_query_tasks(input: &serde_json::Value, tasks: &[Task]) -> String {
+    let today = chrono::Local::now().date_naive();
+
+    let status = input.get("status").and_then(|v| v.as_str());
+    let priority = input.get("priority").and_then(|v| v.as_str());
+    let project = input.get("project").and_then(|v| v.as_str());
+    let tag = input.get("tag").and_then(|v| v.as_str());
+    let title_contains = input.get("title_contains").and_then(|v| v.as_str());
+    let overdue = input.get("overdue").and_then(|v| v.as_bool());
+    let has_due_date = input.get("has_due_date").and_then(|v| v.as_bool());
+    let has_recurrence = input.get("has_recurrence").and_then(|v| v.as_bool());
+
+    let matching: Vec<&Task> = tasks
+        .iter()
+        .filter(|t| {
+            if let Some(s) = status {
+                if !t.status.to_string().eq_ignore_ascii_case(s) { return false; }
+            }
+            if let Some(p) = priority {
+                if !t.priority.to_string().eq_ignore_ascii_case(p) { return false; }
+            }
+            if let Some(proj) = project {
+                match &t.project {
+                    Some(p) => if !p.eq_ignore_ascii_case(proj) { return false; },
+                    None => return false,
+                }
+            }
+            if let Some(tg) = tag {
+                if !t.tags.iter().any(|x| x.eq_ignore_ascii_case(tg)) { return false; }
+            }
+            if let Some(tc) = title_contains {
+                if !t.title.to_lowercase().contains(&tc.to_lowercase()) { return false; }
+            }
+            if overdue == Some(true) {
+                let is_overdue = t.status.to_string().eq_ignore_ascii_case("open")
+                    && t.due_date.is_some_and(|d| d < today);
+                if !is_overdue { return false; }
+            }
+            if let Some(hdd) = has_due_date {
+                if hdd && t.due_date.is_none() { return false; }
+                if !hdd && t.due_date.is_some() { return false; }
+            }
+            if let Some(hr) = has_recurrence {
+                if hr && t.recurrence.is_none() { return false; }
+                if !hr && t.recurrence.is_some() { return false; }
+            }
+            true
+        })
+        .collect();
+
+    let total = matching.len();
+    let cap = 50;
+    let summaries: Vec<TaskSummary> = matching
+        .into_iter()
+        .take(cap)
+        .map(|t| TaskSummary {
+            id: t.id,
+            title: t.title.clone(),
+            status: t.status.to_string(),
+            priority: t.priority.to_string(),
+            tags: t.tags.clone(),
+            due_date: t.due_date.map(|d| d.format("%Y-%m-%d").to_string()),
+            project: t.project.clone(),
+            recurrence: t.recurrence.map(|r| r.to_string()),
+            description: t.description.clone(),
+        })
+        .collect();
+
+    let mut json = serde_json::to_string(&summaries).unwrap_or_else(|_| "[]".to_string());
+    if total > cap {
+        json.push_str(&format!("\n(Showing {} of {} matching tasks)", cap, total));
+    }
+    json
+}
+
 /// Execute a tool_use request from the model.
-fn execute_tool(name: &str, input: &serde_json::Value) -> String {
+fn execute_tool(name: &str, input: &serde_json::Value, tasks: &[Task]) -> String {
     match name {
         "fetch_url" => {
             let url = input.get("url").and_then(|v| v.as_str()).unwrap_or("");
@@ -315,16 +438,17 @@ fn execute_tool(name: &str, input: &serde_json::Value) -> String {
                 Err(e) => format!("Error fetching URL: {}", e),
             }
         }
+        "query_tasks" => execute_query_tasks(input, tasks),
         other => format!("Unknown tool: {}", other),
     }
 }
 
-pub fn call_claude_api(api_key: &str, system_prompt: &str, messages: &[ApiMessage]) -> Result<String, String> {
+pub fn call_claude_api(api_key: &str, tasks: &[Task], system_prompt: &str, messages: &[ApiMessage]) -> Result<String, String> {
     let client = reqwest::blocking::Client::new();
     let base = api_base_url();
 
     let mut conversation: Vec<ApiMessageRaw> = messages.iter().map(ApiMessageRaw::from).collect();
-    let tools = vec![fetch_url_tool_def()];
+    let tools = vec![fetch_url_tool_def(), query_tasks_tool_def()];
 
     for _iteration in 0..3 {
         let request = ApiRequest {
@@ -409,7 +533,7 @@ pub fn call_claude_api(api_key: &str, system_prompt: &str, messages: &[ApiMessag
             .map(|block| {
                 let name = block.name.as_deref().unwrap_or("");
                 let input = block.input.as_ref().cloned().unwrap_or(serde_json::json!({}));
-                let result = execute_tool(name, &input);
+                let result = execute_tool(name, &input, tasks);
                 log_debug(&format!("Tool {} result: {} chars", name, result.len()));
                 serde_json::json!({
                     "type": "tool_result",
@@ -532,7 +656,7 @@ pub fn interpret(tasks: &[Task], messages: &[ApiMessage], api_key: &str) -> Resu
     log_debug(&format!("Task count: {}", tasks.len()));
     log_debug(&format!("System prompt:\n{}", system_prompt));
 
-    let response_text = call_claude_api(api_key, &system_prompt, messages)?;
+    let response_text = call_claude_api(api_key, tasks, &system_prompt, messages)?;
 
     log_debug(&format!("Claude response: {}", response_text));
 
@@ -573,7 +697,7 @@ Rules:
         content: input.to_string(),
     }];
 
-    let response = call_claude_api(api_key, system_prompt, &messages)?;
+    let response = call_claude_api(api_key, &[], system_prompt, &messages)?;
 
     // Parse the response
     let cleaned = response
@@ -792,13 +916,13 @@ mod tests {
 
     #[test]
     fn execute_tool_fetch_url_empty_url() {
-        let result = execute_tool("fetch_url", &serde_json::json!({}));
+        let result = execute_tool("fetch_url", &serde_json::json!({}), &[]);
         assert!(result.contains("No URL provided"));
     }
 
     #[test]
     fn execute_tool_unknown_tool() {
-        let result = execute_tool("unknown_tool", &serde_json::json!({}));
+        let result = execute_tool("unknown_tool", &serde_json::json!({}), &[]);
         assert!(result.contains("Unknown tool"));
     }
 
@@ -862,5 +986,96 @@ mod tests {
         let prompt = build_system_prompt(&ctx, "2026-03-04 (Wednesday)");
         assert!(prompt.contains("\"task_ids\":null"));
         assert!(prompt.contains("task_ids"));
+    }
+
+    #[test]
+    fn query_tasks_tool_def_has_correct_name() {
+        let def = query_tasks_tool_def();
+        assert_eq!(def.name, "query_tasks");
+        assert!(def.input_schema["properties"]["overdue"].is_object());
+        assert!(def.input_schema["properties"]["status"].is_object());
+        assert!(def.input_schema["properties"]["has_due_date"].is_object());
+        assert!(def.input_schema["properties"]["has_recurrence"].is_object());
+    }
+
+    #[test]
+    fn execute_query_tasks_filters_by_status() {
+        let mut t1 = make_task(1, "Open task");
+        t1.status = Status::Open;
+        let mut t2 = make_task(2, "Done task");
+        t2.status = Status::Done;
+        let tasks = vec![t1, t2];
+
+        let result = execute_query_tasks(&serde_json::json!({"status": "open"}), &tasks);
+        let parsed: Vec<TaskSummary> = serde_json::from_str(&result).unwrap();
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].id, 1);
+    }
+
+    #[test]
+    fn execute_query_tasks_filters_overdue() {
+        let today = chrono::Local::now().date_naive();
+        let yesterday = today - chrono::Duration::days(1);
+        let tomorrow = today + chrono::Duration::days(1);
+
+        let mut t1 = make_task(1, "Overdue");
+        t1.due_date = Some(yesterday);
+        t1.status = Status::Open;
+
+        let mut t2 = make_task(2, "Due tomorrow");
+        t2.due_date = Some(tomorrow);
+        t2.status = Status::Open;
+
+        let mut t3 = make_task(3, "Overdue but done");
+        t3.due_date = Some(yesterday);
+        t3.status = Status::Done;
+
+        let mut t4 = make_task(4, "Due today");
+        t4.due_date = Some(today);
+        t4.status = Status::Open;
+
+        let tasks = vec![t1, t2, t3, t4];
+        let result = execute_query_tasks(&serde_json::json!({"overdue": true}), &tasks);
+        let parsed: Vec<TaskSummary> = serde_json::from_str(&result).unwrap();
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].id, 1);
+    }
+
+    #[test]
+    fn execute_query_tasks_combined_criteria() {
+        let mut t1 = make_task(1, "High open");
+        t1.priority = Priority::High;
+        t1.status = Status::Open;
+
+        let mut t2 = make_task(2, "High done");
+        t2.priority = Priority::High;
+        t2.status = Status::Done;
+
+        let mut t3 = make_task(3, "Low open");
+        t3.priority = Priority::Low;
+        t3.status = Status::Open;
+
+        let tasks = vec![t1, t2, t3];
+        let result = execute_query_tasks(&serde_json::json!({"status": "open", "priority": "high"}), &tasks);
+        let parsed: Vec<TaskSummary> = serde_json::from_str(&result).unwrap();
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].id, 1);
+    }
+
+    #[test]
+    fn execute_query_tasks_caps_at_50() {
+        let tasks: Vec<Task> = (1..=60).map(|i| make_task(i, &format!("Task {}", i))).collect();
+        let result = execute_query_tasks(&serde_json::json!({}), &tasks);
+        let parsed: Vec<TaskSummary> = serde_json::from_str(result.lines().next().unwrap()).unwrap();
+        assert_eq!(parsed.len(), 50);
+        assert!(result.contains("Showing 50 of 60"));
+    }
+
+    #[test]
+    fn system_prompt_mentions_query_tasks() {
+        let ctx = build_task_context(&[make_task(1, "Test")]);
+        let prompt = build_system_prompt(&ctx, "2026-03-04 (Wednesday)");
+        assert!(prompt.contains("query_tasks"));
+        assert!(prompt.contains("date-based queries"));
     }
 }
