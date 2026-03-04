@@ -1687,7 +1687,7 @@ fn draw_table(frame: &mut Frame, app: &mut App, area: Rect) {
     if show_desc { header_cells.push("Desc"); }
     if show_due { header_cells.push("Due"); }
     if show_project { header_cells.push("Project"); }
-    if show_recur { header_cells.push("↻"); }
+    if show_recur { header_cells.push("↻"); header_cells.push("Pattern"); }
     header_cells.push("Tags");
 
     let header = Row::new(header_cells)
@@ -1738,6 +1738,9 @@ fn draw_table(frame: &mut Frame, app: &mut App, area: Rect) {
             }
             if show_recur {
                 cells.push(Cell::from(if task.recurrence.is_some() { "↻" } else { "" }));
+                cells.push(Cell::from(
+                    task.recurrence.as_ref().map(|r| format_recurrence_display(r)).unwrap_or_default()
+                ));
             }
             cells.push(Cell::from(tags_str));
             let row = Row::new(cells);
@@ -1760,7 +1763,7 @@ fn draw_table(frame: &mut Frame, app: &mut App, area: Rect) {
     if show_desc { widths.push(Constraint::Length(30)); }
     if show_due { widths.push(Constraint::Length(12)); }
     if show_project { widths.push(Constraint::Length(15)); }
-    if show_recur { widths.push(Constraint::Length(3)); }
+    if show_recur { widths.push(Constraint::Length(3)); widths.push(Constraint::Min(8)); }
     widths.push(Constraint::Length(20));
 
     let table = Table::new(rows, widths)
@@ -2699,5 +2702,19 @@ mod tests {
             };
             assert_eq!(dots, expected, "Frame {} should be '{}'", i, expected);
         }
+    }
+
+    #[test]
+    fn recurrence_pattern_column_shows_pattern_text() {
+        use crate::task::{Recurrence, IntervalUnit};
+        let mut task = make_task(None);
+        task.recurrence = Some(Recurrence::Interval(IntervalUnit::Weekly));
+        let display = format_recurrence_display(task.recurrence.as_ref().unwrap());
+        assert_eq!(display, "Weekly");
+
+        let mut task2 = make_task(None);
+        task2.recurrence = Some(Recurrence::NthWeekday { n: 3, weekday: chrono::Weekday::Thu });
+        let display2 = format_recurrence_display(task2.recurrence.as_ref().unwrap());
+        assert_eq!(display2, "Monthly (3rd Thu)");
     }
 }
