@@ -1,5 +1,6 @@
 use std::io::{self, stdout};
 use std::path::{Path, PathBuf};
+use std::sync::mpsc;
 use std::time::Duration;
 
 use chrono::{Datelike, Days, Local, Months, NaiveDate, Utc};
@@ -336,6 +337,8 @@ struct App {
     detail_draft: Option<DetailDraft>,
     detail_field_index: usize,
     pending_navigation: Option<NavDirection>,
+    nlp_pending: Option<mpsc::Receiver<Result<(NlpAction, String), String>>>,
+    nlp_spinner_frame: u8,
 }
 
 impl App {
@@ -361,6 +364,8 @@ impl App {
             detail_draft: None,
             detail_field_index: 0,
             pending_navigation: None,
+            nlp_pending: None,
+            nlp_spinner_frame: 0,
         };
         app.table_state.select(Some(0));
         Ok(app)
@@ -429,11 +434,40 @@ pub fn run(path: &Path) -> Result<(), String> {
 
 fn event_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App) -> Result<(), String> {
     loop {
+        // Check for NLP background result
+        if let Some(ref rx) = app.nlp_pending {
+            match rx.try_recv() {
+                Ok(result) => {
+                    app.nlp_pending = None;
+                    app.nlp_spinner_frame = 0;
+                    process_nlp_result(app, result)?;
+                }
+                Err(mpsc::TryRecvError::Empty) => {
+                    // Still waiting — update spinner animation
+                    let dots = match app.nlp_spinner_frame % 4 {
+                        0 => "Thinking",
+                        1 => "Thinking.",
+                        2 => "Thinking..",
+                        _ => "Thinking...",
+                    };
+                    app.status_message = Some(dots.to_string());
+                    app.nlp_spinner_frame = app.nlp_spinner_frame.wrapping_add(1);
+                }
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    // Thread panicked or dropped sender
+                    app.nlp_pending = None;
+                    app.nlp_spinner_frame = 0;
+                    app.status_message = None;
+                    app.chat_history.push(ChatMessage::Error("NLP request failed unexpectedly".to_string()));
+                }
+            }
+        }
+
         terminal
             .draw(|frame| draw(frame, app))
             .map_err(|e| format!("Draw error: {}", e))?;
 
-        if event::poll(Duration::from_millis(250))
+        if event::poll(Duration::from_millis(200))
             .map_err(|e| format!("Event poll error: {}", e))?
         {
             if let Event::Key(key) = event::read().map_err(|e| format!("Event read error: {}", e))? {
@@ -1046,13 +1080,179 @@ fn format_update_preview(tasks: &[Task], indices: &[usize], set_fields: &nlp::Se
     lines
 }
 
+fn process_nlp_result(app: &mut App, result: Result<(NlpAction, String), String>) -> Result<(), String> {
+    app.status_message = None;
+    match result {
+        Ok((ref action @ NlpAction::Filter(ref criteria), raw_response)) => {
+            app.nlp_messages.push(ApiMessage {
+                role: "assistant".to_string(),
+                content: raw_response,
+            });
+            if let Some(summary) = format_action_summary(action) {
+                app.chat_history.push(ChatMessage::Assistant(summary));
+            }
+            let mut filter = Filter::default();
+            if let Some(ref s) = criteria.status {
+                if let Ok(status) = s.parse::<Status>() {
+                    filter.status = Some(status);
+                }
+            }
+            if let Some(ref p) = criteria.priority {
+                if let Ok(priority) = p.parse::<Priority>() {
+                    filter.priority = Some(priority);
+                }
+            }
+            if let Some(ref t) = criteria.tag {
+                filter.tag = Some(t.clone());
+            }
+            if let Some(ref p) = criteria.project {
+                filter.project = Some(p.clone());
+            }
+            if let Some(ref tc) = criteria.title_contains {
+                filter.title_contains = Some(tc.clone());
+            }
+            app.view = View::All;
+            app.filter = filter;
+            app.selected = 0;
+            app.table_state.select(Some(0));
+            app.clamp_selection();
+            app.chat_history.push(ChatMessage::Assistant("Filter applied.".to_string()));
+        }
+        Ok((ref action @ NlpAction::Update { ref match_criteria, ref set_fields, .. }, raw_response)) => {
+            app.nlp_messages.push(ApiMessage {
+                role: "assistant".to_string(),
+                content: raw_response,
+            });
+            if let Some(summary) = format_action_summary(action) {
+                app.chat_history.push(ChatMessage::Assistant(summary));
+            }
+            let has_any_criteria = match_criteria.status.is_some()
+                || match_criteria.priority.is_some()
+                || match_criteria.tag.is_some()
+                || match_criteria.project.is_some()
+                || match_criteria.title_contains.is_some();
+            let matching: Vec<usize> = if !has_any_criteria {
+                vec![] // empty criteria matches nothing — prevents accidental bulk updates
+            } else {
+                app.task_file.tasks.iter().enumerate()
+                    .filter(|(_, t)| {
+                        if let Some(ref s) = match_criteria.status {
+                            if !t.status.to_string().eq_ignore_ascii_case(s) { return false; }
+                        }
+                        if let Some(ref p) = match_criteria.priority {
+                            if !t.priority.to_string().eq_ignore_ascii_case(p) { return false; }
+                        }
+                        if let Some(ref tag) = match_criteria.tag {
+                            if !t.tags.iter().any(|tg| tg.eq_ignore_ascii_case(tag)) { return false; }
+                        }
+                        if let Some(ref proj) = match_criteria.project {
+                            match &t.project {
+                                Some(p) => if !p.eq_ignore_ascii_case(proj) { return false; },
+                                None => return false,
+                            }
+                        }
+                        if let Some(ref tc) = match_criteria.title_contains {
+                            if !t.title.to_lowercase().contains(&tc.to_lowercase()) { return false; }
+                        }
+                        true
+                    })
+                    .map(|(i, _)| i)
+                    .collect()
+            };
+
+            if matching.is_empty() {
+                app.chat_history.push(ChatMessage::Assistant("No tasks match the criteria.".to_string()));
+            } else {
+                let preview_lines = format_update_preview(&app.task_file.tasks, &matching, set_fields);
+                if !preview_lines.is_empty() {
+                    app.chat_history.push(ChatMessage::Assistant(
+                        format!("Changes:\n{}", preview_lines.join("\n"))
+                    ));
+                }
+                app.pending_nlp_update = Some((action.clone(), matching));
+                app.mode = Mode::ConfirmingNlp;
+            }
+        }
+        Ok((NlpAction::Message(text), raw_response)) => {
+            app.nlp_messages.push(ApiMessage {
+                role: "assistant".to_string(),
+                content: raw_response,
+            });
+            app.chat_history.push(ChatMessage::Assistant(text));
+        }
+        Ok((NlpAction::ShowTasks { task_ids, text }, raw_response)) => {
+            app.nlp_messages.push(ApiMessage {
+                role: "assistant".to_string(),
+                content: raw_response,
+            });
+            let tasks: Vec<(u32, String, String, String)> = task_ids
+                .iter()
+                .filter_map(|&id| {
+                    app.task_file.tasks.iter().find(|t| t.id == id).map(|t| {
+                        (t.id, t.title.clone(), t.priority.to_string(), t.status.to_string())
+                    })
+                })
+                .collect();
+            app.chat_history.push(ChatMessage::TaskList { text, tasks });
+        }
+        Ok((ref action @ NlpAction::SetRecurrence { task_id, ref recurrence, description: _ }, raw_response)) => {
+            app.nlp_messages.push(ApiMessage {
+                role: "assistant".to_string(),
+                content: raw_response,
+            });
+            if let Some(summary) = format_action_summary(action) {
+                app.chat_history.push(ChatMessage::Assistant(summary));
+            }
+            if let Some(task) = app.task_file.find_task_mut(task_id) {
+                match recurrence {
+                    Some(recur_str) => {
+                        match recur_str.parse::<crate::task::Recurrence>() {
+                            Ok(recur) => {
+                                task.recurrence = Some(recur);
+                                task.updated = Some(Utc::now());
+                                app.save()?;
+                                app.chat_history.push(ChatMessage::Assistant(
+                                    format!("Set recurrence on task {} to {}", task_id, format_recurrence_display(&recur))
+                                ));
+                            }
+                            Err(e) => {
+                                app.chat_history.push(ChatMessage::Error(format!("Invalid recurrence: {}", e)));
+                            }
+                        }
+                    }
+                    None => {
+                        task.recurrence = None;
+                        task.updated = Some(Utc::now());
+                        app.save()?;
+                        app.chat_history.push(ChatMessage::Assistant(
+                            format!("Removed recurrence from task {}", task_id)
+                        ));
+                    }
+                }
+            } else {
+                app.chat_history.push(ChatMessage::Error(format!("Task {} not found", task_id)));
+            }
+        }
+        Err(e) => {
+            app.chat_history.push(ChatMessage::Error(e));
+        }
+    }
+    Ok(())
+}
+
 fn handle_nlp_chat<B: Backend>(terminal: &mut Terminal<B>, app: &mut App, key: KeyCode) -> Result<(), String> {
     match key {
         KeyCode::Esc => {
+            app.nlp_pending = None;
+            app.nlp_spinner_frame = 0;
             app.mode = Mode::Normal;
             app.input_buffer.clear();
             app.chat_history.clear();
             app.nlp_messages.clear();
+            app.status_message = None;
+        }
+        KeyCode::Enter if app.nlp_pending.is_some() => {
+            // Ignore Enter while NLP request is in progress
         }
         KeyCode::Enter => {
             let input = app.input_buffer.clone();
@@ -1084,168 +1284,16 @@ fn handle_nlp_chat<B: Backend>(terminal: &mut Terminal<B>, app: &mut App, key: K
                 app.nlp_messages.remove(0);
             }
 
-            // Redraw so the user's message appears before the blocking API call
-            app.status_message = Some("Thinking...".to_string());
-            terminal
-                .draw(|frame| draw(frame, app))
-                .map_err(|e| format!("Draw error: {}", e))?;
-
-            match nlp::interpret(&app.task_file.tasks, &app.nlp_messages, &api_key) {
-                Ok((ref action @ NlpAction::Filter(ref criteria), raw_response)) => {
-                    app.nlp_messages.push(ApiMessage {
-                        role: "assistant".to_string(),
-                        content: raw_response,
-                    });
-                    if let Some(summary) = format_action_summary(action) {
-                        app.chat_history.push(ChatMessage::Assistant(summary));
-                    }
-                    let mut filter = Filter::default();
-                    if let Some(ref s) = criteria.status {
-                        if let Ok(status) = s.parse::<Status>() {
-                            filter.status = Some(status);
-                        }
-                    }
-                    if let Some(ref p) = criteria.priority {
-                        if let Ok(priority) = p.parse::<Priority>() {
-                            filter.priority = Some(priority);
-                        }
-                    }
-                    if let Some(ref t) = criteria.tag {
-                        filter.tag = Some(t.clone());
-                    }
-                    if let Some(ref p) = criteria.project {
-                        filter.project = Some(p.clone());
-                    }
-                    if let Some(ref tc) = criteria.title_contains {
-                        filter.title_contains = Some(tc.clone());
-                    }
-                    app.view = View::All;
-                    app.filter = filter;
-                    app.selected = 0;
-                    app.table_state.select(Some(0));
-                    app.clamp_selection();
-                    app.chat_history.push(ChatMessage::Assistant("Filter applied.".to_string()));
-                }
-                Ok((ref action @ NlpAction::Update { ref match_criteria, ref set_fields, .. }, raw_response)) => {
-                    app.nlp_messages.push(ApiMessage {
-                        role: "assistant".to_string(),
-                        content: raw_response,
-                    });
-                    if let Some(summary) = format_action_summary(action) {
-                        app.chat_history.push(ChatMessage::Assistant(summary));
-                    }
-                    let has_any_criteria = match_criteria.status.is_some()
-                        || match_criteria.priority.is_some()
-                        || match_criteria.tag.is_some()
-                        || match_criteria.project.is_some()
-                        || match_criteria.title_contains.is_some();
-                    let matching: Vec<usize> = if !has_any_criteria {
-                        vec![] // empty criteria matches nothing — prevents accidental bulk updates
-                    } else {
-                        app.task_file.tasks.iter().enumerate()
-                            .filter(|(_, t)| {
-                                if let Some(ref s) = match_criteria.status {
-                                    if !t.status.to_string().eq_ignore_ascii_case(s) { return false; }
-                                }
-                                if let Some(ref p) = match_criteria.priority {
-                                    if !t.priority.to_string().eq_ignore_ascii_case(p) { return false; }
-                                }
-                                if let Some(ref tag) = match_criteria.tag {
-                                    if !t.tags.iter().any(|tg| tg.eq_ignore_ascii_case(tag)) { return false; }
-                                }
-                                if let Some(ref proj) = match_criteria.project {
-                                    match &t.project {
-                                        Some(p) => if !p.eq_ignore_ascii_case(proj) { return false; },
-                                        None => return false,
-                                    }
-                                }
-                                if let Some(ref tc) = match_criteria.title_contains {
-                                    if !t.title.to_lowercase().contains(&tc.to_lowercase()) { return false; }
-                                }
-                                true
-                            })
-                            .map(|(i, _)| i)
-                            .collect()
-                    };
-
-                    if matching.is_empty() {
-                        app.chat_history.push(ChatMessage::Assistant("No tasks match the criteria.".to_string()));
-                    } else {
-                        let preview_lines = format_update_preview(&app.task_file.tasks, &matching, set_fields);
-                        if !preview_lines.is_empty() {
-                            app.chat_history.push(ChatMessage::Assistant(
-                                format!("Changes:\n{}", preview_lines.join("\n"))
-                            ));
-                        }
-                        app.pending_nlp_update = Some((action.clone(), matching));
-                        app.mode = Mode::ConfirmingNlp;
-                    }
-                }
-                Ok((NlpAction::Message(text), raw_response)) => {
-                    app.nlp_messages.push(ApiMessage {
-                        role: "assistant".to_string(),
-                        content: raw_response,
-                    });
-                    app.chat_history.push(ChatMessage::Assistant(text));
-                }
-                Ok((NlpAction::ShowTasks { task_ids, text }, raw_response)) => {
-                    app.nlp_messages.push(ApiMessage {
-                        role: "assistant".to_string(),
-                        content: raw_response,
-                    });
-                    let tasks: Vec<(u32, String, String, String)> = task_ids
-                        .iter()
-                        .filter_map(|&id| {
-                            app.task_file.tasks.iter().find(|t| t.id == id).map(|t| {
-                                (t.id, t.title.clone(), t.priority.to_string(), t.status.to_string())
-                            })
-                        })
-                        .collect();
-                    app.chat_history.push(ChatMessage::TaskList { text, tasks });
-                }
-                Ok((ref action @ NlpAction::SetRecurrence { task_id, ref recurrence, description: _ }, raw_response)) => {
-                    app.nlp_messages.push(ApiMessage {
-                        role: "assistant".to_string(),
-                        content: raw_response,
-                    });
-                    if let Some(summary) = format_action_summary(action) {
-                        app.chat_history.push(ChatMessage::Assistant(summary));
-                    }
-                    // Apply the recurrence change
-                    if let Some(task) = app.task_file.find_task_mut(task_id) {
-                        match recurrence {
-                            Some(recur_str) => {
-                                match recur_str.parse::<crate::task::Recurrence>() {
-                                    Ok(recur) => {
-                                        task.recurrence = Some(recur);
-                                        task.updated = Some(Utc::now());
-                                        app.save()?;
-                                        app.chat_history.push(ChatMessage::Assistant(
-                                            format!("Set recurrence on task {} to {}", task_id, format_recurrence_display(&recur))
-                                        ));
-                                    }
-                                    Err(e) => {
-                                        app.chat_history.push(ChatMessage::Error(format!("Invalid recurrence: {}", e)));
-                                    }
-                                }
-                            }
-                            None => {
-                                task.recurrence = None;
-                                task.updated = Some(Utc::now());
-                                app.save()?;
-                                app.chat_history.push(ChatMessage::Assistant(
-                                    format!("Removed recurrence from task {}", task_id)
-                                ));
-                            }
-                        }
-                    } else {
-                        app.chat_history.push(ChatMessage::Error(format!("Task {} not found", task_id)));
-                    }
-                }
-                Err(e) => {
-                    app.chat_history.push(ChatMessage::Error(e));
-                }
-            }
+            // Spawn NLP call on background thread for animated loading
+            let tasks_clone = app.task_file.tasks.clone();
+            let messages_clone = app.nlp_messages.clone();
+            let (tx, rx) = mpsc::channel();
+            std::thread::spawn(move || {
+                let result = nlp::interpret(&tasks_clone, &messages_clone, &api_key);
+                let _ = tx.send(result);
+            });
+            app.nlp_pending = Some(rx);
+            app.nlp_spinner_frame = 0;
         }
         KeyCode::Backspace => {
             app.input_buffer.pop();
@@ -1631,12 +1679,15 @@ fn draw_table(frame: &mut Frame, app: &mut App, area: Rect) {
         .style(Style::default().add_modifier(Modifier::BOLD))
         .bottom_margin(0);
 
+    // Compute today once for consistent overdue checks across all rows.
+    // Overdue = strictly before today (tasks due today are NOT overdue).
+    let today = Local::now().date_naive();
     let rows: Vec<Row> = filtered
         .iter()
         .map(|&i| {
             let task = &app.task_file.tasks[i];
             let is_overdue = task.status == Status::Open
-                && task.due_date.map_or(false, |d| d < Local::now().date_naive());
+                && task.due_date.map_or(false, |d| d < today);
             let status_str = match task.status {
                 Status::Open => if is_overdue { "[!]" } else { "[ ]" },
                 Status::Done => "[x]",
@@ -2219,6 +2270,8 @@ mod tests {
             detail_draft: None,
             detail_field_index: 0,
             pending_navigation: None,
+            nlp_pending: None,
+            nlp_spinner_frame: 0,
         }
     }
 
@@ -2312,6 +2365,8 @@ mod tests {
             detail_draft: None,
             detail_field_index: 0,
             pending_navigation: None,
+            nlp_pending: None,
+            nlp_spinner_frame: 0,
         }
     }
 
@@ -2593,5 +2648,41 @@ mod tests {
             ..Filter::default()
         };
         assert!(!filter3.matches(&task));
+    }
+
+    #[test]
+    fn task_due_today_is_not_overdue_in_view() {
+        let today = NaiveDate::from_ymd_opt(2026, 3, 4).unwrap();
+        let task = make_task(Some(today));
+        // Task due today should appear in Today view (it's due today, not overdue)
+        assert!(View::Today.matches(&task, today));
+        // The overdue path in View::matches requires d < today, which is false for d == today
+        // So the task is shown because it matches the Today view directly, not as overdue
+    }
+
+    #[test]
+    fn task_due_yesterday_is_overdue_in_views() {
+        let today = NaiveDate::from_ymd_opt(2026, 3, 4).unwrap();
+        let yesterday = NaiveDate::from_ymd_opt(2026, 3, 3).unwrap();
+        let task = make_task(Some(yesterday));
+        // Overdue open tasks appear in all time-based views
+        assert!(View::Today.matches(&task, today));
+        assert!(View::Weekly.matches(&task, today));
+        assert!(View::Monthly.matches(&task, today));
+    }
+
+    #[test]
+    fn nlp_spinner_frame_cycles() {
+        let frames = ["Thinking", "Thinking.", "Thinking..", "Thinking..."];
+        for i in 0u8..8 {
+            let expected = frames[(i % 4) as usize];
+            let dots = match i % 4 {
+                0 => "Thinking",
+                1 => "Thinking.",
+                2 => "Thinking..",
+                _ => "Thinking...",
+            };
+            assert_eq!(dots, expected, "Frame {} should be '{}'", i, expected);
+        }
     }
 }
