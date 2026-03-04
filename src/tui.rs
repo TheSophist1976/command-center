@@ -1623,12 +1623,19 @@ fn draw_header(frame: &mut Frame, app: &App, area: Rect) {
 fn format_recurrence_display(r: &crate::task::Recurrence) -> String {
     use crate::task::{IntervalUnit, Recurrence};
     match r {
-        Recurrence::Interval(unit) => match unit {
-            IntervalUnit::Daily => "Daily".to_string(),
-            IntervalUnit::Weekly => "Weekly".to_string(),
-            IntervalUnit::Monthly => "Monthly".to_string(),
-            IntervalUnit::Yearly => "Yearly".to_string(),
-        },
+        Recurrence::Interval { unit, count } => {
+            let (singular, plural) = match unit {
+                IntervalUnit::Daily => ("Daily", "Days"),
+                IntervalUnit::Weekly => ("Weekly", "Weeks"),
+                IntervalUnit::Monthly => ("Monthly", "Months"),
+                IntervalUnit::Yearly => ("Yearly", "Years"),
+            };
+            if *count == 1 {
+                singular.to_string()
+            } else {
+                format!("Every {} {}", count, plural)
+            }
+        }
         Recurrence::NthWeekday { n, weekday } => {
             let ordinal = match n {
                 1 => "1st",
@@ -2195,7 +2202,7 @@ mod tests {
     fn recurring_view_shows_recurring_open_task() {
         let today = NaiveDate::from_ymd_opt(2026, 2, 26).unwrap();
         let mut task = make_task(Some(today));
-        task.recurrence = Some(crate::task::Recurrence::Interval(crate::task::IntervalUnit::Weekly));
+        task.recurrence = Some(crate::task::Recurrence::Interval { unit: crate::task::IntervalUnit::Weekly, count: 1 });
         assert!(View::Recurring.matches(&task, today));
     }
 
@@ -2204,7 +2211,7 @@ mod tests {
         let today = NaiveDate::from_ymd_opt(2026, 2, 26).unwrap();
         let mut task = make_task(Some(today));
         task.status = Status::Done;
-        task.recurrence = Some(crate::task::Recurrence::Interval(crate::task::IntervalUnit::Daily));
+        task.recurrence = Some(crate::task::Recurrence::Interval { unit: crate::task::IntervalUnit::Daily, count: 1 });
         assert!(!View::Recurring.matches(&task, today));
     }
 
@@ -2708,7 +2715,7 @@ mod tests {
     fn recurrence_pattern_column_shows_pattern_text() {
         use crate::task::{Recurrence, IntervalUnit};
         let mut task = make_task(None);
-        task.recurrence = Some(Recurrence::Interval(IntervalUnit::Weekly));
+        task.recurrence = Some(Recurrence::Interval { unit: IntervalUnit::Weekly, count: 1 });
         let display = format_recurrence_display(task.recurrence.as_ref().unwrap());
         assert_eq!(display, "Weekly");
 
@@ -2723,7 +2730,7 @@ mod tests {
         use crate::task::{Recurrence, IntervalUnit};
         let today = chrono::Local::now().date_naive();
         let mut task = make_task(None);
-        task.recurrence = Some(Recurrence::Interval(IntervalUnit::Weekly));
+        task.recurrence = Some(Recurrence::Interval { unit: IntervalUnit::Weekly, count: 1 });
         task.status = Status::Done;
         assert!(!View::Recurring.matches(&task, today), "Done recurring task should be hidden");
     }
@@ -2733,8 +2740,21 @@ mod tests {
         use crate::task::{Recurrence, IntervalUnit};
         let today = chrono::Local::now().date_naive();
         let mut task = make_task(None);
-        task.recurrence = Some(Recurrence::Interval(IntervalUnit::Weekly));
+        task.recurrence = Some(Recurrence::Interval { unit: IntervalUnit::Weekly, count: 1 });
         task.status = Status::Open;
         assert!(View::Recurring.matches(&task, today), "Open recurring task should be shown");
+    }
+
+    #[test]
+    fn format_recurrence_display_with_count() {
+        use crate::task::{Recurrence, IntervalUnit};
+        let r = Recurrence::Interval { unit: IntervalUnit::Monthly, count: 3 };
+        assert_eq!(format_recurrence_display(&r), "Every 3 Months");
+
+        let r2 = Recurrence::Interval { unit: IntervalUnit::Weekly, count: 2 };
+        assert_eq!(format_recurrence_display(&r2), "Every 2 Weeks");
+
+        let r3 = Recurrence::Interval { unit: IntervalUnit::Daily, count: 1 };
+        assert_eq!(format_recurrence_display(&r3), "Daily");
     }
 }

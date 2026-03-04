@@ -13,19 +13,26 @@ pub enum IntervalUnit {
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Recurrence {
-    Interval(IntervalUnit),
+    Interval { unit: IntervalUnit, count: u32 },
     NthWeekday { n: u8, weekday: Weekday },
 }
 
 impl std::fmt::Display for Recurrence {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Recurrence::Interval(unit) => match unit {
-                IntervalUnit::Daily => write!(f, "daily"),
-                IntervalUnit::Weekly => write!(f, "weekly"),
-                IntervalUnit::Monthly => write!(f, "monthly"),
-                IntervalUnit::Yearly => write!(f, "yearly"),
-            },
+            Recurrence::Interval { unit, count } => {
+                let name = match unit {
+                    IntervalUnit::Daily => "daily",
+                    IntervalUnit::Weekly => "weekly",
+                    IntervalUnit::Monthly => "monthly",
+                    IntervalUnit::Yearly => "yearly",
+                };
+                if *count == 1 {
+                    write!(f, "{}", name)
+                } else {
+                    write!(f, "{}:{}", name, count)
+                }
+            }
             Recurrence::NthWeekday { n, weekday } => {
                 let day = match weekday {
                     Weekday::Mon => "mon",
@@ -45,32 +52,59 @@ impl std::fmt::Display for Recurrence {
 impl std::str::FromStr for Recurrence {
     type Err = String;
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s.to_lowercase().as_str() {
-            "daily" => Ok(Recurrence::Interval(IntervalUnit::Daily)),
-            "weekly" => Ok(Recurrence::Interval(IntervalUnit::Weekly)),
-            "monthly" => Ok(Recurrence::Interval(IntervalUnit::Monthly)),
-            "yearly" => Ok(Recurrence::Interval(IntervalUnit::Yearly)),
-            other => {
-                // Try monthly:N:DAY format
-                let parts: Vec<&str> = other.split(':').collect();
-                if parts.len() == 3 && parts[0] == "monthly" {
-                    let n: u8 = parts[1].parse().map_err(|_| {
-                        format!("Invalid recurrence: '{}'. N must be a number.", s)
-                    })?;
-                    if n == 0 || n > 5 {
-                        return Err(format!("Invalid recurrence: '{}'. N must be 1-5.", s));
-                    }
-                    let weekday = parse_weekday(parts[2])
-                        .ok_or_else(|| format!("Invalid recurrence: '{}'. Unknown weekday.", s))?;
-                    Ok(Recurrence::NthWeekday { n, weekday })
-                } else {
-                    Err(format!(
-                        "Invalid recurrence: '{}'. Valid: daily, weekly, monthly, yearly, monthly:N:DAY",
-                        s
-                    ))
-                }
-            }
+        let lower = s.to_lowercase();
+        let parts: Vec<&str> = lower.split(':').collect();
+
+        // Simple unit with no count: "daily", "weekly", "monthly", "yearly"
+        if parts.len() == 1 {
+            let unit = match parts[0] {
+                "daily" => IntervalUnit::Daily,
+                "weekly" => IntervalUnit::Weekly,
+                "monthly" => IntervalUnit::Monthly,
+                "yearly" => IntervalUnit::Yearly,
+                _ => return Err(format!(
+                    "Invalid recurrence: '{}'. Valid: daily, weekly, monthly, yearly, daily:N, weekly:N, monthly:N, yearly:N, monthly:N:DAY",
+                    s
+                )),
+            };
+            return Ok(Recurrence::Interval { unit, count: 1 });
         }
+
+        // Two parts: "unit:count" (e.g., "monthly:3", "daily:5")
+        if parts.len() == 2 {
+            let unit = match parts[0] {
+                "daily" => IntervalUnit::Daily,
+                "weekly" => IntervalUnit::Weekly,
+                "monthly" => IntervalUnit::Monthly,
+                "yearly" => IntervalUnit::Yearly,
+                _ => return Err(format!("Invalid recurrence: '{}'. Unknown unit.", s)),
+            };
+            let count: u32 = parts[1].parse().map_err(|_| {
+                format!("Invalid recurrence: '{}'. Count must be a number.", s)
+            })?;
+            if count == 0 {
+                return Err(format!("Invalid recurrence: '{}'. Count must be >= 1.", s));
+            }
+            return Ok(Recurrence::Interval { unit, count });
+        }
+
+        // Three parts: "monthly:N:DAY" (NthWeekday)
+        if parts.len() == 3 && parts[0] == "monthly" {
+            let n: u8 = parts[1].parse().map_err(|_| {
+                format!("Invalid recurrence: '{}'. N must be a number.", s)
+            })?;
+            if n == 0 || n > 5 {
+                return Err(format!("Invalid recurrence: '{}'. N must be 1-5.", s));
+            }
+            let weekday = parse_weekday(parts[2])
+                .ok_or_else(|| format!("Invalid recurrence: '{}'. Unknown weekday.", s))?;
+            return Ok(Recurrence::NthWeekday { n, weekday });
+        }
+
+        Err(format!(
+            "Invalid recurrence: '{}'. Valid: daily, weekly, monthly, yearly, daily:N, weekly:N, monthly:N, yearly:N, monthly:N:DAY",
+            s
+        ))
     }
 }
 
@@ -92,11 +126,11 @@ fn parse_weekday(s: &str) -> Option<Weekday> {
 pub fn next_due_date(recurrence: &Recurrence, current_due: Option<NaiveDate>) -> NaiveDate {
     let base = current_due.unwrap_or_else(|| Local::now().date_naive());
     match recurrence {
-        Recurrence::Interval(unit) => match unit {
-            IntervalUnit::Daily => base + chrono::Duration::days(1),
-            IntervalUnit::Weekly => base + chrono::Duration::weeks(1),
-            IntervalUnit::Monthly => add_months(base, 1),
-            IntervalUnit::Yearly => add_months(base, 12),
+        Recurrence::Interval { unit, count } => match unit {
+            IntervalUnit::Daily => base + chrono::Duration::days(*count as i64),
+            IntervalUnit::Weekly => base + chrono::Duration::weeks(*count as i64),
+            IntervalUnit::Monthly => add_months(base, *count),
+            IntervalUnit::Yearly => add_months(base, *count * 12),
         },
         Recurrence::NthWeekday { n, weekday } => {
             find_next_nth_weekday(base, *n, *weekday)
@@ -613,15 +647,15 @@ mod tests {
 
     #[test]
     fn test_recurrence_parse_simple_intervals() {
-        assert_eq!("daily".parse::<Recurrence>().unwrap(), Recurrence::Interval(IntervalUnit::Daily));
-        assert_eq!("weekly".parse::<Recurrence>().unwrap(), Recurrence::Interval(IntervalUnit::Weekly));
-        assert_eq!("monthly".parse::<Recurrence>().unwrap(), Recurrence::Interval(IntervalUnit::Monthly));
-        assert_eq!("yearly".parse::<Recurrence>().unwrap(), Recurrence::Interval(IntervalUnit::Yearly));
+        assert_eq!("daily".parse::<Recurrence>().unwrap(), Recurrence::Interval { unit: IntervalUnit::Daily, count: 1 });
+        assert_eq!("weekly".parse::<Recurrence>().unwrap(), Recurrence::Interval { unit: IntervalUnit::Weekly, count: 1 });
+        assert_eq!("monthly".parse::<Recurrence>().unwrap(), Recurrence::Interval { unit: IntervalUnit::Monthly, count: 1 });
+        assert_eq!("yearly".parse::<Recurrence>().unwrap(), Recurrence::Interval { unit: IntervalUnit::Yearly, count: 1 });
     }
 
     #[test]
     fn test_recurrence_parse_case_insensitive() {
-        assert_eq!("WEEKLY".parse::<Recurrence>().unwrap(), Recurrence::Interval(IntervalUnit::Weekly));
+        assert_eq!("WEEKLY".parse::<Recurrence>().unwrap(), Recurrence::Interval { unit: IntervalUnit::Weekly, count: 1 });
         assert_eq!("Monthly:3:Thu".parse::<Recurrence>().unwrap(), Recurrence::NthWeekday { n: 3, weekday: Weekday::Thu });
     }
 
@@ -651,10 +685,10 @@ mod tests {
 
     #[test]
     fn test_recurrence_display() {
-        assert_eq!(Recurrence::Interval(IntervalUnit::Daily).to_string(), "daily");
-        assert_eq!(Recurrence::Interval(IntervalUnit::Weekly).to_string(), "weekly");
-        assert_eq!(Recurrence::Interval(IntervalUnit::Monthly).to_string(), "monthly");
-        assert_eq!(Recurrence::Interval(IntervalUnit::Yearly).to_string(), "yearly");
+        assert_eq!(Recurrence::Interval { unit: IntervalUnit::Daily, count: 1 }.to_string(), "daily");
+        assert_eq!(Recurrence::Interval { unit: IntervalUnit::Weekly, count: 1 }.to_string(), "weekly");
+        assert_eq!(Recurrence::Interval { unit: IntervalUnit::Monthly, count: 1 }.to_string(), "monthly");
+        assert_eq!(Recurrence::Interval { unit: IntervalUnit::Yearly, count: 1 }.to_string(), "yearly");
         assert_eq!(Recurrence::NthWeekday { n: 3, weekday: Weekday::Thu }.to_string(), "monthly:3:thu");
     }
 
@@ -669,35 +703,35 @@ mod tests {
     #[test]
     fn test_next_due_date_weekly() {
         let due = NaiveDate::from_ymd_opt(2026, 3, 2).unwrap();
-        let next = next_due_date(&Recurrence::Interval(IntervalUnit::Weekly), Some(due));
+        let next = next_due_date(&Recurrence::Interval { unit: IntervalUnit::Weekly, count: 1 }, Some(due));
         assert_eq!(next, NaiveDate::from_ymd_opt(2026, 3, 9).unwrap());
     }
 
     #[test]
     fn test_next_due_date_monthly_clamp() {
         let due = NaiveDate::from_ymd_opt(2026, 1, 31).unwrap();
-        let next = next_due_date(&Recurrence::Interval(IntervalUnit::Monthly), Some(due));
+        let next = next_due_date(&Recurrence::Interval { unit: IntervalUnit::Monthly, count: 1 }, Some(due));
         assert_eq!(next, NaiveDate::from_ymd_opt(2026, 2, 28).unwrap());
     }
 
     #[test]
     fn test_next_due_date_yearly_leap() {
         let due = NaiveDate::from_ymd_opt(2024, 2, 29).unwrap();
-        let next = next_due_date(&Recurrence::Interval(IntervalUnit::Yearly), Some(due));
+        let next = next_due_date(&Recurrence::Interval { unit: IntervalUnit::Yearly, count: 1 }, Some(due));
         assert_eq!(next, NaiveDate::from_ymd_opt(2025, 2, 28).unwrap());
     }
 
     #[test]
     fn test_next_due_date_daily() {
         let due = NaiveDate::from_ymd_opt(2026, 3, 2).unwrap();
-        let next = next_due_date(&Recurrence::Interval(IntervalUnit::Daily), Some(due));
+        let next = next_due_date(&Recurrence::Interval { unit: IntervalUnit::Daily, count: 1 }, Some(due));
         assert_eq!(next, NaiveDate::from_ymd_opt(2026, 3, 3).unwrap());
     }
 
     #[test]
     fn test_next_due_date_no_due_date() {
         let today = Local::now().date_naive();
-        let next = next_due_date(&Recurrence::Interval(IntervalUnit::Daily), None);
+        let next = next_due_date(&Recurrence::Interval { unit: IntervalUnit::Daily, count: 1 }, None);
         assert_eq!(next, today + chrono::Duration::days(1));
     }
 
@@ -719,5 +753,47 @@ mod tests {
         // May 2026: 1st Fri is May 1, 5th Fri is May 29
         assert!(next > due);
         assert_eq!(next.weekday(), Weekday::Fri);
+    }
+
+    #[test]
+    fn test_parse_interval_with_count() {
+        assert_eq!("monthly:3".parse::<Recurrence>().unwrap(), Recurrence::Interval { unit: IntervalUnit::Monthly, count: 3 });
+        assert_eq!("weekly:2".parse::<Recurrence>().unwrap(), Recurrence::Interval { unit: IntervalUnit::Weekly, count: 2 });
+        assert_eq!("daily:5".parse::<Recurrence>().unwrap(), Recurrence::Interval { unit: IntervalUnit::Daily, count: 5 });
+        assert_eq!("yearly:2".parse::<Recurrence>().unwrap(), Recurrence::Interval { unit: IntervalUnit::Yearly, count: 2 });
+    }
+
+    #[test]
+    fn test_display_interval_with_count() {
+        assert_eq!(Recurrence::Interval { unit: IntervalUnit::Monthly, count: 3 }.to_string(), "monthly:3");
+        assert_eq!(Recurrence::Interval { unit: IntervalUnit::Weekly, count: 2 }.to_string(), "weekly:2");
+        assert_eq!(Recurrence::Interval { unit: IntervalUnit::Daily, count: 1 }.to_string(), "daily");
+    }
+
+    #[test]
+    fn test_next_due_date_monthly_count_3() {
+        let due = NaiveDate::from_ymd_opt(2026, 1, 15).unwrap();
+        let next = next_due_date(&Recurrence::Interval { unit: IntervalUnit::Monthly, count: 3 }, Some(due));
+        assert_eq!(next, NaiveDate::from_ymd_opt(2026, 4, 15).unwrap());
+    }
+
+    #[test]
+    fn test_next_due_date_daily_count_5() {
+        let due = NaiveDate::from_ymd_opt(2026, 3, 1).unwrap();
+        let next = next_due_date(&Recurrence::Interval { unit: IntervalUnit::Daily, count: 5 }, Some(due));
+        assert_eq!(next, NaiveDate::from_ymd_opt(2026, 3, 6).unwrap());
+    }
+
+    #[test]
+    fn test_parse_count_zero_error() {
+        assert!("daily:0".parse::<Recurrence>().is_err());
+    }
+
+    #[test]
+    fn test_roundtrip_with_count() {
+        for s in &["daily:3", "weekly:2", "monthly:3", "yearly:2"] {
+            let r: Recurrence = s.parse().unwrap();
+            assert_eq!(r.to_string(), *s);
+        }
     }
 }

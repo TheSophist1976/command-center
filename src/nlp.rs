@@ -680,6 +680,10 @@ Respond with exactly one of:
 {"recurrence":"weekly"} - repeats every week
 {"recurrence":"monthly"} - repeats every month
 {"recurrence":"yearly"} - repeats every year
+{"recurrence":"daily:N"} - repeats every N days (e.g., "daily:3" for every 3 days)
+{"recurrence":"weekly:N"} - repeats every N weeks (e.g., "weekly:2" for every 2 weeks)
+{"recurrence":"monthly:N"} - repeats every N months (e.g., "monthly:3" for every 3 months). N is a number.
+{"recurrence":"yearly:N"} - repeats every N years (e.g., "yearly:2" for every 2 years)
 {"recurrence":"monthly:N:DAY"} - repeats on the Nth weekday of each month (e.g., "monthly:3:thu" for 3rd Thursday). DAY is mon/tue/wed/thu/fri/sat/sun. N is 1-5.
 {"recurrence":null} - remove recurrence (when user says "none", "stop", "remove", "clear", etc.)
 
@@ -688,6 +692,13 @@ Rules:
 - "every week" / "weekly" → "weekly"
 - "every month" / "monthly" → "monthly"
 - "every year" / "yearly" / "annually" → "yearly"
+- "every N days" / "every N day" → "daily:N"
+- "every N weeks" → "weekly:N"
+- "every N months" / "quarterly" / "every quarter" → "monthly:3"
+- "every N years" → "yearly:N"
+- "every other day" → "daily:2"
+- "every other week" / "biweekly" / "fortnightly" → "weekly:2"
+- "every other month" / "bimonthly" → "monthly:2"
 - "every third thursday" / "3rd thursday of every month" → "monthly:3:thu"
 - "every first monday" / "1st monday" → "monthly:1:mon"
 - "none" / "clear" / "remove" / "stop repeating" → null
