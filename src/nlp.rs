@@ -11,6 +11,7 @@ pub enum NlpAction {
         match_criteria: FilterCriteria,
         set_fields: SetFields,
         description: String,
+        task_ids: Option<Vec<u32>>,
     },
     Message(String),
     ShowTasks {
@@ -99,8 +100,8 @@ Respond with exactly one of these JSON formats:
 Fill in non-null values for the fields the user wants to filter by. Values: status is "open" or "done", priority is "critical"/"high"/"medium"/"low", project and tag are strings, title_contains is a substring to match.
 
 2. To bulk-update tasks:
-{{"action":"update","match":{{"project":null,"status":null,"priority":null,"tag":null,"title_contains":null}},"set":{{"priority":null,"status":null,"tags":null,"due_date":null}},"description":"Human-readable description of the change"}}
-Fill in "match" with criteria to find tasks, and "set" with fields to change. Only include non-null fields in "set". The due_date field should be in YYYY-MM-DD format — resolve relative dates like "today", "tomorrow", "next monday" to absolute dates using the provided current date. Set due_date to "" to clear a task's due date.
+{{"action":"update","match":{{"project":null,"status":null,"priority":null,"tag":null,"title_contains":null}},"task_ids":null,"set":{{"priority":null,"status":null,"tags":null,"due_date":null}},"description":"Human-readable description of the change"}}
+Fill in "match" with criteria to find tasks, and "set" with fields to change. Only include non-null fields in "set". You can use EITHER "match" criteria OR "task_ids" (an array of task ID numbers) to select tasks. Use "task_ids" when you know the exact task IDs to update. The due_date field should be in YYYY-MM-DD format — resolve relative dates like "today", "tomorrow", "next monday" to absolute dates using the provided current date. Set due_date to "" to clear a task's due date.
 
 3. To respond with a message (for questions, unclear queries, or unsupported actions):
 {{"action":"message","text":"Your response text here"}}
@@ -478,6 +479,7 @@ pub fn parse_response(json_str: &str) -> Result<NlpAction, String> {
                 match_criteria,
                 set_fields,
                 description,
+                task_ids: raw.task_ids,
             })
         }
         "message" => {
@@ -653,7 +655,7 @@ mod tests {
         let json = r#"{"action":"update","match":{"tag":"frontend","status":null,"priority":null,"project":null,"title_contains":null},"set":{"priority":"high","status":null,"tags":null},"description":"Set priority high on frontend tasks"}"#;
         let result = parse_response(json).unwrap();
         match result {
-            NlpAction::Update { match_criteria, set_fields, description } => {
+            NlpAction::Update { match_criteria, set_fields, description, .. } => {
                 assert_eq!(match_criteria.tag, Some("frontend".to_string()));
                 assert_eq!(set_fields.priority, Some("high".to_string()));
                 assert_eq!(description, "Set priority high on frontend tasks");
@@ -839,5 +841,26 @@ mod tests {
         let prompt = build_system_prompt(&ctx, "2026-03-04 (Wednesday)");
         assert!(prompt.contains("\"due_date\":null"));
         assert!(prompt.contains("YYYY-MM-DD"));
+    }
+
+    #[test]
+    fn parse_response_update_with_task_ids() {
+        let json = r#"{"action":"update","match":{},"task_ids":[119,133,137],"set":{"due_date":"2026-03-04"},"description":"Set overdue tasks to today"}"#;
+        let result = parse_response(json).unwrap();
+        match result {
+            NlpAction::Update { task_ids, set_fields, .. } => {
+                assert_eq!(task_ids, Some(vec![119, 133, 137]));
+                assert_eq!(set_fields.due_date, Some("2026-03-04".to_string()));
+            }
+            _ => panic!("Expected Update action"),
+        }
+    }
+
+    #[test]
+    fn system_prompt_includes_task_ids_in_update() {
+        let ctx = build_task_context(&[make_task(1, "Test")]);
+        let prompt = build_system_prompt(&ctx, "2026-03-04 (Wednesday)");
+        assert!(prompt.contains("\"task_ids\":null"));
+        assert!(prompt.contains("task_ids"));
     }
 }

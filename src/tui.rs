@@ -1014,19 +1014,23 @@ fn format_action_summary(action: &NlpAction) -> Option<String> {
                 Some(format!("Filtering: {}", parts.join(", ")))
             }
         }
-        NlpAction::Update { match_criteria, set_fields, .. } => {
-            let mut match_parts = Vec::new();
-            if let Some(ref s) = match_criteria.status { match_parts.push(format!("status={}", s)); }
-            if let Some(ref p) = match_criteria.priority { match_parts.push(format!("priority={}", p)); }
-            if let Some(ref t) = match_criteria.tag { match_parts.push(format!("tag={}", t)); }
-            if let Some(ref p) = match_criteria.project { match_parts.push(format!("project={}", p)); }
-            if let Some(ref tc) = match_criteria.title_contains { match_parts.push(format!("title~{}", tc)); }
+        NlpAction::Update { match_criteria, set_fields, task_ids, .. } => {
+            let match_str = if let Some(ids) = task_ids {
+                format!("tasks [{}]", ids.iter().map(|id| id.to_string()).collect::<Vec<_>>().join(", "))
+            } else {
+                let mut match_parts = Vec::new();
+                if let Some(ref s) = match_criteria.status { match_parts.push(format!("status={}", s)); }
+                if let Some(ref p) = match_criteria.priority { match_parts.push(format!("priority={}", p)); }
+                if let Some(ref t) = match_criteria.tag { match_parts.push(format!("tag={}", t)); }
+                if let Some(ref p) = match_criteria.project { match_parts.push(format!("project={}", p)); }
+                if let Some(ref tc) = match_criteria.title_contains { match_parts.push(format!("title~{}", tc)); }
+                if match_parts.is_empty() { "(all)".to_string() } else { match_parts.join(", ") }
+            };
             let mut set_parts = Vec::new();
             if let Some(ref p) = set_fields.priority { set_parts.push(format!("priority={}", p)); }
             if let Some(ref s) = set_fields.status { set_parts.push(format!("status={}", s)); }
             if let Some(ref t) = set_fields.tags { set_parts.push(format!("tags=[{}]", t.join(", "))); }
             if let Some(ref d) = set_fields.due_date { set_parts.push(format!("due_date={}", if d.is_empty() { "none" } else { d })); }
-            let match_str = if match_parts.is_empty() { "(all)".to_string() } else { match_parts.join(", ") };
             let set_str = if set_parts.is_empty() { "(none)".to_string() } else { set_parts.join(", ") };
             Some(format!("Updating: match {{{}}} → set {{{}}}", match_str, set_str))
         }
@@ -1083,32 +1087,33 @@ fn format_update_preview(tasks: &[Task], indices: &[usize], set_fields: &nlp::Se
 fn process_nlp_result(app: &mut App, result: Result<(NlpAction, String), String>) -> Result<(), String> {
     app.status_message = None;
     match result {
-        Ok((ref action @ NlpAction::Filter(ref criteria), raw_response)) => {
+        Ok((action @ NlpAction::Filter(_), raw_response)) => {
+            let NlpAction::Filter(criteria) = &action else { unreachable!() };
             app.nlp_messages.push(ApiMessage {
                 role: "assistant".to_string(),
                 content: raw_response,
             });
-            if let Some(summary) = format_action_summary(action) {
+            if let Some(summary) = format_action_summary(&action) {
                 app.chat_history.push(ChatMessage::Assistant(summary));
             }
             let mut filter = Filter::default();
-            if let Some(ref s) = criteria.status {
+            if let Some(s) = &criteria.status {
                 if let Ok(status) = s.parse::<Status>() {
                     filter.status = Some(status);
                 }
             }
-            if let Some(ref p) = criteria.priority {
+            if let Some(p) = &criteria.priority {
                 if let Ok(priority) = p.parse::<Priority>() {
                     filter.priority = Some(priority);
                 }
             }
-            if let Some(ref t) = criteria.tag {
+            if let Some(t) = &criteria.tag {
                 filter.tag = Some(t.clone());
             }
-            if let Some(ref p) = criteria.project {
+            if let Some(p) = &criteria.project {
                 filter.project = Some(p.clone());
             }
-            if let Some(ref tc) = criteria.title_contains {
+            if let Some(tc) = &criteria.title_contains {
                 filter.title_contains = Some(tc.clone());
             }
             app.view = View::All;
@@ -1118,46 +1123,55 @@ fn process_nlp_result(app: &mut App, result: Result<(NlpAction, String), String>
             app.clamp_selection();
             app.chat_history.push(ChatMessage::Assistant("Filter applied.".to_string()));
         }
-        Ok((ref action @ NlpAction::Update { ref match_criteria, ref set_fields, .. }, raw_response)) => {
+        Ok((action @ NlpAction::Update { .. }, raw_response)) => {
+            let NlpAction::Update { ref match_criteria, ref set_fields, ref task_ids, .. } = action else { unreachable!() };
             app.nlp_messages.push(ApiMessage {
                 role: "assistant".to_string(),
                 content: raw_response,
             });
-            if let Some(summary) = format_action_summary(action) {
+            if let Some(summary) = format_action_summary(&action) {
                 app.chat_history.push(ChatMessage::Assistant(summary));
             }
-            let has_any_criteria = match_criteria.status.is_some()
-                || match_criteria.priority.is_some()
-                || match_criteria.tag.is_some()
-                || match_criteria.project.is_some()
-                || match_criteria.title_contains.is_some();
-            let matching: Vec<usize> = if !has_any_criteria {
-                vec![] // empty criteria matches nothing — prevents accidental bulk updates
-            } else {
+            let matching: Vec<usize> = if let Some(ids) = task_ids {
+                // Match by explicit task IDs
                 app.task_file.tasks.iter().enumerate()
-                    .filter(|(_, t)| {
-                        if let Some(ref s) = match_criteria.status {
-                            if !t.status.to_string().eq_ignore_ascii_case(s) { return false; }
-                        }
-                        if let Some(ref p) = match_criteria.priority {
-                            if !t.priority.to_string().eq_ignore_ascii_case(p) { return false; }
-                        }
-                        if let Some(ref tag) = match_criteria.tag {
-                            if !t.tags.iter().any(|tg| tg.eq_ignore_ascii_case(tag)) { return false; }
-                        }
-                        if let Some(ref proj) = match_criteria.project {
-                            match &t.project {
-                                Some(p) => if !p.eq_ignore_ascii_case(proj) { return false; },
-                                None => return false,
-                            }
-                        }
-                        if let Some(ref tc) = match_criteria.title_contains {
-                            if !t.title.to_lowercase().contains(&tc.to_lowercase()) { return false; }
-                        }
-                        true
-                    })
+                    .filter(|(_, t)| ids.contains(&t.id))
                     .map(|(i, _)| i)
                     .collect()
+            } else {
+                let has_any_criteria = match_criteria.status.is_some()
+                    || match_criteria.priority.is_some()
+                    || match_criteria.tag.is_some()
+                    || match_criteria.project.is_some()
+                    || match_criteria.title_contains.is_some();
+                if !has_any_criteria {
+                    vec![] // empty criteria matches nothing — prevents accidental bulk updates
+                } else {
+                    app.task_file.tasks.iter().enumerate()
+                        .filter(|(_, t)| {
+                            if let Some(ref s) = match_criteria.status {
+                                if !t.status.to_string().eq_ignore_ascii_case(s) { return false; }
+                            }
+                            if let Some(ref p) = match_criteria.priority {
+                                if !t.priority.to_string().eq_ignore_ascii_case(p) { return false; }
+                            }
+                            if let Some(ref tag) = match_criteria.tag {
+                                if !t.tags.iter().any(|tg| tg.eq_ignore_ascii_case(tag)) { return false; }
+                            }
+                            if let Some(ref proj) = match_criteria.project {
+                                match &t.project {
+                                    Some(p) => if !p.eq_ignore_ascii_case(proj) { return false; },
+                                    None => return false,
+                                }
+                            }
+                            if let Some(ref tc) = match_criteria.title_contains {
+                                if !t.title.to_lowercase().contains(&tc.to_lowercase()) { return false; }
+                            }
+                            true
+                        })
+                        .map(|(i, _)| i)
+                        .collect()
+                }
             };
 
             if matching.is_empty() {
@@ -1169,7 +1183,7 @@ fn process_nlp_result(app: &mut App, result: Result<(NlpAction, String), String>
                         format!("Changes:\n{}", preview_lines.join("\n"))
                     ));
                 }
-                app.pending_nlp_update = Some((action.clone(), matching));
+                app.pending_nlp_update = Some((action, matching));
                 app.mode = Mode::ConfirmingNlp;
             }
         }
@@ -1195,12 +1209,13 @@ fn process_nlp_result(app: &mut App, result: Result<(NlpAction, String), String>
                 .collect();
             app.chat_history.push(ChatMessage::TaskList { text, tasks });
         }
-        Ok((ref action @ NlpAction::SetRecurrence { task_id, ref recurrence, description: _ }, raw_response)) => {
+        Ok((action @ NlpAction::SetRecurrence { .. }, raw_response)) => {
+            let NlpAction::SetRecurrence { task_id, ref recurrence, .. } = action else { unreachable!() };
             app.nlp_messages.push(ApiMessage {
                 role: "assistant".to_string(),
                 content: raw_response,
             });
-            if let Some(summary) = format_action_summary(action) {
+            if let Some(summary) = format_action_summary(&action) {
                 app.chat_history.push(ChatMessage::Assistant(summary));
             }
             if let Some(task) = app.task_file.find_task_mut(task_id) {
@@ -1240,7 +1255,7 @@ fn process_nlp_result(app: &mut App, result: Result<(NlpAction, String), String>
     Ok(())
 }
 
-fn handle_nlp_chat<B: Backend>(terminal: &mut Terminal<B>, app: &mut App, key: KeyCode) -> Result<(), String> {
+fn handle_nlp_chat<B: Backend>(_terminal: &mut Terminal<B>, app: &mut App, key: KeyCode) -> Result<(), String> {
     match key {
         KeyCode::Esc => {
             app.nlp_pending = None;
