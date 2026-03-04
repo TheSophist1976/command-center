@@ -91,8 +91,8 @@ enum View {
 
 impl View {
     fn matches(&self, task: &Task, today: NaiveDate) -> bool {
-        // Completed tasks only appear in the All and Recurring views
-        if task.status == Status::Done && *self != View::All && *self != View::Recurring {
+        // Completed tasks only appear in the All view
+        if task.status == Status::Done && *self != View::All {
             return false;
         }
         // Recurring view: filter by recurrence presence only
@@ -2200,12 +2200,12 @@ mod tests {
     }
 
     #[test]
-    fn recurring_view_shows_recurring_done_task() {
+    fn recurring_view_hides_recurring_done_task() {
         let today = NaiveDate::from_ymd_opt(2026, 2, 26).unwrap();
         let mut task = make_task(Some(today));
         task.status = Status::Done;
         task.recurrence = Some(crate::task::Recurrence::Interval(crate::task::IntervalUnit::Daily));
-        assert!(View::Recurring.matches(&task, today));
+        assert!(!View::Recurring.matches(&task, today));
     }
 
     #[test]
@@ -2716,5 +2716,25 @@ mod tests {
         task2.recurrence = Some(Recurrence::NthWeekday { n: 3, weekday: chrono::Weekday::Thu });
         let display2 = format_recurrence_display(task2.recurrence.as_ref().unwrap());
         assert_eq!(display2, "Monthly (3rd Thu)");
+    }
+
+    #[test]
+    fn recurring_view_hides_done_tasks() {
+        use crate::task::{Recurrence, IntervalUnit};
+        let today = chrono::Local::now().date_naive();
+        let mut task = make_task(None);
+        task.recurrence = Some(Recurrence::Interval(IntervalUnit::Weekly));
+        task.status = Status::Done;
+        assert!(!View::Recurring.matches(&task, today), "Done recurring task should be hidden");
+    }
+
+    #[test]
+    fn recurring_view_shows_open_tasks() {
+        use crate::task::{Recurrence, IntervalUnit};
+        let today = chrono::Local::now().date_naive();
+        let mut task = make_task(None);
+        task.recurrence = Some(Recurrence::Interval(IntervalUnit::Weekly));
+        task.status = Status::Open;
+        assert!(View::Recurring.matches(&task, today), "Open recurring task should be shown");
     }
 }
