@@ -15,6 +15,7 @@ pub enum IntervalUnit {
 pub enum Recurrence {
     Interval { unit: IntervalUnit, count: u32 },
     NthWeekday { n: u8, weekday: Weekday },
+    WeeklyOn { weekday: Weekday, every_n_weeks: u32 },
 }
 
 impl std::fmt::Display for Recurrence {
@@ -34,16 +35,16 @@ impl std::fmt::Display for Recurrence {
                 }
             }
             Recurrence::NthWeekday { n, weekday } => {
-                let day = match weekday {
-                    Weekday::Mon => "mon",
-                    Weekday::Tue => "tue",
-                    Weekday::Wed => "wed",
-                    Weekday::Thu => "thu",
-                    Weekday::Fri => "fri",
-                    Weekday::Sat => "sat",
-                    Weekday::Sun => "sun",
-                };
+                let day = weekday_abbrev(*weekday);
                 write!(f, "monthly:{}:{}", n, day)
+            }
+            Recurrence::WeeklyOn { weekday, every_n_weeks } => {
+                let day = weekday_abbrev(*weekday);
+                if *every_n_weeks == 1 {
+                    write!(f, "weekly:{}", day)
+                } else {
+                    write!(f, "weekly:{}:{}", every_n_weeks, day)
+                }
             }
         }
     }
@@ -63,15 +64,21 @@ impl std::str::FromStr for Recurrence {
                 "monthly" => IntervalUnit::Monthly,
                 "yearly" => IntervalUnit::Yearly,
                 _ => return Err(format!(
-                    "Invalid recurrence: '{}'. Valid: daily, weekly, monthly, yearly, daily:N, weekly:N, monthly:N, yearly:N, monthly:N:DAY",
+                    "Invalid recurrence: '{}'. Valid: daily, weekly, monthly, yearly, daily:N, weekly:N, monthly:N, yearly:N, weekly:DAY, weekly:N:DAY, monthly:N:DAY",
                     s
                 )),
             };
             return Ok(Recurrence::Interval { unit, count: 1 });
         }
 
-        // Two parts: "unit:count" (e.g., "monthly:3", "daily:5")
+        // Two parts: "unit:count" or "weekly:DAY"
         if parts.len() == 2 {
+            // Check if "weekly:DAY" (WeeklyOn shorthand)
+            if parts[0] == "weekly" {
+                if let Some(weekday) = parse_weekday(parts[1]) {
+                    return Ok(Recurrence::WeeklyOn { weekday, every_n_weeks: 1 });
+                }
+            }
             let unit = match parts[0] {
                 "daily" => IntervalUnit::Daily,
                 "weekly" => IntervalUnit::Weekly,
@@ -88,7 +95,19 @@ impl std::str::FromStr for Recurrence {
             return Ok(Recurrence::Interval { unit, count });
         }
 
-        // Three parts: "monthly:N:DAY" (NthWeekday)
+        // Three parts: "weekly:N:DAY" (WeeklyOn) or "monthly:N:DAY" (NthWeekday)
+        if parts.len() == 3 && parts[0] == "weekly" {
+            let count: u32 = parts[1].parse().map_err(|_| {
+                format!("Invalid recurrence: '{}'. N must be a number.", s)
+            })?;
+            if count == 0 {
+                return Err(format!("Invalid recurrence: '{}'. N must be >= 1.", s));
+            }
+            let weekday = parse_weekday(parts[2])
+                .ok_or_else(|| format!("Invalid recurrence: '{}'. Unknown weekday.", s))?;
+            return Ok(Recurrence::WeeklyOn { weekday, every_n_weeks: count });
+        }
+
         if parts.len() == 3 && parts[0] == "monthly" {
             let n: u8 = parts[1].parse().map_err(|_| {
                 format!("Invalid recurrence: '{}'. N must be a number.", s)
@@ -102,9 +121,21 @@ impl std::str::FromStr for Recurrence {
         }
 
         Err(format!(
-            "Invalid recurrence: '{}'. Valid: daily, weekly, monthly, yearly, daily:N, weekly:N, monthly:N, yearly:N, monthly:N:DAY",
+            "Invalid recurrence: '{}'. Valid: daily, weekly, monthly, yearly, daily:N, weekly:N, monthly:N, yearly:N, weekly:DAY, weekly:N:DAY, monthly:N:DAY",
             s
         ))
+    }
+}
+
+fn weekday_abbrev(w: Weekday) -> &'static str {
+    match w {
+        Weekday::Mon => "mon",
+        Weekday::Tue => "tue",
+        Weekday::Wed => "wed",
+        Weekday::Thu => "thu",
+        Weekday::Fri => "fri",
+        Weekday::Sat => "sat",
+        Weekday::Sun => "sun",
     }
 }
 
@@ -134,6 +165,18 @@ pub fn next_due_date(recurrence: &Recurrence, current_due: Option<NaiveDate>) ->
         },
         Recurrence::NthWeekday { n, weekday } => {
             find_next_nth_weekday(base, *n, *weekday)
+        }
+        Recurrence::WeeklyOn { weekday, every_n_weeks } => {
+            if base.weekday() == *weekday {
+                // Base is already the target weekday, advance by N weeks
+                base + chrono::Duration::weeks(*every_n_weeks as i64)
+            } else {
+                // Find next occurrence of the target weekday
+                let days_ahead = (weekday.num_days_from_monday() as i64
+                    - base.weekday().num_days_from_monday() as i64
+                    + 7) % 7;
+                base + chrono::Duration::days(days_ahead)
+            }
         }
     }
 }
@@ -710,10 +753,86 @@ mod tests {
 
     #[test]
     fn test_recurrence_roundtrip() {
-        for s in &["daily", "weekly", "monthly", "yearly", "monthly:1:mon", "monthly:5:fri"] {
+        for s in &["daily", "weekly", "monthly", "yearly", "monthly:1:mon", "monthly:5:fri",
+                    "weekly:fri", "weekly:2:mon"] {
             let r: Recurrence = s.parse().unwrap();
             assert_eq!(r.to_string(), *s);
         }
+    }
+
+    #[test]
+    fn test_weekly_on_parse_shorthand() {
+        let r: Recurrence = "weekly:fri".parse().unwrap();
+        assert_eq!(r, Recurrence::WeeklyOn { weekday: Weekday::Fri, every_n_weeks: 1 });
+    }
+
+    #[test]
+    fn test_weekly_on_parse_with_count() {
+        let r: Recurrence = "weekly:2:mon".parse().unwrap();
+        assert_eq!(r, Recurrence::WeeklyOn { weekday: Weekday::Mon, every_n_weeks: 2 });
+    }
+
+    #[test]
+    fn test_weekly_on_parse_count_one_explicit() {
+        let r: Recurrence = "weekly:1:wed".parse().unwrap();
+        assert_eq!(r, Recurrence::WeeklyOn { weekday: Weekday::Wed, every_n_weeks: 1 });
+    }
+
+    #[test]
+    fn test_weekly_count_still_parses_as_interval() {
+        let r: Recurrence = "weekly:2".parse().unwrap();
+        assert_eq!(r, Recurrence::Interval { unit: IntervalUnit::Weekly, count: 2 });
+    }
+
+    #[test]
+    fn test_weekly_on_display_count_1() {
+        let r = Recurrence::WeeklyOn { weekday: Weekday::Fri, every_n_weeks: 1 };
+        assert_eq!(r.to_string(), "weekly:fri");
+    }
+
+    #[test]
+    fn test_weekly_on_display_count_gt_1() {
+        let r = Recurrence::WeeklyOn { weekday: Weekday::Mon, every_n_weeks: 2 };
+        assert_eq!(r.to_string(), "weekly:2:mon");
+    }
+
+    #[test]
+    fn test_weekly_on_invalid_weekday() {
+        let result: Result<Recurrence, _> = "weekly:xyz".parse();
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_next_due_date_weekly_on_same_weekday() {
+        // 2026-03-06 is a Friday
+        let due = NaiveDate::from_ymd_opt(2026, 3, 6).unwrap();
+        let next = next_due_date(
+            &Recurrence::WeeklyOn { weekday: Weekday::Fri, every_n_weeks: 1 },
+            Some(due),
+        );
+        assert_eq!(next, NaiveDate::from_ymd_opt(2026, 3, 13).unwrap());
+    }
+
+    #[test]
+    fn test_next_due_date_weekly_on_different_weekday() {
+        // 2026-03-04 is a Wednesday, next Friday is 2026-03-06
+        let due = NaiveDate::from_ymd_opt(2026, 3, 4).unwrap();
+        let next = next_due_date(
+            &Recurrence::WeeklyOn { weekday: Weekday::Fri, every_n_weeks: 1 },
+            Some(due),
+        );
+        assert_eq!(next, NaiveDate::from_ymd_opt(2026, 3, 6).unwrap());
+    }
+
+    #[test]
+    fn test_next_due_date_biweekly_on_same_weekday() {
+        // 2026-03-02 is a Monday, 2 weeks later is 2026-03-16
+        let due = NaiveDate::from_ymd_opt(2026, 3, 2).unwrap();
+        let next = next_due_date(
+            &Recurrence::WeeklyOn { weekday: Weekday::Mon, every_n_weeks: 2 },
+            Some(due),
+        );
+        assert_eq!(next, NaiveDate::from_ymd_opt(2026, 3, 16).unwrap());
     }
 
     #[test]

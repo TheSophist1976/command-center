@@ -1674,6 +1674,22 @@ fn format_recurrence_display(r: &crate::task::Recurrence) -> String {
             };
             format!("Monthly ({} {})", ordinal, day)
         }
+        Recurrence::WeeklyOn { weekday, every_n_weeks } => {
+            let day = match weekday {
+                chrono::Weekday::Mon => "Mon",
+                chrono::Weekday::Tue => "Tue",
+                chrono::Weekday::Wed => "Wed",
+                chrono::Weekday::Thu => "Thu",
+                chrono::Weekday::Fri => "Fri",
+                chrono::Weekday::Sat => "Sat",
+                chrono::Weekday::Sun => "Sun",
+            };
+            if *every_n_weeks == 1 {
+                format!("Weekly ({})", day)
+            } else {
+                format!("Every {} Weeks ({})", every_n_weeks, day)
+            }
+        }
     }
 }
 
@@ -2774,6 +2790,16 @@ mod tests {
 
         let r3 = Recurrence::Interval { unit: IntervalUnit::Daily, count: 1 };
         assert_eq!(format_recurrence_display(&r3), "Daily");
+    }
+
+    #[test]
+    fn format_recurrence_display_weekly_on() {
+        use crate::task::Recurrence;
+        let r = Recurrence::WeeklyOn { weekday: chrono::Weekday::Fri, every_n_weeks: 1 };
+        assert_eq!(format_recurrence_display(&r), "Weekly (Fri)");
+
+        let r2 = Recurrence::WeeklyOn { weekday: chrono::Weekday::Mon, every_n_weeks: 2 };
+        assert_eq!(format_recurrence_display(&r2), "Every 2 Weeks (Mon)");
     }
 
     // -- Sort order tests --

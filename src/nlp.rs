@@ -113,7 +113,7 @@ Use this when the user wants to see a specific group of tasks displayed. The tas
 
 5. To set or remove recurrence on a task:
 {{"action":"set_recurrence","task_id":5,"recurrence":"weekly","description":"Set task 5 to repeat weekly"}}
-Valid recurrence values: "daily", "weekly", "monthly", "yearly", "monthly:N:DAY" (e.g., "monthly:3:thu" for 3rd Thursday). Set "recurrence" to null to remove recurrence. The task_id must reference an existing task.
+Valid recurrence values: "daily", "weekly", "monthly", "yearly", "weekly:DAY" (e.g., "weekly:fri" for every Friday), "weekly:N:DAY" (e.g., "weekly:2:mon" for every 2 weeks on Monday), "monthly:N:DAY" (e.g., "monthly:3:thu" for 3rd Thursday). Set "recurrence" to null to remove recurrence. The task_id must reference an existing task.
 
 Rules:
 - Respond with ONLY the JSON object, nothing else
@@ -684,6 +684,8 @@ Respond with exactly one of:
 {"recurrence":"weekly:N"} - repeats every N weeks (e.g., "weekly:2" for every 2 weeks)
 {"recurrence":"monthly:N"} - repeats every N months (e.g., "monthly:3" for every 3 months). N is a number.
 {"recurrence":"yearly:N"} - repeats every N years (e.g., "yearly:2" for every 2 years)
+{"recurrence":"weekly:DAY"} - repeats every week on a specific day (e.g., "weekly:fri" for every Friday). DAY is mon/tue/wed/thu/fri/sat/sun.
+{"recurrence":"weekly:N:DAY"} - repeats every N weeks on a specific day (e.g., "weekly:2:mon" for every 2 weeks on Monday). DAY is mon/tue/wed/thu/fri/sat/sun.
 {"recurrence":"monthly:N:DAY"} - repeats on the Nth weekday of each month (e.g., "monthly:3:thu" for 3rd Thursday). DAY is mon/tue/wed/thu/fri/sat/sun. N is 1-5.
 {"recurrence":null} - remove recurrence (when user says "none", "stop", "remove", "clear", etc.)
 
@@ -699,9 +701,13 @@ Rules:
 - "every other day" → "daily:2"
 - "every other week" / "biweekly" / "fortnightly" → "weekly:2"
 - "every other month" / "bimonthly" → "monthly:2"
+- "every friday" / "every week on friday" / "weekly on friday" → "weekly:fri"
+- "every 2 weeks on monday" / "every other monday" → "weekly:2:mon"
+- "every tuesday" → "weekly:tue"
 - "every third thursday" / "3rd thursday of every month" → "monthly:3:thu"
 - "every first monday" / "1st monday" → "monthly:1:mon"
 - "none" / "clear" / "remove" / "stop repeating" → null
+- IMPORTANT: "every friday" means weekly:fri (every week on that day), NOT monthly:N:fri
 - Respond with ONLY the JSON, nothing else"#;
 
     let messages = vec![ApiMessage {
