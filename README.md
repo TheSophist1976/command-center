@@ -19,106 +19,208 @@ cargo install --path .
 ## Quick Start
 
 ```sh
-# Create your first task (auto-creates tasks.md)
-task add "Build the login page" --priority high --tags frontend,auth
+# Launch the interactive TUI (default command)
+task
 
-# Add more tasks
-task add "Set up CI pipeline" --tags infra
-task add "Write tests" --priority low
-
-# List all tasks
-task list
-
-# Filter tasks
-task list --status open --priority high
-task list --tag frontend
-
-# Complete a task
-task done 1
-
-# View task details
-task show 1
-
-# Edit a task
-task edit 2 --title "Configure CI/CD pipeline" --priority high
-
-# Reopen a completed task
-task undo 1
-
-# Remove a task
-task rm 3
-
-# Launch the interactive TUI
+# Or explicitly
 task tui
+
+# Use a specific task file
+task --file ~/projects/tasks.md
 ```
+
+All task management (adding, editing, completing, deleting) is done through the interactive TUI.
 
 ## Commands
 
-| Command                         | Description                            |
-| ------------------------------- | -------------------------------------- |
-| `task init`                     | Create an empty task file              |
-| `task add <title>`              | Add a new task                         |
-| `task list`                     | List tasks (with optional filters)     |
-| `task show <id>`                | Show full task details                 |
-| `task edit <id>`                | Edit a task's title, priority, or tags |
-| `task done <id>`                | Mark a task as complete                |
-| `task undo <id>`                | Reopen a completed task                |
-| `task rm <id>`                  | Remove a task                          |
-| `task tui`                      | Launch the interactive terminal UI     |
-| `task config set <key> <value>` | Set a configuration value              |
-| `task config get <key>`         | Get a configuration value              |
+| Command | Description |
+| --- | --- |
+| `task` / `task tui` | Launch the interactive terminal UI (default) |
+| `task config set <key> <value>` | Set a configuration value |
+| `task config get <key>` | Get a configuration value |
+| `task auth todoist [--token TOKEN]` | Store Todoist API token |
+| `task auth claude [--key KEY]` | Store Claude API key |
+| `task auth status` | Show authentication status |
+| `task auth revoke` | Revoke stored tokens |
 
 ### Global Flags
 
-| Flag            | Description                                         |
-| --------------- | --------------------------------------------------- |
-| `--file <path>` | Use a custom task file (default: `tasks.md`)        |
-| `--json`        | Output in JSON format (for AI agents and scripting) |
-| `--strict`      | Report errors for malformed task entries            |
+| Flag | Description |
+| --- | --- |
+| `--file <path>` | Use a custom task file (default: `tasks.md`) |
 
-### Filter Flags (for `list`)
+## Interactive TUI
 
-| Flag                             | Description        |
-| -------------------------------- | ------------------ |
-| `--status <open\|done>`          | Filter by status   |
-| `--priority <high\|medium\|low>` | Filter by priority |
-| `--tag <name>`                   | Filter by tag      |
+Launch with `task tui` or just `task`. The TUI provides a full-featured interface for managing tasks, notes, and AI-powered chat.
 
-## JSON Mode
+### Views
 
-Every command supports `--json` for machine-readable output:
+Cycle through views with `v` (next) and `V` (previous):
+
+| View | Description |
+| --- | --- |
+| Today | Tasks due today, overdue, or with no due date |
+| All Tasks | All tasks including completed |
+| This Week | Tasks due within 7 days |
+| This Month | Tasks due this month |
+| This Year | Tasks due this year |
+| No Due Date | Tasks without a due date |
+| Recurring | Tasks with recurrence patterns |
+| Notes | Markdown notes manager |
+
+### Keybindings
+
+**Navigation**
+
+| Key | Action |
+| --- | --- |
+| `j` / `Down` | Move down |
+| `k` / `Up` | Move up |
+| `v` | Next view |
+| `V` | Previous view |
+| `Tab` | Toggle detail panel |
+| `q` | Quit |
+
+**Task Operations**
+
+| Key | Action |
+| --- | --- |
+| `Space` / `Enter` | Toggle task status (open/done) |
+| `a` | Add new task |
+| `d` | Delete task (with confirmation) |
+| `e` | Edit title |
+| `p` | Edit priority (`c`=critical, `h`=high, `m`=medium, `l`=low) |
+| `t` | Edit tags |
+| `r` | Edit description |
+| `R` | Edit recurrence pattern |
+| `f` / `/` | Filter tasks |
+| `Esc` | Clear active filter |
+
+**Due Date Shortcuts**
+
+| Key | Action |
+| --- | --- |
+| `T` | Set due today |
+| `N` | Set due tomorrow |
+| `W` | Set due next week |
+| `M` | Set due next month |
+| `Q` | Set due 3 months out |
+| `Y` | Set due 1 year out |
+| `X` | Clear due date |
+
+**Notes**
+
+| Key | Action |
+| --- | --- |
+| `n` | Open note picker (link/create note for selected task) |
+| `g` | Open linked note in editor |
+
+In Notes view: `a` to create a note, `Enter` to edit, `d` to delete.
+
+In the note editor: `Ctrl+S` to save, `Esc` to exit (prompts if unsaved changes).
+
+**Integrations**
+
+| Key | Action |
+| --- | --- |
+| `i` | Import tasks from Todoist |
+| `:` | Open NLP chat with Claude |
+
+### Filtering
+
+Enter filter mode with `f` or `/`, then type a filter expression:
+
+- `status:open` or `status:done`
+- `priority:high` (also `critical`, `medium`, `low`)
+- `tag:frontend`
+- `project:myproject`
+- `title:login` (case-insensitive substring match)
+
+Multiple filters can be combined with spaces.
+
+### Detail Panel
+
+Press `Tab` to toggle a right-side panel showing all fields for the selected task. Navigate fields with `j`/`k`, press `Enter` to edit, `s` to save, `d` to discard.
+
+## NLP Chat
+
+Press `:` in the TUI to open a natural language chat powered by Claude. Requires a Claude API key (`task auth claude` or set `ANTHROPIC_API_KEY`).
+
+Supported actions:
+
+- **Filter** tasks by natural language ("show me high priority frontend tasks")
+- **Update** tasks in bulk ("mark all infra tasks as done")
+- **Set recurrence** ("make task 3 repeat weekly on Fridays")
+- **Create notes** ("create a note about the deployment process")
+- **Edit notes** ("update the deployment note with the new steps")
+- **Fetch URLs** (reference a URL and the AI will summarize it)
+- **Query tasks** ("what's overdue?", "what's due this week?")
+
+## Todoist Import
+
+Import open tasks from your Todoist account:
+
+1. Authenticate: `task auth todoist --token YOUR_TOKEN`
+2. Press `i` in the TUI
+
+Imported tasks preserve title, description, priority, labels (as tags), due dates, and project names. Imported tasks are labeled "exported" in Todoist to avoid duplicates.
+
+## Task Features
+
+### Priority Levels
+
+Critical, High, Medium, Low. Shorthand in the TUI: `c`, `h`, `m`, `l`.
+
+### Recurrence Patterns
+
+Set with the `R` key in the TUI or via NLP chat.
+
+| Pattern | Description |
+| --- | --- |
+| `daily` | Every day |
+| `weekly` | Every week |
+| `monthly` | Every month |
+| `yearly` | Every year |
+| `daily:N` | Every N days |
+| `weekly:N` | Every N weeks |
+| `monthly:N` | Every N months |
+| `yearly:N` | Every N years |
+| `weekly:MON` | Every week on Monday |
+| `weekly:N:FRI` | Every N weeks on Friday |
+| `monthly:2:TUE` | 2nd Tuesday of each month |
+
+When a recurring task is completed, it automatically resets to open with the next due date.
+
+### Notes
+
+Markdown notes are stored as individual `.md` files alongside your task file. Notes can be standalone or linked to tasks.
+
+- Create notes from the Notes view or via the note picker (`n`)
+- Edit notes in the inline editor with line numbers
+- Link notes to tasks — a note indicator appears in the task list
+
+## Configuration
+
+Config is stored at `~/.config/task-manager/config.md`.
+
+| Key | Description |
+| --- | --- |
+| `default-dir` | Default directory for task/note files |
+| `default-view` | Starting view (`today`, `all`, `weekly`, `monthly`, `yearly`, `no-due-date`, `recurring`, `notes`) |
 
 ```sh
-$ task list --json
-{"ok":true,"tasks":[{"id":1,"title":"Build the login page","status":"open","priority":"high","tags":["frontend","auth"],"created":"2025-01-15T10:00:00+00:00"}]}
-
-$ task show 999 --json
-{"ok":false,"error":"Task 999 not found"}
+task config set default-dir ~/projects
+task config set default-view all
 ```
-
-JSON responses always include an `ok` boolean. Exit codes: `0` success, `1` error, `2` not found.
 
 ## File Path Resolution
 
 The task file is resolved in this order:
 
-1. `--file <path>` flag
+1. `--file <path>` CLI flag
 2. `TASK_FILE` environment variable
-3. `default-dir` config value (set via `task config set default-dir <path>`)
+3. `default-dir` config value
 4. `tasks.md` in the current directory
-
-```sh
-# Use a custom file for a single command
-task --file ~/projects/my-tasks.md list
-
-# Or set the env var for the current session
-export TASK_FILE=~/projects/my-tasks.md
-task list
-
-# Or set a persistent default directory
-task config set default-dir ~/projects
-task config get default-dir
-```
 
 ## File Format
 
@@ -126,20 +228,26 @@ Tasks are stored as Markdown with metadata in HTML comments:
 
 ```markdown
 <!-- format:1 -->
-<!-- next-id:3 -->
+<!-- next-id:4 -->
 
 # Tasks
 
 ## [ ] Build the login page
 
-<!-- id:1 priority:high tags:frontend,auth created:2025-01-15T10:00:00+00:00 -->
+<!-- id:1 priority:high tags:frontend,auth due:2026-03-15 created:2025-01-15T10:00:00+00:00 -->
 
 Some notes about this task.
 
 ## [X] Set up CI pipeline
 
-<!-- id:2 priority:medium tags:infra created:2025-01-10T08:00:00+00:00 -->
+<!-- id:2 priority:medium tags:infra recur:weekly created:2025-01-10T08:00:00+00:00 -->
+
+## [ ] Write deployment docs
+
+<!-- id:3 priority:low note:deployment-guide created:2025-01-20T09:00:00+00:00 -->
 ```
+
+Metadata keys: `id`, `priority`, `tags`, `due`, `recur`, `note`, `project`, `created`, `updated`.
 
 The file is safe to edit by hand. The parser is tolerant of formatting issues — malformed entries are skipped rather than causing errors.
 
