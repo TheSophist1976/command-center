@@ -2,6 +2,7 @@ mod auth;
 mod cli;
 mod config;
 mod nlp;
+mod note;
 mod parser;
 mod storage;
 mod task;

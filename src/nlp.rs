@@ -23,6 +23,15 @@ pub enum NlpAction {
         recurrence: Option<String>,
         description: String,
     },
+    CreateNote {
+        title: String,
+        content: String,
+        task_id: Option<u32>,
+    },
+    EditNote {
+        slug: String,
+        content: String,
+    },
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]
@@ -85,6 +94,26 @@ pub fn build_task_context(tasks: &[Task]) -> String {
 // -- Prompt construction --
 
 fn build_system_prompt(task_context: &str, today: &str) -> String {
+    build_system_prompt_inner(task_context, today, &[])
+}
+
+fn build_system_prompt_with_notes(task_context: &str, today: &str, note_slugs: &[String]) -> String {
+    build_system_prompt_inner(task_context, today, note_slugs)
+}
+
+fn build_system_prompt_inner(task_context: &str, today: &str, note_slugs: &[String]) -> String {
+    let note_section = if note_slugs.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "\n\nExisting note slugs (can be referenced with edit_note):\n{}\n",
+            note_slugs.join(", ")
+        )
+    };
+    build_system_prompt_raw(task_context, today, &note_section)
+}
+
+fn build_system_prompt_raw(task_context: &str, today: &str, note_section: &str) -> String {
     format!(
         r#"You are a task manager assistant. The user will give you a natural language command about their tasks. You must respond with ONLY a valid JSON object (no markdown, no explanation).
 
@@ -127,8 +156,18 @@ Rules:
 - Use the provided current date to interpret relative time references such as "today", "this week", "overdue", "tomorrow", etc.
 - You have access to a `fetch_url` tool that can read web pages. Use it when the user mentions a URL, asks to summarize a link, or needs information from a web page referenced in a task. After fetching, incorporate the content into your response using the message action.
 - You have access to a `query_tasks` tool that can search and filter tasks. ALWAYS use it for date-based queries (overdue tasks, tasks due this week, due before/after a date) — it performs accurate date comparison in code, which is more reliable than you scanning the task list. After calling query_tasks, use the returned task IDs to construct your response (e.g., an update action with "task_ids":[...], or a show_tasks action).
-- IMPORTANT: When the user asks to update overdue tasks or tasks based on dates, you MUST first call query_tasks to get the matching task IDs, then return an update action with those task_ids. Do NOT try to determine overdue tasks by reading the task list yourself — use the tool."#,
-        today, task_context
+- IMPORTANT: When the user asks to update overdue tasks or tasks based on dates, you MUST first call query_tasks to get the matching task IDs, then return an update action with those task_ids. Do NOT try to determine overdue tasks by reading the task list yourself — use the tool.
+
+6. To create a new markdown note:
+{{"action":"create_note","title":"Note Title","content":"Markdown content here","task_id":null}}
+Creates a new .md note file. The title is required, content is the markdown body. Optionally set task_id to link the note to a task. The filename is derived from the title (slugified).
+
+7. To edit an existing note:
+{{"action":"edit_note","slug":"note-slug","content":"New markdown content"}}
+Replaces the body of an existing note. The slug must match an existing note file. Use markdown formatting in content.{}
+
+Notes are markdown files stored alongside tasks. You can use markdown formatting (headings, lists, bold, etc.) in note content."#,
+        today, task_context, note_section
     )
 }
 
@@ -567,6 +606,9 @@ struct RawAction {
     task_ids: Option<Vec<u32>>,
     task_id: Option<u32>,
     recurrence: Option<serde_json::Value>,
+    title: Option<String>,
+    content: Option<String>,
+    slug: Option<String>,
 }
 
 pub fn parse_response(json_str: &str) -> Result<NlpAction, String> {
@@ -626,6 +668,16 @@ pub fn parse_response(json_str: &str) -> Result<NlpAction, String> {
             let description = raw.description.unwrap_or_else(|| "Set recurrence".to_string());
             Ok(NlpAction::SetRecurrence { task_id, recurrence, description })
         }
+        "create_note" => {
+            let title = raw.title.ok_or("create_note requires title")?;
+            let content = raw.content.unwrap_or_default();
+            Ok(NlpAction::CreateNote { title, content, task_id: raw.task_id })
+        }
+        "edit_note" => {
+            let slug = raw.slug.ok_or("edit_note requires slug")?;
+            let content = raw.content.ok_or("edit_note requires content")?;
+            Ok(NlpAction::EditNote { slug, content })
+        }
         other => Err(format!("Unknown action type: {}", other)),
     }
 }
@@ -648,9 +700,13 @@ fn log_debug(msg: &str) {
 /// Interpret a conversation with the NLP model. Returns the parsed action and raw response text.
 /// The raw response text is returned so the caller can append it to the conversation history.
 pub fn interpret(tasks: &[Task], messages: &[ApiMessage], api_key: &str) -> Result<(NlpAction, String), String> {
+    interpret_with_notes(tasks, messages, api_key, &[])
+}
+
+pub fn interpret_with_notes(tasks: &[Task], messages: &[ApiMessage], api_key: &str, note_slugs: &[String]) -> Result<(NlpAction, String), String> {
     let task_context = build_task_context(tasks);
     let today = chrono::Local::now().format("%Y-%m-%d (%A)").to_string();
-    let system_prompt = build_system_prompt(&task_context, &today);
+    let system_prompt = build_system_prompt_with_notes(&task_context, &today, note_slugs);
 
     log_debug(&format!("--- NLP Request ---"));
     log_debug(&format!("Messages: {} total", messages.len()));
@@ -757,6 +813,7 @@ mod tests {
             due_date: None,
             project: Some("TestProject".to_string()),
             recurrence: None,
+            note: None,
         }
     }
 

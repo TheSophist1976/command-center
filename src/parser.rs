@@ -91,6 +91,7 @@ pub fn parse(content: &str, strict: bool) -> Result<TaskFile, Vec<ParseError>> {
                         due_date: metadata.due_date,
                         project: metadata.project,
                         recurrence: metadata.recurrence,
+                        note: metadata.note,
                     });
                 } else if strict {
                     errors.push(ParseError {
@@ -164,6 +165,7 @@ struct Metadata {
     due_date: Option<NaiveDate>,
     project: Option<String>,
     recurrence: Option<Recurrence>,
+    note: Option<String>,
 }
 
 fn parse_metadata_comment(line: &str) -> Option<Metadata> {
@@ -178,6 +180,7 @@ fn parse_metadata_comment(line: &str) -> Option<Metadata> {
     let mut due_date: Option<NaiveDate> = None;
     let mut project: Option<String> = None;
     let mut recurrence: Option<Recurrence> = None;
+    let mut note: Option<String> = None;
 
     for pair in inner.split_whitespace() {
         if let Some((key, rest)) = pair.split_once(':') {
@@ -201,6 +204,11 @@ fn parse_metadata_comment(line: &str) -> Option<Metadata> {
                     // "recur:monthly:3:thu" is one token. split_once(':') gives key="recur", rest="monthly:3:thu".
                     recurrence = Recurrence::from_str(rest).ok();
                 }
+                "note" => {
+                    if !rest.is_empty() {
+                        note = Some(rest.to_string());
+                    }
+                }
                 _ => {}
             }
         }
@@ -215,6 +223,7 @@ fn parse_metadata_comment(line: &str) -> Option<Metadata> {
         due_date,
         project,
         recurrence,
+        note,
     })
 }
 
@@ -251,6 +260,9 @@ pub fn serialize(task_file: &TaskFile) -> String {
         }
         if let Some(ref recur) = task.recurrence {
             meta_parts.push(format!("recur:{}", recur));
+        }
+        if let Some(ref note_slug) = task.note {
+            meta_parts.push(format!("note:{}", note_slug));
         }
         meta_parts.push(format!("created:{}", task.created.to_rfc3339()));
         if let Some(updated) = task.updated {
@@ -522,6 +534,7 @@ Some description here.
             due_date: None,
             project: None,
             recurrence: None,
+            note: None,
         });
         let out = serialize(&tf);
         assert!(out.contains("## [ ] Open task"));
@@ -544,6 +557,7 @@ Some description here.
             due_date: None,
             project: None,
             recurrence: None,
+            note: None,
         });
         let out = serialize(&tf);
         assert!(out.contains("## [x] Done task"));
@@ -566,6 +580,7 @@ Some description here.
             due_date: Some(NaiveDate::from_ymd_opt(2025, 12, 31).unwrap()),
             project: Some("My Project".to_string()),
             recurrence: None,
+            note: None,
         });
         let out = serialize(&tf);
         assert!(out.contains("tags:alpha,beta"));
@@ -593,6 +608,7 @@ Some description here.
             due_date: None,
             project: Some("Work:Project".to_string()),
             recurrence: None,
+            note: None,
         });
         let out = serialize(&tf);
         assert!(out.contains("project:Work%3AProject"));
@@ -615,6 +631,7 @@ Some description here.
             due_date: None,
             project: Some("My Project".to_string()),
             recurrence: None,
+            note: None,
         });
         let serialized = serialize(&tf);
         let parsed = parse(&serialized, false).unwrap();
@@ -824,5 +841,48 @@ Some description here.
         let tf = parse(content, false).unwrap();
         // format:1 line is not recognized (doesn't end with -->), format_version stays default
         assert_eq!(tf.tasks.len(), 1);
+    }
+
+    // -- Note metadata tests --
+
+    #[test]
+    fn test_parse_task_with_note_metadata() {
+        let content = "<!-- format:2 -->\n<!-- next-id:2 -->\n\n## [ ] Task with note\n<!-- id:1 priority:medium created:2025-01-15T10:00:00+00:00 note:meeting-notes -->\n";
+        let tf = parse(content, false).unwrap();
+        assert_eq!(tf.tasks.len(), 1);
+        assert_eq!(tf.tasks[0].note, Some("meeting-notes".to_string()));
+    }
+
+    #[test]
+    fn test_parse_task_without_note_metadata() {
+        let content = "<!-- format:2 -->\n<!-- next-id:2 -->\n\n## [ ] Task no note\n<!-- id:1 priority:medium created:2025-01-15T10:00:00+00:00 -->\n";
+        let tf = parse(content, false).unwrap();
+        assert_eq!(tf.tasks.len(), 1);
+        assert!(tf.tasks[0].note.is_none());
+    }
+
+    #[test]
+    fn test_note_metadata_round_trip() {
+        use chrono::{TimeZone, Utc};
+        use crate::task::{Priority, Status, Task};
+        let mut tf = TaskFile::new();
+        tf.tasks.push(Task {
+            id: 1,
+            title: "Linked task".to_string(),
+            status: Status::Open,
+            priority: Priority::Medium,
+            tags: Vec::new(),
+            created: Utc.with_ymd_and_hms(2025, 1, 1, 0, 0, 0).unwrap(),
+            updated: None,
+            description: None,
+            due_date: None,
+            project: None,
+            recurrence: None,
+            note: Some("my-note".to_string()),
+        });
+        let serialized = serialize(&tf);
+        assert!(serialized.contains("note:my-note"));
+        let parsed = parse(&serialized, false).unwrap();
+        assert_eq!(parsed.tasks[0].note, Some("my-note".to_string()));
     }
 }

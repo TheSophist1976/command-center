@@ -284,6 +284,7 @@ mod tests {
             due_date: None,
             project: None,
             recurrence: None,
+            note: None,
         });
         tf.next_id = 2;
         save(&path, &tf).unwrap();
@@ -316,6 +317,7 @@ mod tests {
             due_date: None,
             project: None,
             recurrence: None,
+            note: None,
         });
         save(&path, &tf).unwrap();
 
