@@ -373,14 +373,32 @@ impl App {
 
     fn filtered_indices(&self) -> Vec<usize> {
         let today = Local::now().date_naive();
-        self.task_file
+        let mut indices: Vec<usize> = self
+            .task_file
             .tasks
             .iter()
             .enumerate()
             .filter(|(_, t)| self.view.matches(t, today))
             .filter(|(_, t)| self.filter.matches(t))
             .map(|(i, _)| i)
-            .collect()
+            .collect();
+        let tasks = &self.task_file.tasks;
+        indices.sort_by(|&a, &b| {
+            let ta = &tasks[a];
+            let tb = &tasks[b];
+            // Due date ascending, None last
+            let da = ta.due_date.map(|d| (0, d));
+            let db = tb.due_date.map(|d| (0, d));
+            let date_cmp = match (da, db) {
+                (Some(a), Some(b)) => a.cmp(&b),
+                (Some(_), None) => std::cmp::Ordering::Less,
+                (None, Some(_)) => std::cmp::Ordering::Greater,
+                (None, None) => std::cmp::Ordering::Equal,
+            };
+            // Priority descending (Critical first — Critical < High < Medium < Low by Ord)
+            date_cmp.then(ta.priority.cmp(&tb.priority))
+        });
+        indices
     }
 
     fn clamp_selection(&mut self) {
@@ -2756,5 +2774,63 @@ mod tests {
 
         let r3 = Recurrence::Interval { unit: IntervalUnit::Daily, count: 1 };
         assert_eq!(format_recurrence_display(&r3), "Daily");
+    }
+
+    // -- Sort order tests --
+
+    #[test]
+    fn filtered_indices_sorted_by_due_date_ascending() {
+        let today = chrono::Local::now().date_naive();
+        let d1 = today + chrono::Days::new(10);
+        let d2 = today + chrono::Days::new(2);
+        let d3 = today + chrono::Days::new(5);
+        let app = make_app_with_tasks(vec![
+            make_task(Some(d1)),
+            make_task(Some(d2)),
+            make_task(Some(d3)),
+        ]);
+        let indices = app.filtered_indices();
+        assert_eq!(indices, vec![1, 2, 0]); // d2, d3, d1
+    }
+
+    #[test]
+    fn filtered_indices_none_due_date_sorted_last() {
+        let today = chrono::Local::now().date_naive();
+        let d1 = today + chrono::Days::new(5);
+        let app = make_app_with_tasks(vec![
+            make_task(None),
+            make_task(Some(d1)),
+            make_task(None),
+        ]);
+        let indices = app.filtered_indices();
+        assert_eq!(indices, vec![1, 0, 2]); // d1, None, None
+    }
+
+    #[test]
+    fn filtered_indices_same_date_sorted_by_priority_descending() {
+        let today = chrono::Local::now().date_naive();
+        let d = today + chrono::Days::new(3);
+        let mut t1 = make_task(Some(d));
+        t1.priority = Priority::Low;
+        let mut t2 = make_task(Some(d));
+        t2.priority = Priority::Critical;
+        let mut t3 = make_task(Some(d));
+        t3.priority = Priority::Medium;
+        let app = make_app_with_tasks(vec![t1, t2, t3]);
+        let indices = app.filtered_indices();
+        assert_eq!(indices, vec![1, 2, 0]); // Critical, Medium, Low
+    }
+
+    #[test]
+    fn filtered_indices_no_due_date_sorted_by_priority() {
+        let mut t1 = make_task(None);
+        t1.priority = Priority::Low;
+        let mut t2 = make_task(None);
+        t2.priority = Priority::High;
+        let mut t3 = make_task(None);
+        t3.priority = Priority::Medium;
+        let app = make_app_with_tasks(vec![t1, t2, t3]);
+        let indices = app.filtered_indices();
+        assert_eq!(indices, vec![1, 2, 0]); // High, Medium, Low
     }
 }

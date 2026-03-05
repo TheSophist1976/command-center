@@ -289,7 +289,7 @@ impl std::str::FromStr for Status {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Priority {
     Critical,
@@ -460,6 +460,22 @@ mod tests {
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(err.contains("Invalid priority"));
+    }
+
+    // -- Priority ordering tests --
+
+    #[test]
+    fn test_priority_ord_descending() {
+        assert!(Priority::Critical < Priority::High);
+        assert!(Priority::High < Priority::Medium);
+        assert!(Priority::Medium < Priority::Low);
+    }
+
+    #[test]
+    fn test_priority_sorted_descending() {
+        let mut priorities = vec![Priority::Low, Priority::Critical, Priority::Medium, Priority::High];
+        priorities.sort();
+        assert_eq!(priorities, vec![Priority::Critical, Priority::High, Priority::Medium, Priority::Low]);
     }
 
     // -- TaskFile tests --
