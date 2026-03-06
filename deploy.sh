@@ -34,6 +34,7 @@ STATUS_PATH=""
 STATUS_CONFIG=""
 STATUS_TODOIST=""
 STATUS_CLAUDE=""
+STATUS_SLACK=""
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
@@ -52,20 +53,31 @@ fi
 success "cargo found: $(cargo --version)"
 
 # =========================================================
-# 2. Build
+# 2. Tests
 # =========================================================
-header "2. Building project (release mode)"
+header "2. Running tests"
 
-if ! cargo build --release; then
+if ! cargo test -- --skip auth::tests --skip todoist::tests; then
+    error "Tests failed. See errors above."
+    exit 1
+fi
+success "All tests passed"
+
+# =========================================================
+# 3. Build
+# =========================================================
+header "3. Building project (release mode)"
+
+if ! RUSTFLAGS="-D warnings" cargo build --release; then
     error "Build failed. See errors above."
     exit 1
 fi
 success "Build complete: target/release/task"
 
 # =========================================================
-# 3. Install binary
+# 4. Install binary
 # =========================================================
-header "3. Installing binary"
+header "4. Installing binary"
 
 INSTALL_DIR="${INSTALL_DIR:-$HOME/.local/bin}"
 mkdir -p "$INSTALL_DIR"
@@ -76,9 +88,9 @@ success "Installed task to $INSTALL_DIR/task"
 STATUS_BINARY="installed → $INSTALL_DIR/task"
 
 # =========================================================
-# 4. PATH detection & shell profile
+# 5. PATH detection & shell profile
 # =========================================================
-header "4. PATH configuration"
+header "5. PATH configuration"
 
 EXPORT_LINE="export PATH=\"\$HOME/.local/bin:\$PATH\""
 
@@ -118,9 +130,9 @@ else
 fi
 
 # =========================================================
-# 5. Config: default-dir
+# 6. Config: default-dir
 # =========================================================
-header "5. Configuration"
+header "6. Configuration"
 
 # Resolve config dir to match the Rust app (dirs::config_dir())
 if [[ "$(uname)" == "Darwin" ]]; then
@@ -169,9 +181,9 @@ else
 fi
 
 # =========================================================
-# 6. Auth: Todoist token
+# 7. Auth: Todoist token
 # =========================================================
-header "6. Integrations"
+header "7. Integrations"
 
 TODOIST_TOKEN_FILE="$CONFIG_DIR/todoist_token"
 
@@ -238,8 +250,49 @@ else
     fi
 fi
 
+# --- Slack Bot Token ---
+
+SLACK_TOKEN_FILE="$CONFIG_DIR/slack_token"
+
+if [[ -n "${SLACK_BOT_TOKEN:-}" ]]; then
+    success "Slack: configured (env var)"
+    STATUS_SLACK="configured (env var)"
+elif [[ -f "$SLACK_TOKEN_FILE" ]] && [[ -s "$SLACK_TOKEN_FILE" ]]; then
+    success "Slack: configured (file)"
+    STATUS_SLACK="configured (file)"
+else
+    if ask_yn "Set up Slack integration?"; then
+        echo ""
+        info "Create a Slack App at:"
+        echo "  https://api.slack.com/apps"
+        echo ""
+        info "Add User Token Scopes: channels:history, channels:read"
+        info "Install to your workspace, then copy the User OAuth Token."
+        echo ""
+        printf "${BLUE}▸${NC} Paste your Slack OAuth Token (xoxp-... or xoxb-...): "
+        read -r slack_token
+
+        if [[ -n "$slack_token" ]]; then
+            if [[ "$slack_token" != xoxp-* ]] && [[ "$slack_token" != xoxb-* ]]; then
+                warn "Token doesn't start with 'xoxp-' or 'xoxb-' — saving anyway"
+            fi
+            mkdir -p "$CONFIG_DIR"
+            printf "%s" "$slack_token" > "$SLACK_TOKEN_FILE"
+            chmod 600 "$SLACK_TOKEN_FILE"
+            success "Slack token saved"
+            STATUS_SLACK="configured (file)"
+        else
+            warn "Empty token, skipped"
+            STATUS_SLACK="skipped"
+        fi
+    else
+        info "Skipped Slack setup"
+        STATUS_SLACK="skipped"
+    fi
+fi
+
 # =========================================================
-# 7. Summary
+# 8. Summary
 # =========================================================
 header "Setup Complete"
 echo ""
@@ -248,5 +301,6 @@ printf "  %-16s %s\n" "PATH:" "$STATUS_PATH"
 printf "  %-16s %s\n" "Config:" "$STATUS_CONFIG"
 printf "  %-16s %s\n" "Todoist:" "$STATUS_TODOIST"
 printf "  %-16s %s\n" "Claude API:" "$STATUS_CLAUDE"
+printf "  %-16s %s\n" "Slack:" "$STATUS_SLACK"
 echo ""
 success "Done! Run 'task' to get started."

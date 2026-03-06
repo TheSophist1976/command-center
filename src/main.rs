@@ -4,6 +4,7 @@ mod config;
 mod nlp;
 mod note;
 mod parser;
+mod slack;
 mod storage;
 mod task;
 mod todoist;
@@ -53,6 +54,13 @@ fn run(cli: Cli) -> Result<(), (i32, String)> {
                 Ok(())
             }
 
+            AuthCommand::Slack { token } => {
+                let token = auth::prompt_for_slack_token(token).map_err(|e| (1, e))?;
+                auth::write_slack_token(&token).map_err(|e| (1, e))?;
+                println!("Slack token stored.");
+                Ok(())
+            }
+
             AuthCommand::Status => {
                 let todoist_status = if auth::read_token().is_some() {
                     "Todoist token: present"
@@ -64,16 +72,23 @@ fn run(cli: Cli) -> Result<(), (i32, String)> {
                     Some((_, _)) => "Claude API key: present".to_string(),
                     None => "Claude API key: not set".to_string(),
                 };
-                println!("{}\n{}", todoist_status, claude_status);
+                let slack_status = if auth::read_slack_token().is_some() {
+                    "Slack token: present"
+                } else {
+                    "Slack token: not set"
+                };
+                println!("{}\n{}\n{}", todoist_status, claude_status, slack_status);
                 Ok(())
             }
 
             AuthCommand::Revoke => {
                 let todoist_deleted = auth::delete_token().map_err(|e| (1, e))?;
                 let claude_deleted = auth::delete_claude_key().map_err(|e| (1, e))?;
+                let slack_deleted = auth::delete_slack_token().map_err(|e| (1, e))?;
                 let mut msgs = Vec::new();
                 if todoist_deleted { msgs.push("Todoist token revoked."); }
                 if claude_deleted { msgs.push("Claude API key revoked."); }
+                if slack_deleted { msgs.push("Slack token revoked."); }
                 if msgs.is_empty() { msgs.push("No tokens found."); }
                 println!("{}", msgs.join(" "));
                 Ok(())

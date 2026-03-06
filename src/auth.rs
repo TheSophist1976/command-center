@@ -161,7 +161,82 @@ pub fn prompt_for_token(token_flag: Option<String>) -> Result<String, String> {
     Ok(trimmed)
 }
 
+// -- Slack token --
+
+pub fn slack_token_path() -> PathBuf {
+    let base = dirs::config_dir()
+        .unwrap_or_else(|| PathBuf::from("~/.config"));
+    base.join("task-manager").join("slack_token")
+}
+
+pub fn read_slack_token() -> Option<String> {
+    // Env var takes precedence
+    if let Ok(token) = std::env::var("SLACK_BOT_TOKEN") {
+        let trimmed = token.trim().to_string();
+        if !trimmed.is_empty() {
+            return Some(trimmed);
+        }
+    }
+    let path = slack_token_path();
+    fs::read_to_string(&path).ok().map(|s| s.trim().to_string())
+}
+
+pub fn write_slack_token(token: &str) -> Result<(), String> {
+    let path = slack_token_path();
+    write_token_to(&path, token)
+}
+
+pub fn delete_slack_token() -> Result<bool, String> {
+    let path = slack_token_path();
+    delete_token_at(&path)
+}
+
+fn is_valid_slack_token(token: &str) -> bool {
+    token.starts_with("xoxp-") || token.starts_with("xoxb-")
+}
+
+pub fn prompt_for_slack_token(token_flag: Option<String>) -> Result<String, String> {
+    if let Some(t) = token_flag {
+        let trimmed = t.trim().to_string();
+        if trimmed.is_empty() {
+            return Err("Token cannot be empty.".to_string());
+        }
+        if !is_valid_slack_token(&trimmed) {
+            return Err("Slack token must start with 'xoxp-' (user) or 'xoxb-' (bot).".to_string());
+        }
+        return Ok(trimmed);
+    }
+
+    println!("Create a Slack App at:");
+    println!("  https://api.slack.com/apps");
+    println!();
+    println!("Add User Token Scopes:");
+    println!("  channels:history, channels:read, channels:write,");
+    println!("  groups:history, groups:read, groups:write,");
+    println!("  im:history, im:read, im:write,");
+    println!("  mpim:history, mpim:read, mpim:write, users:read");
+    println!("Then install to your workspace and copy the User OAuth Token.");
+    println!();
+    print!("Paste your Slack OAuth Token (xoxp-... or xoxb-...): ");
+    io::stdout().flush().map_err(|e| format!("Failed to flush stdout: {}", e))?;
+
+    let mut input = String::new();
+    io::stdin()
+        .read_line(&mut input)
+        .map_err(|e| format!("Failed to read token: {}", e))?;
+
+    let trimmed = input.trim().to_string();
+    if trimmed.is_empty() {
+        return Err("Token cannot be empty.".to_string());
+    }
+    if !is_valid_slack_token(&trimmed) {
+        return Err("Slack token must start with 'xoxp-' (user) or 'xoxb-' (bot).".to_string());
+    }
+    Ok(trimmed)
+}
+
 // Token operations using a custom path (for testing)
+#[cfg(test)]
 pub fn read_token_from(path: &std::path::Path) -> Option<String> {
     fs::read_to_string(path).ok().map(|s| s.trim().to_string())
 }
@@ -475,6 +550,85 @@ mod tests {
     fn test_prompt_for_claude_key_whitespace_trimmed() {
         let result = prompt_for_claude_key(Some("  sk-ant-test  ".to_string()));
         assert_eq!(result.unwrap(), "sk-ant-test");
+    }
+
+    // -- Slack token tests --
+
+    #[test]
+    fn test_slack_token_path_returns_path() {
+        let path = slack_token_path();
+        assert!(path.to_string_lossy().contains("task-manager"));
+        assert!(path.to_string_lossy().contains("slack_token"));
+    }
+
+    #[test]
+    fn test_write_read_delete_slack_token() {
+        let result = write_slack_token("xoxp-test-token-12345");
+        assert!(result.is_ok());
+
+        let original = std::env::var("SLACK_BOT_TOKEN").ok();
+        unsafe { std::env::remove_var("SLACK_BOT_TOKEN"); }
+
+        let token = read_slack_token();
+        assert!(token.is_some());
+        assert_eq!(token.unwrap(), "xoxp-test-token-12345");
+
+        let deleted = delete_slack_token().unwrap();
+        assert!(deleted);
+
+        let deleted_again = delete_slack_token().unwrap();
+        assert!(!deleted_again);
+
+        if let Some(val) = original {
+            unsafe { std::env::set_var("SLACK_BOT_TOKEN", val); }
+        }
+    }
+
+    #[test]
+    fn test_read_slack_token_from_env() {
+        let original = std::env::var("SLACK_BOT_TOKEN").ok();
+        unsafe { std::env::set_var("SLACK_BOT_TOKEN", "xoxp-env-token"); }
+
+        let token = read_slack_token();
+        assert_eq!(token, Some("xoxp-env-token".to_string()));
+
+        if let Some(val) = original {
+            unsafe { std::env::set_var("SLACK_BOT_TOKEN", val); }
+        } else {
+            unsafe { std::env::remove_var("SLACK_BOT_TOKEN"); }
+        }
+    }
+
+    #[test]
+    fn test_prompt_for_slack_token_with_user_token() {
+        let result = prompt_for_slack_token(Some("xoxp-123-456".to_string()));
+        assert_eq!(result.unwrap(), "xoxp-123-456");
+    }
+
+    #[test]
+    fn test_prompt_for_slack_token_with_bot_token() {
+        let result = prompt_for_slack_token(Some("xoxb-123-456".to_string()));
+        assert_eq!(result.unwrap(), "xoxb-123-456");
+    }
+
+    #[test]
+    fn test_prompt_for_slack_token_empty_flag_rejected() {
+        let result = prompt_for_slack_token(Some("".to_string()));
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("empty"));
+    }
+
+    #[test]
+    fn test_prompt_for_slack_token_invalid_prefix_rejected() {
+        let result = prompt_for_slack_token(Some("not-a-slack-token".to_string()));
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("xoxp-"));
+    }
+
+    #[test]
+    fn test_prompt_for_slack_token_whitespace_trimmed() {
+        let result = prompt_for_slack_token(Some("  xoxp-123  ".to_string()));
+        assert_eq!(result.unwrap(), "xoxp-123");
     }
 
     #[test]

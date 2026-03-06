@@ -45,6 +45,13 @@ pub enum AuthCommand {
         key: Option<String>,
     },
 
+    /// Authenticate with Slack using a Bot User OAuth Token
+    Slack {
+        /// Slack Bot Token (skips interactive prompt)
+        #[arg(long)]
+        token: Option<String>,
+    },
+
     /// Show authentication status
     Status,
 

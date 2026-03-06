@@ -93,6 +93,7 @@ pub fn build_task_context(tasks: &[Task]) -> String {
 
 // -- Prompt construction --
 
+#[cfg(test)]
 fn build_system_prompt(task_context: &str, today: &str) -> String {
     build_system_prompt_inner(task_context, today, &[])
 }
@@ -699,6 +700,7 @@ fn log_debug(msg: &str) {
 
 /// Interpret a conversation with the NLP model. Returns the parsed action and raw response text.
 /// The raw response text is returned so the caller can append it to the conversation history.
+#[allow(dead_code)]
 pub fn interpret(tasks: &[Task], messages: &[ApiMessage], api_key: &str) -> Result<(NlpAction, String), String> {
     interpret_with_notes(tasks, messages, api_key, &[])
 }

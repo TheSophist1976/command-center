@@ -43,11 +43,37 @@ mod theme {
 use crate::auth;
 use crate::config;
 use crate::nlp::{self, ApiMessage, NlpAction};
+use crate::slack;
 use crate::storage;
 use crate::task::{Priority, Status, Task, TaskFile};
 use crate::todoist;
 
+const SPINNER_CHARS: &[char] = &['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+
 // -- Types --
+
+#[derive(Debug, Clone, PartialEq)]
+enum BgTaskKind {
+    TodoistImport,
+    SlackSync,
+    SlackChannelFetch,
+}
+
+impl BgTaskKind {
+    fn label(&self) -> &'static str {
+        match self {
+            BgTaskKind::TodoistImport => "Importing from Todoist",
+            BgTaskKind::SlackSync => "Syncing Slack",
+            BgTaskKind::SlackChannelFetch => "Loading channels",
+        }
+    }
+}
+
+enum BgTaskResult {
+    TodoistImport { imported: usize, skipped: usize, task_file: TaskFile },
+    SlackSync { inbox: slack::SlackInbox, new_count: usize },
+    SlackChannelFetch { channels: Vec<slack::SlackChannel>, selected: Vec<bool>, scope_warnings: Vec<String> },
+}
 
 #[derive(Debug, Clone, PartialEq)]
 enum Mode {
@@ -68,6 +94,9 @@ enum Mode {
     EditingNote,
     ConfirmingNoteExit,
     NotePicker,
+    SlackInbox,
+    SlackReplying,
+    SlackChannelPicker,
 }
 
 #[derive(Debug, Clone)]
@@ -454,6 +483,366 @@ fn char_to_byte_index(s: &str, char_idx: usize) -> usize {
         .unwrap_or(s.len())
 }
 
+// -- Markdown styling for note editor --
+
+mod md_style {
+    use ratatui::prelude::*;
+
+    const HEADING1_COLOR: Color = Color::Rgb(100, 180, 255);
+    const HEADING2_COLOR: Color = Color::Rgb(140, 170, 220);
+    const HEADING3_COLOR: Color = Color::Rgb(160, 160, 190);
+    const CODE_COLOR: Color = Color::Green;
+    const BLOCKQUOTE_COLOR: Color = Color::Rgb(150, 150, 170);
+    const LIST_MARKER_COLOR: Color = Color::Rgb(255, 215, 0);
+
+    /// Style a single markdown line into spans. Returns (spans, updated in_code_block).
+    pub fn style_markdown_line(line: &str, in_code_block: bool) -> (Vec<Span<'static>>, bool) {
+        // Code fence toggle
+        let trimmed = line.trim_start();
+        if trimmed == "```" || trimmed.starts_with("``` ") || trimmed.starts_with("```\t")
+            || (trimmed.starts_with("```") && trimmed[3..].chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_' || c == '+'))
+        {
+            let span = Span::styled(line.to_string(), Style::default().fg(CODE_COLOR));
+            return (vec![span], !in_code_block);
+        }
+
+        // Inside code block: no parsing
+        if in_code_block {
+            let span = Span::styled(line.to_string(), Style::default().fg(CODE_COLOR));
+            return (vec![span], true);
+        }
+
+        // Headings
+        if line.starts_with("### ") {
+            let span = Span::styled(
+                line.to_string(),
+                Style::default().fg(HEADING3_COLOR).add_modifier(Modifier::BOLD),
+            );
+            return (vec![span], false);
+        }
+        if line.starts_with("## ") {
+            let span = Span::styled(
+                line.to_string(),
+                Style::default().fg(HEADING2_COLOR).add_modifier(Modifier::BOLD),
+            );
+            return (vec![span], false);
+        }
+        if line.starts_with("# ") {
+            let span = Span::styled(
+                line.to_string(),
+                Style::default().fg(HEADING1_COLOR).add_modifier(Modifier::BOLD),
+            );
+            return (vec![span], false);
+        }
+
+        // Blockquotes
+        if line.starts_with("> ") || line == ">" {
+            let span = Span::styled(
+                line.to_string(),
+                Style::default().fg(BLOCKQUOTE_COLOR).add_modifier(Modifier::ITALIC),
+            );
+            return (vec![span], false);
+        }
+
+        // List items: style marker separately, parse rest for inline
+        if let Some(marker_len) = list_marker_len(line) {
+            let marker = &line[..marker_len];
+            let rest = &line[marker_len..];
+            let mut spans = vec![Span::styled(
+                marker.to_string(),
+                Style::default().fg(LIST_MARKER_COLOR),
+            )];
+            spans.extend(parse_inline(rest));
+            return (spans, false);
+        }
+
+        // Plain line with inline parsing
+        (parse_inline(line), false)
+    }
+
+    fn list_marker_len(line: &str) -> Option<usize> {
+        if line.starts_with("- ") || line.starts_with("* ") {
+            return Some(2);
+        }
+        // Ordered list: digits followed by ". "
+        let bytes = line.as_bytes();
+        let mut i = 0;
+        while i < bytes.len() && bytes[i].is_ascii_digit() {
+            i += 1;
+        }
+        if i > 0 && line[i..].starts_with(". ") {
+            Some(i + 2)
+        } else {
+            None
+        }
+    }
+
+    fn parse_inline(text: &str) -> Vec<Span<'static>> {
+        let mut spans: Vec<Span<'static>> = Vec::new();
+        let chars: Vec<char> = text.chars().collect();
+        let len = chars.len();
+        let mut i = 0;
+        let mut plain = String::new();
+
+        while i < len {
+            // Bold: **...**
+            if i + 1 < len && chars[i] == '*' && chars[i + 1] == '*' {
+                if let Some(end) = find_closing(&chars, i + 2, &['*', '*']) {
+                    if !plain.is_empty() {
+                        spans.push(Span::raw(std::mem::take(&mut plain)));
+                    }
+                    let content: String = chars[i..end + 2].iter().collect();
+                    spans.push(Span::styled(content, Style::default().add_modifier(Modifier::BOLD)));
+                    i = end + 2;
+                    continue;
+                }
+            }
+
+            // Inline code: `...`
+            if chars[i] == '`' {
+                if let Some(end) = find_single_closing(&chars, i + 1, '`') {
+                    if !plain.is_empty() {
+                        spans.push(Span::raw(std::mem::take(&mut plain)));
+                    }
+                    let content: String = chars[i..=end].iter().collect();
+                    spans.push(Span::styled(content, Style::default().fg(CODE_COLOR)));
+                    i = end + 1;
+                    continue;
+                }
+            }
+
+            // Italic: *...* or _..._
+            if (chars[i] == '*' || chars[i] == '_')
+                && (i + 1 < len && chars[i + 1] != ' ')
+            {
+                let marker = chars[i];
+                if let Some(end) = find_single_closing(&chars, i + 1, marker) {
+                    if end > i + 1 {
+                        if !plain.is_empty() {
+                            spans.push(Span::raw(std::mem::take(&mut plain)));
+                        }
+                        let content: String = chars[i..=end].iter().collect();
+                        spans.push(Span::styled(content, Style::default().add_modifier(Modifier::ITALIC)));
+                        i = end + 1;
+                        continue;
+                    }
+                }
+            }
+
+            plain.push(chars[i]);
+            i += 1;
+        }
+
+        if !plain.is_empty() {
+            spans.push(Span::raw(plain));
+        }
+        if spans.is_empty() {
+            spans.push(Span::raw(String::new()));
+        }
+        spans
+    }
+
+    /// Find closing double-char marker (e.g., **) starting search at `from`.
+    fn find_closing(chars: &[char], from: usize, marker: &[char; 2]) -> Option<usize> {
+        let len = chars.len();
+        let mut j = from;
+        while j + 1 < len {
+            if chars[j] == marker[0] && chars[j + 1] == marker[1] {
+                return Some(j);
+            }
+            j += 1;
+        }
+        None
+    }
+
+    /// Find closing single-char marker starting search at `from`.
+    fn find_single_closing(chars: &[char], from: usize, marker: char) -> Option<usize> {
+        for j in from..chars.len() {
+            if chars[j] == marker {
+                return Some(j);
+            }
+        }
+        None
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        fn styled_text(spans: &[Span]) -> String {
+            spans.iter().map(|s| s.content.as_ref()).collect()
+        }
+
+        // -- Heading tests --
+
+        #[test]
+        fn test_h1_heading() {
+            let (spans, in_cb) = style_markdown_line("# My Title", false);
+            assert!(!in_cb);
+            assert_eq!(spans.len(), 1);
+            assert_eq!(spans[0].content.as_ref(), "# My Title");
+            assert!(spans[0].style.add_modifier.contains(Modifier::BOLD));
+        }
+
+        #[test]
+        fn test_h2_heading() {
+            let (spans, _) = style_markdown_line("## Section", false);
+            assert_eq!(spans[0].content.as_ref(), "## Section");
+            assert!(spans[0].style.add_modifier.contains(Modifier::BOLD));
+        }
+
+        #[test]
+        fn test_h3_heading() {
+            let (spans, _) = style_markdown_line("### Sub", false);
+            assert!(spans[0].style.add_modifier.contains(Modifier::BOLD));
+        }
+
+        #[test]
+        fn test_hash_without_space_not_heading() {
+            let (spans, _) = style_markdown_line("#notaheading", false);
+            // Should be parsed as plain inline text, not bold heading
+            assert!(!spans[0].style.add_modifier.contains(Modifier::BOLD));
+        }
+
+        // -- Code block tests --
+
+        #[test]
+        fn test_code_fence_toggle() {
+            let (_, in_cb) = style_markdown_line("```", false);
+            assert!(in_cb);
+            let (_, in_cb) = style_markdown_line("```", true);
+            assert!(!in_cb);
+        }
+
+        #[test]
+        fn test_code_fence_with_lang() {
+            let (spans, in_cb) = style_markdown_line("```rust", false);
+            assert!(in_cb);
+            assert_eq!(spans[0].style.fg, Some(CODE_COLOR));
+        }
+
+        #[test]
+        fn test_inside_code_block() {
+            let (spans, in_cb) = style_markdown_line("let x = 1;", true);
+            assert!(in_cb);
+            assert_eq!(spans[0].style.fg, Some(CODE_COLOR));
+        }
+
+        // -- Blockquote tests --
+
+        #[test]
+        fn test_blockquote() {
+            let (spans, _) = style_markdown_line("> This is a quote", false);
+            assert!(spans[0].style.add_modifier.contains(Modifier::ITALIC));
+        }
+
+        // -- List tests --
+
+        #[test]
+        fn test_unordered_list() {
+            let (spans, _) = style_markdown_line("- Buy groceries", false);
+            assert_eq!(spans[0].content.as_ref(), "- ");
+            assert_eq!(spans[0].style.fg, Some(LIST_MARKER_COLOR));
+        }
+
+        #[test]
+        fn test_ordered_list() {
+            let (spans, _) = style_markdown_line("1. First item", false);
+            assert_eq!(spans[0].content.as_ref(), "1. ");
+            assert_eq!(spans[0].style.fg, Some(LIST_MARKER_COLOR));
+        }
+
+        // -- Inline bold tests --
+
+        #[test]
+        fn test_bold() {
+            let (spans, _) = style_markdown_line("This is **bold** text", false);
+            assert_eq!(styled_text(&spans), "This is **bold** text");
+            assert!(spans[1].style.add_modifier.contains(Modifier::BOLD));
+        }
+
+        #[test]
+        fn test_unclosed_bold() {
+            let (spans, _) = style_markdown_line("This is **not closed", false);
+            // No bold styling applied
+            for s in &spans {
+                assert!(!s.style.add_modifier.contains(Modifier::BOLD));
+            }
+        }
+
+        // -- Inline italic tests --
+
+        #[test]
+        fn test_italic_asterisk() {
+            let (spans, _) = style_markdown_line("This is *italic* text", false);
+            assert_eq!(styled_text(&spans), "This is *italic* text");
+            assert!(spans[1].style.add_modifier.contains(Modifier::ITALIC));
+        }
+
+        #[test]
+        fn test_italic_underscore() {
+            let (spans, _) = style_markdown_line("This is _italic_ text", false);
+            assert!(spans[1].style.add_modifier.contains(Modifier::ITALIC));
+        }
+
+        // -- Inline code tests --
+
+        #[test]
+        fn test_inline_code() {
+            let (spans, _) = style_markdown_line("Use the `println!` macro", false);
+            assert_eq!(styled_text(&spans), "Use the `println!` macro");
+            assert_eq!(spans[1].style.fg, Some(CODE_COLOR));
+        }
+
+        #[test]
+        fn test_unclosed_backtick() {
+            let (spans, _) = style_markdown_line("Use the `println! macro", false);
+            for s in &spans {
+                assert_ne!(s.style.fg, Some(CODE_COLOR));
+            }
+        }
+
+        // -- Edge cases --
+
+        #[test]
+        fn test_empty_line() {
+            let (spans, in_cb) = style_markdown_line("", false);
+            assert!(!in_cb);
+            assert_eq!(styled_text(&spans), "");
+        }
+
+        #[test]
+        fn test_plain_text() {
+            let (spans, _) = style_markdown_line("Hello world", false);
+            assert_eq!(spans.len(), 1);
+            assert_eq!(spans[0].content.as_ref(), "Hello world");
+        }
+
+        #[test]
+        fn test_inline_skipped_in_code_block() {
+            let (spans, _) = style_markdown_line("**bold** in code", true);
+            // Entire line styled as code, no bold parsing
+            assert_eq!(spans.len(), 1);
+            assert_eq!(spans[0].style.fg, Some(CODE_COLOR));
+        }
+
+        #[test]
+        fn test_inline_skipped_in_heading() {
+            let (spans, _) = style_markdown_line("# Title with **bold**", false);
+            // Entire line is one heading span, no separate bold
+            assert_eq!(spans.len(), 1);
+            assert!(spans[0].style.add_modifier.contains(Modifier::BOLD));
+        }
+
+        #[test]
+        fn test_inline_skipped_in_blockquote() {
+            let (spans, _) = style_markdown_line("> quote with **bold**", false);
+            assert_eq!(spans.len(), 1);
+            assert!(spans[0].style.add_modifier.contains(Modifier::ITALIC));
+        }
+    }
+}
+
 struct App {
     task_file: TaskFile,
     file_path: PathBuf,
@@ -479,6 +868,14 @@ struct App {
     note_picker_items: Vec<String>,
     note_picker_selected: usize,
     note_picker_task_idx: Option<usize>,
+    slack_inbox: slack::SlackInbox,
+    slack_inbox_selected: usize,
+    slack_channels: Vec<slack::SlackChannel>,
+    slack_channel_selected: Vec<bool>,
+    slack_channel_idx: usize,
+    slack_channel_filter: String,
+    bg_task: Option<(BgTaskKind, mpsc::Receiver<Result<BgTaskResult, String>>)>,
+    bg_spinner_frame: u8,
 }
 
 impl App {
@@ -512,6 +909,14 @@ impl App {
             note_picker_items: Vec::new(),
             note_picker_selected: 0,
             note_picker_task_idx: None,
+            slack_inbox: slack::SlackInbox::new(),
+            slack_inbox_selected: 0,
+            slack_channels: Vec::new(),
+            slack_channel_selected: Vec::new(),
+            slack_channel_idx: 0,
+            slack_channel_filter: String::new(),
+            bg_task: None,
+            bg_spinner_frame: 0,
         };
         app.table_state.select(Some(0));
         Ok(app)
@@ -638,6 +1043,26 @@ fn event_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut A
                     app.nlp_spinner_frame = 0;
                     app.status_message = None;
                     app.chat_history.push(ChatMessage::Error("NLP request failed unexpectedly".to_string()));
+                }
+            }
+        }
+
+        // Check for background task result
+        if let Some((ref kind, ref rx)) = app.bg_task {
+            match rx.try_recv() {
+                Ok(result) => {
+                    let kind = kind.clone();
+                    app.bg_task = None;
+                    app.bg_spinner_frame = 0;
+                    apply_bg_result(app, &kind, result)?;
+                }
+                Err(mpsc::TryRecvError::Empty) => {
+                    app.bg_spinner_frame = app.bg_spinner_frame.wrapping_add(1);
+                }
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    app.bg_task = None;
+                    app.bg_spinner_frame = 0;
+                    app.status_message = Some("Operation failed unexpectedly".to_string());
                 }
             }
         }
@@ -773,7 +1198,58 @@ fn handle_key(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut A
             handle_note_picker(app, key)?;
             Ok(false)
         }
+        Mode::SlackInbox | Mode::SlackReplying => {
+            handle_slack_inbox(app, key)?;
+            Ok(false)
+        }
+        Mode::SlackChannelPicker => {
+            handle_slack_channel_picker(app, key)?;
+            Ok(false)
+        }
     }
+}
+
+fn apply_bg_result(app: &mut App, _kind: &BgTaskKind, result: Result<BgTaskResult, String>) -> Result<(), String> {
+    match result {
+        Ok(bg_result) => match bg_result {
+            BgTaskResult::TodoistImport { imported, skipped, task_file } => {
+                app.task_file = task_file;
+                app.save()?;
+                app.clamp_selection();
+                app.status_message = Some(format!(
+                    "Imported {} tasks, skipped {} (already exported)",
+                    imported, skipped
+                ));
+            }
+            BgTaskResult::SlackSync { inbox, new_count } => {
+                app.slack_inbox = inbox;
+                let open_count = app.slack_inbox.open_messages().len();
+                if open_count == 0 {
+                    app.status_message = Some("No unread Slack messages".to_string());
+                } else {
+                    app.slack_inbox_selected = 0;
+                    app.mode = Mode::SlackInbox;
+                    if new_count > 0 {
+                        app.status_message = Some(format!("Synced {} new messages", new_count));
+                    }
+                }
+            }
+            BgTaskResult::SlackChannelFetch { channels, selected, scope_warnings } => {
+                app.slack_channels = channels;
+                app.slack_channel_selected = selected;
+                app.slack_channel_idx = 0;
+                app.slack_channel_filter.clear();
+                app.mode = Mode::SlackChannelPicker;
+                if !scope_warnings.is_empty() {
+                    app.status_message = Some("Some conversation types skipped — update OAuth scopes for full access".to_string());
+                }
+            }
+        },
+        Err(e) => {
+            app.status_message = Some(e);
+        }
+    }
+    Ok(())
 }
 
 fn handle_normal(app: &mut App, key: KeyCode) -> Result<bool, String> {
@@ -910,23 +1386,23 @@ fn handle_normal(app: &mut App, key: KeyCode) -> Result<bool, String> {
             app.clamp_selection();
         }
         KeyCode::Char('i') => {
-            match auth::read_token() {
-                None => {
-                    app.status_message = Some("No Todoist token. Run `task auth todoist` from the CLI.".to_string());
-                }
-                Some(token) => {
-                    match todoist::run_import(&token, &mut app.task_file, false) {
-                        Ok((imported, skipped)) => {
-                            app.save()?;
-                            app.clamp_selection();
-                            app.status_message = Some(format!(
-                                "Imported {} tasks, skipped {} (already exported)",
-                                imported, skipped
-                            ));
-                        }
-                        Err(e) => {
-                            app.status_message = Some(e);
-                        }
+            if app.bg_task.is_some() {
+                app.status_message = Some("Operation in progress, please wait".to_string());
+            } else {
+                match auth::read_token() {
+                    None => {
+                        app.status_message = Some("No Todoist token. Run `task auth todoist` from the CLI.".to_string());
+                    }
+                    Some(token) => {
+                        let mut task_file = app.task_file.clone();
+                        let (tx, rx) = mpsc::channel();
+                        std::thread::spawn(move || {
+                            let result = todoist::run_import(&token, &mut task_file, false)
+                                .map(|(imported, skipped)| BgTaskResult::TodoistImport { imported, skipped, task_file });
+                            let _ = tx.send(result);
+                        });
+                        app.bg_task = Some((BgTaskKind::TodoistImport, rx));
+                        app.bg_spinner_frame = 0;
                     }
                 }
             }
@@ -1004,8 +1480,68 @@ fn handle_normal(app: &mut App, key: KeyCode) -> Result<bool, String> {
                 }
             }
         }
+        KeyCode::Char('s') => {
+            if app.bg_task.is_some() {
+                app.status_message = Some("Operation in progress, please wait".to_string());
+            } else {
+                match auth::read_slack_token() {
+                    None => {
+                        app.status_message = Some("No Slack token. Run `task auth slack` from the CLI.".to_string());
+                    }
+                    Some(token) => {
+                        let channels_config = config::read_config_value("slack-channels");
+                        let has_channels = channels_config.as_ref().map_or(false, |s| !s.is_empty());
+                        let channels = app.slack_channels.clone();
+                        let (tx, rx) = mpsc::channel();
+                        if has_channels {
+                            let channel_str = channels_config.unwrap();
+                            let channel_ids: Vec<String> = channel_str.split(',')
+                                .map(|s| s.trim().to_string())
+                                .filter(|s| !s.is_empty())
+                                .collect();
+                            std::thread::spawn(move || {
+                                let result = sync_slack_inbox_bg(&token, &channel_ids, &channels);
+                                let _ = tx.send(result);
+                            });
+                        } else {
+                            // Auto-discover: fetch all member channels and sync unread
+                            std::thread::spawn(move || {
+                                let result = auto_discover_sync_bg(&token);
+                                let _ = tx.send(result);
+                            });
+                        }
+                        app.bg_task = Some((BgTaskKind::SlackSync, rx));
+                        app.bg_spinner_frame = 0;
+                    }
+                }
+            }
+        }
+        KeyCode::Char('S') => {
+            if app.bg_task.is_some() {
+                app.status_message = Some("Operation in progress, please wait".to_string());
+            } else {
+                match auth::read_slack_token() {
+                    None => {
+                        app.status_message = Some("No Slack token. Run `task auth slack` from the CLI.".to_string());
+                    }
+                    Some(token) => {
+                        let (tx, rx) = mpsc::channel();
+                        std::thread::spawn(move || {
+                            let result = fetch_channels_bg(&token);
+                            let _ = tx.send(result);
+                        });
+                        app.bg_task = Some((BgTaskKind::SlackChannelFetch, rx));
+                        app.bg_spinner_frame = 0;
+                    }
+                }
+            }
+        }
         KeyCode::Esc => {
-            if app.filter.is_active() {
+            if app.bg_task.is_some() {
+                app.bg_task = None;
+                app.bg_spinner_frame = 0;
+                app.status_message = None;
+            } else if app.filter.is_active() {
                 app.filter = Filter::default();
                 app.selected = 0;
                 app.table_state.select(Some(0));
@@ -1224,6 +1760,364 @@ fn handle_note_picker(app: &mut App, key: KeyCode) -> Result<(), String> {
         KeyCode::Esc => {
             app.note_picker_task_idx = None;
             app.mode = Mode::Normal;
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn sync_slack_inbox_bg(token: &str, channel_ids: &[String], known_channels: &[slack::SlackChannel]) -> Result<BgTaskResult, String> {
+    let mut inbox = slack::load_inbox();
+
+    if inbox.workspace.is_empty() {
+        inbox.workspace = slack::fetch_workspace_name(token).unwrap_or_default();
+    }
+
+    let mut user_cache = slack::read_user_cache();
+    let mut new_count = 0;
+
+    for channel_id in channel_ids {
+        // Use Slack's last_read as the fetch boundary, capped to 72 hours
+        let last_read = match slack::fetch_channel_info(token, channel_id) {
+            Ok(info) => {
+                if !info.has_unread() {
+                    continue; // No unread messages, skip
+                }
+                info.last_read
+            }
+            Err(_) => None,
+        };
+
+        // Cap oldest to 72 hours ago — don't fetch messages older than that
+        let cutoff_72h = format!("{:.6}", Utc::now().timestamp() as f64 - 72.0 * 3600.0);
+        let oldest = match &last_read {
+            Some(lr) if lr.as_str() > cutoff_72h.as_str() => lr.clone(),
+            _ => cutoff_72h,
+        };
+
+        match slack::fetch_messages(token, channel_id, Some(&oldest), 200) {
+            Ok(messages) => {
+                if messages.is_empty() {
+                    continue;
+                }
+                let author_ids: Vec<String> = messages.iter().filter_map(|m| m.user.clone()).collect();
+                slack::resolve_users_batch(token, &author_ids, &mut user_cache);
+
+                let ch_name = known_channels.iter()
+                    .find(|c| c.id == *channel_id)
+                    .map(|c| c.display_name.clone())
+                    .unwrap_or_else(|| channel_id.clone());
+
+                for msg in &messages {
+                    // Skip system messages (joins, topic changes, etc.) and empty messages
+                    if msg.subtype.is_some() || msg.text.trim().is_empty() {
+                        continue;
+                    }
+                    if slack::inbox_has_message(&inbox, channel_id, &msg.ts) {
+                        continue;
+                    }
+                    let user_name = msg.user.as_ref()
+                        .and_then(|uid| user_cache.get(uid).cloned())
+                        .unwrap_or_else(|| msg.user.clone().unwrap_or_else(|| "unknown".to_string()));
+                    let user_id = msg.user.clone().unwrap_or_default();
+                    let link = slack::deep_link(&inbox.workspace, channel_id, &msg.ts);
+
+                    inbox.messages.push(slack::SlackInboxMessage {
+                        channel_id: channel_id.clone(),
+                        channel_name: ch_name.clone(),
+                        user_id,
+                        user_name,
+                        text: msg.text.clone(),
+                        ts: msg.ts.clone(),
+                        status: slack::InboxMessageStatus::Open,
+                        link,
+                    });
+                    new_count += 1;
+                }
+            }
+            Err(e) => {
+                eprintln!("Warning: skipping channel {}: {}", channel_id, e);
+            }
+        }
+    }
+
+    let _ = slack::write_user_cache(&user_cache);
+    slack::prune_done_messages(&mut inbox);
+    inbox.last_sync = Some(Utc::now());
+    slack::save_inbox(&inbox)?;
+
+    Ok(BgTaskResult::SlackSync { inbox, new_count })
+}
+
+fn auto_discover_sync_bg(token: &str) -> Result<BgTaskResult, String> {
+    let result = slack::fetch_channels(token, None)?;
+    let mut channels = result.channels;
+    if channels.is_empty() {
+        return Err("No Slack channels found.".to_string());
+    }
+    let mut cache = slack::read_user_cache();
+    slack::resolve_channel_display_names(&mut channels, token, &mut cache);
+    let _ = slack::write_user_cache(&cache);
+
+    let member_ids: Vec<String> = channels.iter()
+        .filter(|ch| ch.is_member)
+        .map(|ch| ch.id.clone())
+        .collect();
+
+    if member_ids.is_empty() {
+        return Err("No member channels found.".to_string());
+    }
+
+    sync_slack_inbox_bg(token, &member_ids, &channels)
+}
+
+fn fetch_channels_bg(token: &str) -> Result<BgTaskResult, String> {
+    let result = slack::fetch_channels(token, None)?;
+    let mut channels = result.channels;
+    if channels.is_empty() {
+        return Err("No Slack channels found.".to_string());
+    }
+    let mut cache = slack::read_user_cache();
+    slack::resolve_channel_display_names(&mut channels, token, &mut cache);
+    let _ = slack::write_user_cache(&cache);
+
+    let previously_selected: Vec<String> = config::read_config_value("slack-channels")
+        .map(|s| s.split(',').map(|id| id.trim().to_string()).collect())
+        .unwrap_or_default();
+    let selected: Vec<bool> = channels.iter()
+        .map(|ch| previously_selected.contains(&ch.id))
+        .collect();
+
+    Ok(BgTaskResult::SlackChannelFetch { channels, selected, scope_warnings: result.scope_warnings })
+}
+
+fn handle_slack_inbox(app: &mut App, key: KeyCode) -> Result<(), String> {
+    if app.mode == Mode::SlackReplying {
+        match key {
+            KeyCode::Esc => {
+                app.input_buffer.clear();
+                app.mode = Mode::SlackInbox;
+            }
+            KeyCode::Enter => {
+                let text = app.input_buffer.trim().to_string();
+                if text.is_empty() {
+                    return Ok(());
+                }
+                let open_msgs = app.slack_inbox.open_messages();
+                if let Some(msg) = open_msgs.get(app.slack_inbox_selected) {
+                    let channel_id = msg.channel_id.clone();
+                    if let Some(token) = auth::read_slack_token() {
+                        match slack::send_message(&token, &channel_id, &text) {
+                            Ok(()) => {
+                                app.status_message = Some("Reply sent".to_string());
+                            }
+                            Err(e) => {
+                                app.status_message = Some(e);
+                            }
+                        }
+                    }
+                }
+                app.input_buffer.clear();
+                app.mode = Mode::SlackInbox;
+            }
+            KeyCode::Char(c) => {
+                app.input_buffer.push(c);
+            }
+            KeyCode::Backspace => {
+                app.input_buffer.pop();
+            }
+            _ => {}
+        }
+        return Ok(());
+    }
+
+    let open_count = app.slack_inbox.open_messages().len();
+
+    match key {
+        KeyCode::Char('j') | KeyCode::Down => {
+            if open_count > 0 && app.slack_inbox_selected < open_count - 1 {
+                app.slack_inbox_selected += 1;
+            }
+        }
+        KeyCode::Char('k') | KeyCode::Up => {
+            if app.slack_inbox_selected > 0 {
+                app.slack_inbox_selected -= 1;
+            }
+        }
+        KeyCode::Enter | KeyCode::Char('d') => {
+            if open_count > 0 {
+                // Find the actual message index in the full list
+                let open_indices: Vec<usize> = app.slack_inbox.messages.iter()
+                    .enumerate()
+                    .filter(|(_, m)| m.status == slack::InboxMessageStatus::Open)
+                    .map(|(i, _)| i)
+                    .collect();
+                if let Some(&idx) = open_indices.get(app.slack_inbox_selected) {
+                    let msg = &app.slack_inbox.messages[idx];
+                    let channel_id = msg.channel_id.clone();
+                    let ts = msg.ts.clone();
+                    app.slack_inbox.messages[idx].status = slack::InboxMessageStatus::Done;
+                    let _ = slack::save_inbox(&app.slack_inbox);
+                    // Sync read state back to Slack (best-effort, non-blocking)
+                    if let Some(token) = auth::read_slack_token() {
+                        let _ = std::thread::spawn(move || {
+                            if let Err(e) = slack::mark_read(&token, &channel_id, &ts) {
+                                eprintln!("Warning: could not sync read state: {}", e);
+                            }
+                        });
+                    }
+                }
+                let new_open = app.slack_inbox.open_messages().len();
+                if new_open == 0 {
+                    app.status_message = Some("All messages handled".to_string());
+                    app.mode = Mode::Normal;
+                } else if app.slack_inbox_selected >= new_open {
+                    app.slack_inbox_selected = new_open - 1;
+                }
+            }
+        }
+        KeyCode::Char('r') => {
+            if open_count > 0 {
+                let open_msgs = app.slack_inbox.open_messages();
+                if let Some(msg) = open_msgs.get(app.slack_inbox_selected) {
+                    app.status_message = Some(format!("Reply to {}:", msg.channel_name));
+                    app.input_buffer.clear();
+                    app.mode = Mode::SlackReplying;
+                }
+            }
+        }
+        KeyCode::Char('o') => {
+            let open_msgs = app.slack_inbox.open_messages();
+            if let Some(msg) = open_msgs.get(app.slack_inbox_selected) {
+                if !msg.link.is_empty() {
+                    let _ = std::process::Command::new("open")
+                        .arg(&msg.link)
+                        .spawn();
+                }
+            }
+        }
+        KeyCode::Char('S') => {
+            if app.bg_task.is_some() {
+                app.status_message = Some("Operation in progress, please wait".to_string());
+            } else if let Some(token) = auth::read_slack_token() {
+                let channels = app.slack_channels.clone();
+                let (tx, rx) = mpsc::channel();
+                let channels_config = config::read_config_value("slack-channels");
+                let has_channels = channels_config.as_ref().map_or(false, |s| !s.is_empty());
+                if has_channels {
+                    let channel_ids: Vec<String> = channels_config.unwrap().split(',')
+                        .map(|s| s.trim().to_string())
+                        .filter(|s| !s.is_empty())
+                        .collect();
+                    std::thread::spawn(move || {
+                        let result = sync_slack_inbox_bg(&token, &channel_ids, &channels);
+                        let _ = tx.send(result);
+                    });
+                } else {
+                    std::thread::spawn(move || {
+                        let result = auto_discover_sync_bg(&token);
+                        let _ = tx.send(result);
+                    });
+                }
+                app.bg_task = Some((BgTaskKind::SlackSync, rx));
+                app.bg_spinner_frame = 0;
+            }
+        }
+        KeyCode::Esc => {
+            app.mode = Mode::Normal;
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn slack_channel_filtered_indices(app: &App) -> Vec<usize> {
+    let filter = app.slack_channel_filter.to_lowercase();
+    app.slack_channels.iter().enumerate()
+        .filter(|(_, ch)| filter.is_empty() || ch.name.to_lowercase().contains(&filter))
+        .map(|(i, _)| i)
+        .collect()
+}
+
+fn handle_slack_channel_picker(app: &mut App, key: KeyCode) -> Result<(), String> {
+    let filtered = slack_channel_filtered_indices(app);
+
+    match key {
+        KeyCode::Down => {
+            if !filtered.is_empty() && app.slack_channel_idx < filtered.len() - 1 {
+                app.slack_channel_idx += 1;
+            }
+        }
+        KeyCode::Up => {
+            if app.slack_channel_idx > 0 {
+                app.slack_channel_idx -= 1;
+            }
+        }
+        KeyCode::Char(' ') => {
+            if let Some(&orig_idx) = filtered.get(app.slack_channel_idx) {
+                app.slack_channel_selected[orig_idx] = !app.slack_channel_selected[orig_idx];
+            }
+        }
+        KeyCode::Backspace => {
+            if app.slack_channel_filter.pop().is_some() {
+                let new_filtered = slack_channel_filtered_indices(app);
+                if app.slack_channel_idx >= new_filtered.len() {
+                    app.slack_channel_idx = new_filtered.len().saturating_sub(1);
+                }
+            }
+        }
+        KeyCode::Enter => {
+            let selected_ids: Vec<String> = app.slack_channels.iter()
+                .zip(app.slack_channel_selected.iter())
+                .filter(|(_, sel)| **sel)
+                .map(|(ch, _)| ch.id.clone())
+                .collect();
+
+            if selected_ids.is_empty() {
+                app.status_message = Some("No channels selected".to_string());
+                app.mode = Mode::Normal;
+                return Ok(());
+            }
+
+            let channels_str = selected_ids.join(",");
+            config::write_config_value("slack-channels", &channels_str).map_err(|e| e.to_string())?;
+
+            let token = match auth::read_slack_token() {
+                Some(t) => t,
+                None => {
+                    app.mode = Mode::Normal;
+                    return Ok(());
+                }
+            };
+            let channels = app.slack_channels.clone();
+            let (tx, rx) = mpsc::channel();
+            std::thread::spawn(move || {
+                let result = sync_slack_inbox_bg(&token, &selected_ids, &channels);
+                let _ = tx.send(result);
+            });
+            app.bg_task = Some((BgTaskKind::SlackSync, rx));
+            app.bg_spinner_frame = 0;
+            app.mode = Mode::Normal;
+        }
+        KeyCode::Esc => {
+            app.mode = Mode::Normal;
+        }
+        KeyCode::Char(c) if c != 'j' && c != 'k' || !app.slack_channel_filter.is_empty() => {
+            app.slack_channel_filter.push(c);
+            let new_filtered = slack_channel_filtered_indices(app);
+            if app.slack_channel_idx >= new_filtered.len() {
+                app.slack_channel_idx = new_filtered.len().saturating_sub(1);
+            }
+        }
+        KeyCode::Char('j') => {
+            if !filtered.is_empty() && app.slack_channel_idx < filtered.len() - 1 {
+                app.slack_channel_idx += 1;
+            }
+        }
+        KeyCode::Char('k') => {
+            if app.slack_channel_idx > 0 {
+                app.slack_channel_idx -= 1;
+            }
         }
         _ => {}
     }
@@ -2163,6 +3057,36 @@ fn draw(frame: &mut Frame, app: &mut App) {
         draw_footer(frame, app, chunks[2]);
         return;
     }
+    if app.mode == Mode::SlackInbox || app.mode == Mode::SlackReplying {
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(1),
+                Constraint::Min(0),
+                Constraint::Length(1),
+            ])
+            .split(frame.area());
+
+        draw_header(frame, app, chunks[0]);
+        draw_slack_inbox(frame, app, chunks[1]);
+        draw_footer(frame, app, chunks[2]);
+        return;
+    }
+    if app.mode == Mode::SlackChannelPicker {
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(1),
+                Constraint::Min(0),
+                Constraint::Length(1),
+            ])
+            .split(frame.area());
+
+        draw_header(frame, app, chunks[0]);
+        draw_slack_channel_picker(frame, app, chunks[1]);
+        draw_footer(frame, app, chunks[2]);
+        return;
+    }
     if app.view == View::Notes && app.mode == Mode::Normal {
         let chunks = Layout::default()
             .direction(Direction::Vertical)
@@ -2631,6 +3555,13 @@ fn draw_note_editor(frame: &mut Frame, app: &mut App, area: Rect) {
     let line_num_width = 4u16;
     let text_width = inner_area.width.saturating_sub(line_num_width + 1);
 
+    // Compute code block state up to viewport_offset by scanning from line 0
+    let mut in_code_block = false;
+    for idx in 0..editor.viewport_offset.min(editor.lines.len()) {
+        let (_, new_state) = md_style::style_markdown_line(&editor.lines[idx], in_code_block);
+        in_code_block = new_state;
+    }
+
     for (i, line_idx) in (editor.viewport_offset..).enumerate() {
         if i >= visible_height || line_idx >= editor.lines.len() {
             break;
@@ -2645,15 +3576,17 @@ fn draw_note_editor(frame: &mut Frame, app: &mut App, area: Rect) {
             Rect::new(inner_area.x, y, line_num_width, 1),
         );
 
-        // Line content
+        // Line content with markdown styling
         let line = &editor.lines[line_idx];
         let display: String = if line.len() > text_width as usize {
             line.chars().take(text_width as usize).collect()
         } else {
             line.clone()
         };
+        let (spans, new_state) = md_style::style_markdown_line(&display, in_code_block);
+        in_code_block = new_state;
         frame.render_widget(
-            Paragraph::new(display),
+            Paragraph::new(Line::from(spans)),
             Rect::new(inner_area.x + line_num_width, y, text_width, 1),
         );
     }
@@ -2690,17 +3623,114 @@ fn draw_note_picker(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_stateful_widget(table, area, &mut state);
 }
 
+fn draw_slack_inbox(frame: &mut Frame, app: &App, area: Rect) {
+    let open_msgs = app.slack_inbox.open_messages();
+    let title = format!(" Slack Inbox — {} messages ", open_msgs.len());
+    let items: Vec<Row> = open_msgs
+        .iter()
+        .enumerate()
+        .map(|(i, m)| {
+            let style = if i == app.slack_inbox_selected {
+                Style::default().bg(theme::HIGHLIGHT_BG)
+            } else {
+                Style::default()
+            };
+            let snippet: String = m.text.chars().take(60).collect();
+            let time = slack::relative_time(&m.ts);
+            Row::new(vec![
+                Cell::from(m.channel_name.as_str()),
+                Cell::from(m.user_name.as_str()),
+                Cell::from(snippet),
+                Cell::from(time),
+            ]).style(style)
+        })
+        .collect();
+
+    let widths = [
+        Constraint::Length(18),
+        Constraint::Length(14),
+        Constraint::Percentage(55),
+        Constraint::Length(12),
+    ];
+    let table = Table::new(items, widths)
+        .header(Row::new(vec!["Channel", "Sender", "Message", "Time"]).style(Style::default().add_modifier(Modifier::BOLD)))
+        .block(Block::default().borders(Borders::ALL).title(title));
+
+    let mut state = TableState::default();
+    state.select(Some(app.slack_inbox_selected));
+    frame.render_stateful_widget(table, area, &mut state);
+}
+
+fn draw_slack_channel_picker(frame: &mut Frame, app: &App, area: Rect) {
+    let filtered = slack_channel_filtered_indices(app);
+
+    let search_height = if app.slack_channel_filter.is_empty() { 0 } else { 3 };
+    let inner_layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(search_height),
+            Constraint::Min(0),
+        ])
+        .split(area);
+
+    if !app.slack_channel_filter.is_empty() {
+        let search_text = format!(" Search: {}_ ", app.slack_channel_filter);
+        let search_bar = Paragraph::new(search_text)
+            .block(Block::default().borders(Borders::ALL).title(" Filter "));
+        frame.render_widget(search_bar, inner_layout[0]);
+    }
+
+    let items: Vec<Row> = filtered
+        .iter()
+        .enumerate()
+        .map(|(display_idx, &orig_idx)| {
+            let ch = &app.slack_channels[orig_idx];
+            let style = if display_idx == app.slack_channel_idx {
+                Style::default().bg(theme::HIGHLIGHT_BG)
+            } else {
+                Style::default()
+            };
+            let checked = if app.slack_channel_selected.get(orig_idx).copied().unwrap_or(false) {
+                "[x]"
+            } else {
+                "[ ]"
+            };
+            Row::new(vec![
+                Cell::from(checked),
+                Cell::from(ch.display_name.as_str()),
+                Cell::from(ch.id.as_str()),
+            ]).style(style)
+        })
+        .collect();
+
+    let widths = [
+        Constraint::Length(5),
+        Constraint::Percentage(60),
+        Constraint::Percentage(30),
+    ];
+    let title = format!(" Select Slack Channels ({}/{}) ", filtered.len(), app.slack_channels.len());
+    let table = Table::new(items, widths)
+        .block(Block::default().borders(Borders::ALL).title(title));
+
+    let mut state = TableState::default();
+    state.select(Some(app.slack_channel_idx));
+    frame.render_stateful_widget(table, inner_layout[1], &mut state);
+}
+
 fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
     let text = match &app.mode {
         Mode::Normal => {
-            if let Some(ref msg) = app.status_message {
+            if let Some((ref kind, _)) = app.bg_task {
+                let spinner = SPINNER_CHARS[app.bg_spinner_frame as usize % SPINNER_CHARS.len()];
+                format!(" {} {} ", kind.label(), spinner)
+            } else if let Some(ref msg) = app.status_message {
                 format!(" {} ", msg)
             } else if app.view == View::Notes {
                 " a:new  Enter:edit  d:delete  v:view  q:quit ".to_string()
             } else if app.show_detail_panel {
                 " j/k:nav  Enter:edit  Space:toggle  a:add  d:delete  f:filter  p:priority  e:edit-title  t:tags  r:desc  R:recur  n:note  g:go-note  v:view  Tab:details  q:quit ".to_string()
             } else {
-                " j/k:nav  Enter:toggle  a:add  d:delete  f:filter  p:priority  e:edit  t:tags  r:desc  R:recur  n:note  g:go-note  v:view  i:import  ::command  D:set-dir  T/N/W/M/Q/Y:due  X:clr-due  Tab:details  q:quit ".to_string()
+                " j/k:nav  Enter:toggle  a:add  d:delete  f:filter  p:priority  e:edit  t:tags  r:desc  R:recur  n:note  g:go-note  v:view  i:import  s:slack  S:channels  ::command  D:set-dir  T/N/W/M/Q/Y:due  X:clr-due  Tab:details  q:quit ".to_string()
             }
         }
         Mode::Adding => {
@@ -2768,6 +3798,19 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
         }
         Mode::NotePicker => {
             " j/k:nav  Enter:select  Esc:cancel ".to_string()
+        }
+        Mode::SlackInbox => {
+            " j/k:nav  Enter/d:done  r:reply  o:open  S:sync  Esc:back ".to_string()
+        }
+        Mode::SlackReplying => {
+            format!(" Reply: {}_ ", app.input_buffer)
+        }
+        Mode::SlackChannelPicker => {
+            if app.slack_channel_filter.is_empty() {
+                " Type to search  j/k:nav  Space:toggle  Enter:save  Esc:cancel ".to_string()
+            } else {
+                " Type to search  Bksp:clear  Up/Down:nav  Space:toggle  Enter:save  Esc:cancel ".to_string()
+            }
         }
     };
 
@@ -3088,6 +4131,14 @@ mod tests {
             note_picker_items: Vec::new(),
             note_picker_selected: 0,
             note_picker_task_idx: None,
+            slack_inbox: slack::SlackInbox::new(),
+            slack_inbox_selected: 0,
+            slack_channels: Vec::new(),
+            slack_channel_selected: Vec::new(),
+            slack_channel_idx: 0,
+            slack_channel_filter: String::new(),
+            bg_task: None,
+            bg_spinner_frame: 0,
         }
     }
 
@@ -3189,6 +4240,14 @@ mod tests {
             note_picker_items: Vec::new(),
             note_picker_selected: 0,
             note_picker_task_idx: None,
+            slack_inbox: slack::SlackInbox::new(),
+            slack_inbox_selected: 0,
+            slack_channels: Vec::new(),
+            slack_channel_selected: Vec::new(),
+            slack_channel_idx: 0,
+            slack_channel_filter: String::new(),
+            bg_task: None,
+            bg_spinner_frame: 0,
         }
     }
 
@@ -3782,5 +4841,63 @@ mod tests {
         assert_eq!(char_to_byte_index(s, 0), 0);
         assert_eq!(char_to_byte_index(s, 1), 1); // 'h' is 1 byte
         assert_eq!(char_to_byte_index(s, 2), 3); // 'é' is 2 bytes
+    }
+
+    #[test]
+    fn bg_task_label_returns_correct_strings() {
+        assert_eq!(BgTaskKind::TodoistImport.label(), "Importing from Todoist");
+        assert_eq!(BgTaskKind::SlackSync.label(), "Syncing Slack");
+        assert_eq!(BgTaskKind::SlackChannelFetch.label(), "Loading channels");
+    }
+
+    #[test]
+    fn bg_spinner_frame_advances_on_tick() {
+        let mut app = make_app_with_tasks(vec![make_task(None)]);
+        let (tx, rx) = mpsc::channel::<Result<BgTaskResult, String>>();
+        app.bg_task = Some((BgTaskKind::TodoistImport, rx));
+        app.bg_spinner_frame = 0;
+
+        // Simulate what the event loop does on Empty try_recv
+        assert_eq!(app.bg_spinner_frame, 0);
+        app.bg_spinner_frame = app.bg_spinner_frame.wrapping_add(1);
+        assert_eq!(app.bg_spinner_frame, 1);
+        app.bg_spinner_frame = app.bg_spinner_frame.wrapping_add(1);
+        assert_eq!(app.bg_spinner_frame, 2);
+
+        // Verify spinner char indexing wraps correctly
+        let idx = 9usize % SPINNER_CHARS.len();
+        assert_eq!(SPINNER_CHARS[idx], '⠏');
+        let idx = 10usize % SPINNER_CHARS.len();
+        assert_eq!(SPINNER_CHARS[idx], '⠋');
+
+        drop(tx); // clean up
+    }
+
+    #[test]
+    fn operation_blocked_while_bg_task_active() {
+        let mut app = make_app_with_tasks(vec![make_task(None)]);
+        let (_tx, rx) = mpsc::channel::<Result<BgTaskResult, String>>();
+        app.bg_task = Some((BgTaskKind::SlackSync, rx));
+
+        // Pressing 'i' should show blocked message, not start import
+        let _ = handle_normal(&mut app, KeyCode::Char('i'));
+        assert_eq!(app.status_message, Some("Operation in progress, please wait".to_string()));
+        assert!(app.bg_task.is_some()); // task still running
+
+        // Pressing 'S' should also be blocked
+        app.status_message = None;
+        let _ = handle_normal(&mut app, KeyCode::Char('S'));
+        assert_eq!(app.status_message, Some("Operation in progress, please wait".to_string()));
+    }
+
+    #[test]
+    fn esc_cancels_bg_task() {
+        let mut app = make_app_with_tasks(vec![make_task(None)]);
+        let (_tx, rx) = mpsc::channel::<Result<BgTaskResult, String>>();
+        app.bg_task = Some((BgTaskKind::TodoistImport, rx));
+
+        let _ = handle_normal(&mut app, KeyCode::Esc);
+        assert!(app.bg_task.is_none());
+        assert_eq!(app.bg_spinner_frame, 0);
     }
 }

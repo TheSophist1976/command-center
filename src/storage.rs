@@ -124,6 +124,7 @@ pub fn backup_daily(task_file_path: &Path) {
     }
 }
 
+#[cfg(test)]
 pub fn init_file(path: &Path) -> Result<(), String> {
     if path.exists() {
         return Err(format!("{} already exists. Will not overwrite.", path.display()));

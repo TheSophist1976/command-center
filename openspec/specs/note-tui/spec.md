@@ -37,7 +37,7 @@ The user SHALL press `d` on a selected note in the Notes view to delete it. The 
 - **THEN** the task's `note` field SHALL be set to `None`
 
 ### Requirement: Inline multi-line note editor
-The TUI SHALL provide an inline multi-line text editor for editing note content. The editor SHALL support: character insertion at cursor, Enter for new line, Backspace to delete character before cursor, arrow keys for cursor movement (up/down/left/right), and viewport scrolling when content exceeds the visible area. The editor SHALL display line numbers.
+The TUI SHALL provide an inline multi-line text editor for editing note content. The editor SHALL support: character insertion at cursor, Enter for new line, Backspace to delete character before cursor, arrow keys for cursor movement (up/down/left/right), and viewport scrolling when content exceeds the visible area. The editor SHALL display line numbers. The editor SHALL render markdown syntax with visual styling (headings, bold, italic, inline code, code blocks, blockquotes, list markers) using colored and styled text spans. The raw markdown text SHALL remain visible — styling is additive, not replacing syntax characters.
 
 #### Scenario: Type text with newlines
 - **WHEN** the user types "Hello" then presses Enter then types "World"
@@ -50,6 +50,18 @@ The TUI SHALL provide an inline multi-line text editor for editing note content.
 #### Scenario: Scroll viewport
 - **WHEN** the note content has 50 lines and the visible area shows 20 lines, and the cursor moves to line 25
 - **THEN** the viewport SHALL scroll to keep the cursor visible
+
+#### Scenario: Markdown heading is styled
+- **WHEN** a line in the editor starts with "# "
+- **THEN** the line SHALL be rendered with bold and colored styling
+
+#### Scenario: Code block is styled
+- **WHEN** lines are enclosed between ``` fences
+- **THEN** the enclosed lines SHALL be rendered with code styling and no inline markdown parsing
+
+#### Scenario: Inline bold is styled
+- **WHEN** a line contains text enclosed in ** markers
+- **THEN** the enclosed text and markers SHALL be rendered with bold styling
 
 ### Requirement: Save and exit note editor
 The user SHALL press `Ctrl+S` to save the note and remain in the editor, or `Escape` to exit. If the content has unsaved changes when pressing Escape, the system SHALL prompt for confirmation (save/discard/cancel).

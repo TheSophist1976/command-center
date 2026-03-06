@@ -25,11 +25,11 @@ The TUI SHALL render a three-region layout in Normal mode: a header bar (1 line)
 
 #### Scenario: Default layout rendering
 - **WHEN** the TUI is displayed with tasks loaded in Normal mode
-- **THEN** the header SHALL use `theme::BAR_FG` foreground and `theme::BAR_BG` background, and the footer SHALL show keybinding hints with the same theme colors. The header SHALL show "task-manager" and the footer SHALL show keybinding hints including `j/k:nav  Enter:toggle  a:add  d:delete  f:filter  p:priority  e:edit  t:tags  r:desc  v:view  i:import  ::command  D:set-dir  T/W/M/Q:due  X:clr-due  R:recur  Tab:details  q:quit`
+- **THEN** the header SHALL use `theme::BAR_FG` foreground and `theme::BAR_BG` background, and the footer SHALL show keybinding hints with the same theme colors. The header SHALL show "task-manager" and the footer SHALL show keybinding hints including `j/k:nav  Enter:toggle  a:add  d:delete  f:filter  p:priority  e:edit  t:tags  r:desc  v:view  i:import  ::command  D:set-dir  S:slack  T/W/M/Q:due  X:clr-due  R:recur  Tab:details  q:quit`
 
 #### Scenario: Footer hints with detail panel visible
-- **WHEN** the detail panel is visible in Normal mode
-- **THEN** the footer SHALL show `Enter:edit` instead of `Enter:toggle` to indicate that Enter enters detail editing mode
+- **WHEN** the TUI is in Normal mode with the detail panel open
+- **THEN** the footer SHALL show `j/k:nav  Enter:edit  s:save  d:discard  c:cancel  Tab:close`
 
 #### Scenario: Footer hints in detail editing mode
 - **WHEN** the TUI is in `EditingDetailPanel` mode
@@ -190,7 +190,7 @@ The user SHALL press `f` or `/` to enter filter mode. The footer SHALL display a
 - **THEN** the table area SHALL display "No tasks match filter."
 
 ### Requirement: Mode-based input handling
-The TUI SHALL operate in distinct modes: Normal, Adding, Filtering, Confirming, EditingPriority, EditingTitle, EditingTags, EditingDescription, EditingDefaultDir, EditingDetailPanel, ConfirmingDetailSave, EditingRecurrence, NlpChat, and ConfirmingNlp. Keyboard input SHALL be interpreted according to the current mode. Only Normal mode SHALL process navigation and action keys. The `i` key in Normal mode SHALL trigger a Todoist import (handled outside the mode system via the status message pattern).
+The TUI SHALL operate in distinct modes: Normal, Adding, Filtering, Confirming, EditingPriority, EditingTitle, EditingTags, EditingDescription, EditingDefaultDir, EditingDetailPanel, ConfirmingDetailSave, EditingRecurrence, NlpChat, ConfirmingNlp, SlackInbox, SlackReplying, SlackChannelPicker, EditingNote, ConfirmingNoteExit, and NotePicker. Keyboard input SHALL be interpreted according to the current mode. Only Normal mode SHALL process navigation and action keys. While a background task is active, the event loop SHALL check for task completion on each tick and the footer SHALL show the spinner instead of normal hints. The `i` key in Normal mode SHALL trigger a Todoist import on a background thread. The `s` key SHALL trigger Slack sync on a background thread.
 
 #### Scenario: Input in add mode
 - **WHEN** the TUI is in Adding mode and the user presses `j`
@@ -202,7 +202,7 @@ The TUI SHALL operate in distinct modes: Normal, Adding, Filtering, Confirming, 
 
 #### Scenario: Import key in normal mode
 - **WHEN** the TUI is in Normal mode and the user presses `i`
-- **THEN** the system SHALL initiate a Todoist import as specified in the tui-todoist-import capability
+- **THEN** the system SHALL initiate a Todoist import on a background thread with spinner feedback
 
 #### Scenario: Colon key enters NlpChat mode
 - **WHEN** the TUI is in Normal mode and the user presses `:`
@@ -210,7 +210,23 @@ The TUI SHALL operate in distinct modes: Normal, Adding, Filtering, Confirming, 
 
 #### Scenario: R key enters EditingRecurrence mode
 - **WHEN** the TUI is in Normal mode and the user presses `R` with a task selected
-- **THEN** the TUI SHALL enter EditingRecurrence mode and the footer SHALL display a text input prompt for recurrence (e.g., "Recurrence: _")
+- **THEN** the TUI SHALL enter EditingRecurrence mode and the footer SHALL display a text input prompt for recurrence
+
+#### Scenario: s key triggers background Slack sync
+- **WHEN** the TUI is in Normal mode and the user presses `s`
+- **THEN** the TUI SHALL start a background Slack sync with spinner feedback (or show an error if no Slack token is configured)
+
+#### Scenario: S key triggers background channel fetch
+- **WHEN** the TUI is in Normal mode and the user presses `S` (shift-s)
+- **THEN** the TUI SHALL start a background channel fetch with spinner feedback
+
+#### Scenario: Background task blocks new operations
+- **WHEN** a background task is running and the user presses `i`, `s`, or `S`
+- **THEN** the TUI SHALL display "Operation in progress, please wait" and SHALL NOT start a new operation
+
+#### Scenario: Footer shows spinner during background task
+- **WHEN** a background task is active in Normal mode
+- **THEN** the footer SHALL display the task description and animated spinner instead of keybinding hints
 
 ### Requirement: Edit task priority
 The user SHALL press `p` in normal mode to enter priority-editing mode for the selected task. The footer SHALL display a picker prompt showing all four available priorities. The user SHALL press `c`, `h`, `m`, or `l` to set the priority to critical, high, medium, or low respectively. The change SHALL be persisted to disk immediately. Pressing `Esc` or any other key SHALL cancel without changing the task. The `p` key SHALL be a no-op when no task is selected.
