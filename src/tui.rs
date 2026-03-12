@@ -97,6 +97,7 @@ enum Mode {
     SlackInbox,
     SlackReplying,
     SlackChannelPicker,
+    SlackCreatingTask,
 }
 
 #[derive(Debug, Clone)]
@@ -1206,6 +1207,10 @@ fn handle_key(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut A
             handle_slack_inbox(app, key)?;
             Ok(false)
         }
+        Mode::SlackCreatingTask => {
+            handle_slack_creating_task(app, key)?;
+            Ok(false)
+        }
         Mode::SlackChannelPicker => {
             handle_slack_channel_picker(app, key)?;
             Ok(false)
@@ -2050,6 +2055,16 @@ fn handle_slack_inbox(app: &mut App, key: KeyCode) -> Result<(), String> {
                 app.mode = Mode::SlackReplying;
             }
         }
+        KeyCode::Char('t') => {
+            if open_count > 0 {
+                let open_msgs = app.slack_inbox.open_messages();
+                if let Some(msg) = open_msgs.get(app.slack_inbox_selected) {
+                    let prefill: String = msg.text.replace('\n', " ").chars().take(120).collect();
+                    app.input_buffer = prefill;
+                    app.mode = Mode::SlackCreatingTask;
+                }
+            }
+        }
         KeyCode::Char('p') => {
             app.slack_preview_visible = !app.slack_preview_visible;
         }
@@ -2092,6 +2107,67 @@ fn handle_slack_inbox(app: &mut App, key: KeyCode) -> Result<(), String> {
         }
         KeyCode::Esc => {
             app.mode = Mode::Normal;
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn handle_slack_creating_task(app: &mut App, key: KeyCode) -> Result<(), String> {
+    match key {
+        KeyCode::Esc => {
+            app.input_buffer.clear();
+            app.mode = Mode::SlackInbox;
+        }
+        KeyCode::Enter => {
+            let title = app.input_buffer.trim().to_string();
+            app.input_buffer.clear();
+            app.mode = Mode::SlackInbox;
+            if title.is_empty() {
+                return Ok(());
+            }
+            // Create the task
+            let id = app.task_file.next_id;
+            app.task_file.next_id += 1;
+            app.task_file.tasks.push(Task {
+                id,
+                title: title.clone(),
+                status: Status::Open,
+                priority: Priority::Medium,
+                tags: Vec::new(),
+                created: Utc::now(),
+                updated: None,
+                description: None,
+                due_date: None,
+                project: None,
+                recurrence: None,
+                note: None,
+            });
+            app.save()?;
+            // Dismiss the source inbox message
+            let open_indices: Vec<usize> = app.slack_inbox.messages.iter()
+                .enumerate()
+                .filter(|(_, m)| m.status == slack::InboxMessageStatus::Open)
+                .map(|(i, _)| i)
+                .collect();
+            if let Some(&idx) = open_indices.get(app.slack_inbox_selected) {
+                app.slack_inbox.messages[idx].status = slack::InboxMessageStatus::Done;
+                let _ = slack::save_inbox(&app.slack_inbox);
+            }
+            // Clamp selection
+            let new_open = app.slack_inbox.open_messages().len();
+            if new_open == 0 {
+                app.mode = Mode::Normal;
+            } else if app.slack_inbox_selected >= new_open {
+                app.slack_inbox_selected = new_open - 1;
+            }
+            app.status_message = Some(format!("Task created: {}", title));
+        }
+        KeyCode::Char(c) => {
+            app.input_buffer.push(c);
+        }
+        KeyCode::Backspace => {
+            app.input_buffer.pop();
         }
         _ => {}
     }
@@ -3692,7 +3768,7 @@ fn draw_note_picker(frame: &mut Frame, app: &App, area: Rect) {
 
 fn draw_slack_inbox(frame: &mut Frame, app: &App, area: Rect) {
     let open_msgs = app.slack_inbox.open_messages();
-    let show_panel = app.slack_preview_visible && !open_msgs.is_empty();
+    let show_panel = (app.slack_preview_visible || app.mode == Mode::SlackCreatingTask) && !open_msgs.is_empty();
 
     let (table_area, panel_area) = if show_panel {
         let chunks = Layout::default()
@@ -3743,10 +3819,12 @@ fn draw_slack_inbox(frame: &mut Frame, app: &App, area: Rect) {
     state.select(Some(app.slack_inbox_selected));
     frame.render_stateful_widget(table, table_area, &mut state);
 
-    // Draw the panel below (preview or reply)
+    // Draw the panel below (preview, reply, or task-create input)
     if let Some(panel) = panel_area {
         if app.mode == Mode::SlackReplying {
             draw_slack_reply_panel(frame, app, panel);
+        } else if app.mode == Mode::SlackCreatingTask {
+            draw_slack_task_create_panel(frame, app, panel);
         } else {
             draw_slack_preview(frame, app, panel);
         }
@@ -3809,6 +3887,14 @@ fn draw_slack_reply_panel(frame: &mut Frame, app: &App, area: Rect) {
         .wrap(Wrap { trim: false })
         .block(Block::default().borders(Borders::ALL).title(title));
     frame.render_widget(input, chunks[1]);
+}
+
+fn draw_slack_task_create_panel(frame: &mut Frame, app: &App, area: Rect) {
+    let input_display = format!("{}█", app.input_buffer);
+    let input = Paragraph::new(input_display)
+        .wrap(Wrap { trim: false })
+        .block(Block::default().borders(Borders::ALL).title(" New Task — edit title and press Enter "));
+    frame.render_widget(input, area);
 }
 
 fn draw_slack_channel_picker(frame: &mut Frame, app: &App, area: Rect) {
@@ -3950,7 +4036,10 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
             " j/k:nav  Enter:select  Esc:cancel ".to_string()
         }
         Mode::SlackInbox => {
-            " j/k:nav  Enter/d:done  r:reply  o:open  p:preview  S:sync  Esc:back ".to_string()
+            " j/k:nav  Enter/d:done  r:reply  o:open  p:preview  t:task  S:sync  Esc:back ".to_string()
+        }
+        Mode::SlackCreatingTask => {
+            " Enter:confirm  Esc:cancel ".to_string()
         }
         Mode::SlackReplying => {
             " Enter:send  Esc:cancel  \u{2190}\u{2192}:move cursor  Home/End:jump ".to_string()
@@ -5190,5 +5279,73 @@ mod tests {
         let _ = handle_slack_inbox(&mut app, KeyCode::Esc);
         assert_eq!(app.mode, Mode::SlackInbox);
         assert!(app.slack_preview_visible); // still true
+    }
+
+    // -- Slack message-to-task tests --
+
+    #[test]
+    fn slack_t_enters_creating_task_mode() {
+        let mut app = make_slack_app();
+        assert_eq!(app.mode, Mode::SlackInbox);
+
+        let _ = handle_slack_inbox(&mut app, KeyCode::Char('t'));
+
+        assert_eq!(app.mode, Mode::SlackCreatingTask);
+        // Input buffer pre-filled from first message text
+        assert!(!app.input_buffer.is_empty());
+        assert!(app.input_buffer.contains("Can you review the deploy script?"));
+    }
+
+    #[test]
+    fn slack_creating_task_confirm() {
+        let mut app = make_slack_app();
+        // Use a writable temp path so app.save() succeeds
+        let tmp = std::env::temp_dir().join(format!("task_test_{}.md", std::process::id()));
+        app.file_path = tmp.clone();
+        app.mode = Mode::SlackCreatingTask;
+        app.input_buffer = "Review deploy script".to_string();
+        let initial_task_count = app.task_file.tasks.len();
+
+        let _ = handle_slack_creating_task(&mut app, KeyCode::Enter);
+
+        // Task was created
+        assert_eq!(app.task_file.tasks.len(), initial_task_count + 1);
+        assert_eq!(app.task_file.tasks.last().unwrap().title, "Review deploy script");
+        // Mode returned to SlackInbox (or Normal if inbox empty)
+        assert!(app.mode == Mode::SlackInbox || app.mode == Mode::Normal);
+        // Source message marked done
+        let open = app.slack_inbox.open_messages();
+        assert_eq!(open.len(), 1); // was 2, now 1
+        // Status message set
+        assert!(app.status_message.as_deref().unwrap_or("").contains("Task created"));
+    }
+
+    #[test]
+    fn slack_creating_task_cancel() {
+        let mut app = make_slack_app();
+        app.mode = Mode::SlackCreatingTask;
+        app.input_buffer = "Some title".to_string();
+        let initial_task_count = app.task_file.tasks.len();
+        let initial_open = app.slack_inbox.open_messages().len();
+
+        let _ = handle_slack_creating_task(&mut app, KeyCode::Esc);
+
+        assert_eq!(app.mode, Mode::SlackInbox);
+        assert_eq!(app.task_file.tasks.len(), initial_task_count); // no task added
+        assert_eq!(app.slack_inbox.open_messages().len(), initial_open); // inbox unchanged
+        assert!(app.input_buffer.is_empty());
+    }
+
+    #[test]
+    fn slack_creating_task_empty_confirm() {
+        let mut app = make_slack_app();
+        app.mode = Mode::SlackCreatingTask;
+        app.input_buffer = "   ".to_string(); // whitespace only
+        let initial_task_count = app.task_file.tasks.len();
+
+        let _ = handle_slack_creating_task(&mut app, KeyCode::Enter);
+
+        assert_eq!(app.mode, Mode::SlackInbox);
+        assert_eq!(app.task_file.tasks.len(), initial_task_count); // no task added
     }
 }

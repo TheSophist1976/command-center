@@ -82,7 +82,7 @@ The user SHALL press `Esc` to exit SlackInbox mode and return to Normal mode.
 - **THEN** the TUI SHALL return to Normal mode with the task list visible
 
 ### Requirement: Inbox layout
-The SlackInbox mode SHALL render a table with columns: Channel, Sender, Message, and Time. The layout SHALL include a header showing "Slack Inbox -- N messages" and a footer with keybinding hints. When the preview pane is visible, the footer SHALL show `j/k:nav  Enter/d:done  r:reply  o:open  p:preview  S:sync  Esc:back`. When the preview pane is hidden, the footer SHALL show `j/k:nav  Enter/d:done  r:reply  o:open  p:preview  S:sync  Esc:back`. During SlackReplying mode, the footer SHALL show `Enter:send  Esc:cancel  ←→:move cursor  Home/End:jump`.
+The SlackInbox mode SHALL render a table with columns: Channel, Sender, Message, and Time. The layout SHALL include a header showing "Slack Inbox -- N messages" and a footer with keybinding hints. When the preview pane is visible, the footer SHALL show `j/k:nav  Enter/d:done  r:reply  o:open  p:preview  t:task  S:sync  Esc:back`. When the preview pane is hidden, the footer SHALL show `j/k:nav  Enter/d:done  r:reply  o:open  p:preview  t:task  S:sync  Esc:back`. During SlackReplying mode, the footer SHALL show `Enter:send  Esc:cancel  ←→:move cursor  Home/End:jump`. During SlackCreatingTask mode, the footer SHALL show `Enter:confirm  Esc:cancel`.
 
 #### Scenario: Inbox layout with preview pane
 - **WHEN** the SlackInbox mode is active with 12 open messages and preview pane visible
@@ -91,3 +91,7 @@ The SlackInbox mode SHALL render a table with columns: Channel, Sender, Message,
 #### Scenario: Inbox layout during reply
 - **WHEN** the user is composing a reply in SlackReplying mode
 - **THEN** the footer SHALL show reply-specific keybinding hints: `Enter:send  Esc:cancel  ←→:move cursor  Home/End:jump`
+
+#### Scenario: Inbox layout with task keybinding visible
+- **WHEN** the SlackInbox mode is active
+- **THEN** the footer SHALL include the `t:task` keybinding hint
