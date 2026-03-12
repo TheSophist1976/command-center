@@ -99,67 +99,89 @@ pub struct FetchChannelsResult {
     pub scope_warnings: Vec<String>,
 }
 
-pub fn fetch_channels(token: &str, types: Option<&str>) -> Result<FetchChannelsResult, String> {
+pub fn fetch_channels(client: &reqwest::blocking::Client, token: &str, types: Option<&str>) -> Result<FetchChannelsResult, String> {
     let all_types = types.unwrap_or("public_channel,private_channel,mpim,im");
-    let client = reqwest::blocking::Client::new();
     let mut all_channels = Vec::new();
     let mut scope_warnings = Vec::new();
     let base = api_base_url();
 
-    // Try fetching with all requested types first; on missing_scope, retry per-type
     let type_list: Vec<&str> = all_types.split(',').map(|s| s.trim()).collect();
 
-    for conv_type in &type_list {
-        let mut cursor: Option<String> = None;
-        loop {
-            let mut req = client
-                .get(format!("{}/conversations.list", base))
-                .bearer_auth(token)
-                .query(&[
-                    ("types", *conv_type),
-                    ("exclude_archived", "true"),
-                    ("limit", "200"),
-                ]);
-            if let Some(ref c) = cursor {
-                req = req.query(&[("cursor", c.as_str())]);
-            }
+    // Fetch all conversation types concurrently
+    let mut type_results: Vec<Result<(Vec<SlackChannel>, Vec<String>), String>> = Vec::new();
+    std::thread::scope(|s| {
+        let handles: Vec<_> = type_list.iter().map(|&conv_type| {
+            let base = &base;
+            s.spawn(move || -> Result<(Vec<SlackChannel>, Vec<String>), String> {
+                let mut channels = Vec::new();
+                let mut warnings = Vec::new();
+                let mut cursor: Option<String> = None;
+                loop {
+                    let mut req = client
+                        .get(format!("{}/conversations.list", base))
+                        .bearer_auth(token)
+                        .query(&[
+                            ("types", conv_type),
+                            ("exclude_archived", "true"),
+                            ("limit", "200"),
+                        ]);
+                    if let Some(ref c) = cursor {
+                        req = req.query(&[("cursor", c.as_str())]);
+                    }
 
-            let response = req
-                .send()
-                .map_err(|e| format!("Failed to fetch Slack channels: {}", e))?;
+                    let response = req
+                        .send()
+                        .map_err(|e| format!("Failed to fetch Slack channels: {}", e))?;
 
-            if response.status() == reqwest::StatusCode::UNAUTHORIZED {
-                return Err("Slack token is invalid or expired. Run `task auth slack` to re-authenticate.".to_string());
-            }
-            if response.status() == reqwest::StatusCode::TOO_MANY_REQUESTS {
-                return Err("Slack API rate limited. Please try again later.".to_string());
-            }
-            if !response.status().is_success() {
-                return Err(format!("Slack API error: {}", response.status()));
-            }
+                    if response.status() == reqwest::StatusCode::UNAUTHORIZED {
+                        return Err("Slack token is invalid or expired. Run `task auth slack` to re-authenticate.".to_string());
+                    }
+                    if response.status() == reqwest::StatusCode::TOO_MANY_REQUESTS {
+                        return Err("Slack API rate limited. Please try again later.".to_string());
+                    }
+                    if !response.status().is_success() {
+                        return Err(format!("Slack API error: {}", response.status()));
+                    }
 
-            let body: SlackChannelListResponse = response
-                .json()
-                .map_err(|e| format!("Failed to parse Slack channels response: {}", e))?;
+                    let body: SlackChannelListResponse = response
+                        .json()
+                        .map_err(|e| format!("Failed to parse Slack channels response: {}", e))?;
 
-            if !body.ok {
-                let err = body.error.unwrap_or_else(|| "unknown error".to_string());
-                if err == "missing_scope" {
-                    scope_warnings.push(format!("Missing scope for {} conversations", conv_type));
-                    break;
+                    if !body.ok {
+                        let err = body.error.unwrap_or_else(|| "unknown error".to_string());
+                        if err == "missing_scope" {
+                            warnings.push(format!("Missing scope for {} conversations", conv_type));
+                            break;
+                        }
+                        return Err(format!("Slack API error: {}", err));
+                    }
+
+                    channels.extend(body.channels);
+
+                    match body.response_metadata {
+                        Some(meta) => match meta.next_cursor {
+                            Some(c) if !c.is_empty() => cursor = Some(c),
+                            _ => break,
+                        },
+                        None => break,
+                    }
                 }
-                return Err(format!("Slack API error: {}", err));
-            }
+                Ok((channels, warnings))
+            })
+        }).collect();
 
-            all_channels.extend(body.channels);
+        for handle in handles {
+            type_results.push(handle.join().unwrap_or_else(|_| Err("Thread panicked".to_string())));
+        }
+    });
 
-            match body.response_metadata {
-                Some(meta) => match meta.next_cursor {
-                    Some(c) if !c.is_empty() => cursor = Some(c),
-                    _ => break,
-                },
-                None => break,
+    for result in type_results {
+        match result {
+            Ok((channels, warnings)) => {
+                all_channels.extend(channels);
+                scope_warnings.extend(warnings);
             }
+            Err(e) => return Err(e),
         }
     }
 
@@ -189,6 +211,7 @@ pub fn fetch_channels(token: &str, types: Option<&str>) -> Result<FetchChannelsR
 /// Call after fetch_channels to replace raw user IDs with display names.
 pub fn resolve_channel_display_names(
     channels: &mut [SlackChannel],
+    client: &reqwest::blocking::Client,
     token: &str,
     cache: &mut HashMap<String, String>,
 ) {
@@ -197,7 +220,7 @@ pub fn resolve_channel_display_names(
         .filter(|ch| ch.conversation_type == "im")
         .filter_map(|ch| ch.user.clone())
         .collect();
-    resolve_users_batch(token, &user_ids, cache);
+    resolve_users_batch(client, token, &user_ids, cache);
 
     // Update display names
     for ch in channels.iter_mut() {
@@ -219,12 +242,12 @@ pub fn resolve_channel_display_names(
 }
 
 pub fn fetch_messages(
+    client: &reqwest::blocking::Client,
     token: &str,
     channel_id: &str,
     oldest: Option<&str>,
     limit: usize,
 ) -> Result<Vec<SlackMessage>, String> {
-    let client = reqwest::blocking::Client::new();
     let base = api_base_url();
     let limit_str = limit.min(200).to_string();
 
@@ -310,8 +333,7 @@ struct ConversationLatest {
     ts: Option<String>,
 }
 
-pub fn fetch_channel_info(token: &str, channel_id: &str) -> Result<ChannelInfo, String> {
-    let client = reqwest::blocking::Client::new();
+pub fn fetch_channel_info(client: &reqwest::blocking::Client, token: &str, channel_id: &str) -> Result<ChannelInfo, String> {
     let base = api_base_url();
 
     let response = client
@@ -351,8 +373,7 @@ struct SlackMarkResponse {
     error: Option<String>,
 }
 
-pub fn mark_read(token: &str, channel_id: &str, ts: &str) -> Result<(), String> {
-    let client = reqwest::blocking::Client::new();
+pub fn mark_read(client: &reqwest::blocking::Client, token: &str, channel_id: &str, ts: &str) -> Result<(), String> {
     let base = api_base_url();
 
     let body = serde_json::json!({
@@ -419,8 +440,7 @@ pub fn write_user_cache(cache: &HashMap<String, String>) -> Result<(), String> {
     Ok(())
 }
 
-pub fn fetch_user_info(token: &str, user_id: &str) -> Result<String, String> {
-    let client = reqwest::blocking::Client::new();
+pub fn fetch_user_info(client: &reqwest::blocking::Client, token: &str, user_id: &str) -> Result<String, String> {
     let base = api_base_url();
 
     let response = client
@@ -453,28 +473,38 @@ pub fn fetch_user_info(token: &str, user_id: &str) -> Result<String, String> {
         .ok_or_else(|| format!("No display name found for user {}", user_id))
 }
 
-pub fn resolve_user_name(token: &str, user_id: &str, cache: &mut HashMap<String, String>) -> String {
-    if let Some(name) = cache.get(user_id) {
-        return name.clone();
-    }
-    match fetch_user_info(token, user_id) {
-        Ok(name) => {
-            cache.insert(user_id.to_string(), name.clone());
-            name
-        }
-        Err(_) => user_id.to_string(),
-    }
-}
-
-pub fn resolve_users_batch(token: &str, user_ids: &[String], cache: &mut HashMap<String, String>) {
-    let unique: Vec<&String> = user_ids.iter()
+pub fn resolve_users_batch(client: &reqwest::blocking::Client, token: &str, user_ids: &[String], cache: &mut HashMap<String, String>) {
+    let unique: Vec<String> = user_ids.iter()
         .filter(|id| !cache.contains_key(id.as_str()))
+        .map(|id| id.clone())
         .collect::<std::collections::HashSet<_>>()
         .into_iter()
         .collect();
 
-    for user_id in unique {
-        let _ = resolve_user_name(token, user_id, cache);
+    if unique.is_empty() {
+        return;
+    }
+
+    let mut resolved: Vec<(String, String)> = Vec::new();
+    for chunk in unique.chunks(6) {
+        std::thread::scope(|s| {
+            let handles: Vec<_> = chunk.iter().map(|user_id| {
+                s.spawn(move || -> Option<(String, String)> {
+                    fetch_user_info(client, token, user_id)
+                        .ok()
+                        .map(|name| (user_id.clone(), name))
+                })
+            }).collect();
+            for handle in handles {
+                if let Ok(Some(pair)) = handle.join() {
+                    resolved.push(pair);
+                }
+            }
+        });
+    }
+
+    for (id, name) in resolved {
+        cache.insert(id, name);
     }
 }
 
@@ -704,7 +734,7 @@ pub fn prune_done_messages(inbox: &mut SlackInbox) {
 
 // -- Workspace name --
 
-pub fn fetch_workspace_name(token: &str) -> Result<String, String> {
+pub fn fetch_workspace_name(client: &reqwest::blocking::Client, token: &str) -> Result<String, String> {
     // Check config cache first
     if let Some(name) = config::read_config_value("slack-workspace") {
         if !name.is_empty() {
@@ -712,7 +742,6 @@ pub fn fetch_workspace_name(token: &str) -> Result<String, String> {
         }
     }
 
-    let client = reqwest::blocking::Client::new();
     let base = api_base_url();
 
     let response = client
@@ -758,8 +787,7 @@ struct SlackPostMessageResponse {
     error: Option<String>,
 }
 
-pub fn send_message(token: &str, channel_id: &str, text: &str) -> Result<(), String> {
-    let client = reqwest::blocking::Client::new();
+pub fn send_message(client: &reqwest::blocking::Client, token: &str, channel_id: &str, text: &str) -> Result<(), String> {
     let base = api_base_url();
 
     let body = serde_json::json!({
@@ -1001,26 +1029,12 @@ mod tests {
     }
 
     #[test]
-    fn test_resolve_user_name_uses_cache() {
-        let mut cache = HashMap::new();
-        cache.insert("U_CACHED".to_string(), "Alice".to_string());
-        let name = resolve_user_name("fake-token", "U_CACHED", &mut cache);
-        assert_eq!(name, "Alice");
-    }
-
-    #[test]
-    fn test_resolve_user_name_fallback_on_failure() {
-        let mut cache = HashMap::new();
-        let name = resolve_user_name("fake-token", "U_UNKNOWN_TEST", &mut cache);
-        assert_eq!(name, "U_UNKNOWN_TEST");
-    }
-
-    #[test]
     fn test_resolve_users_batch_deduplicates() {
+        let client = reqwest::blocking::Client::new();
         let mut cache = HashMap::new();
         cache.insert("U1".to_string(), "Alice".to_string());
         let ids = vec!["U1".to_string(), "U1".to_string(), "U1".to_string()];
-        resolve_users_batch("fake-token", &ids, &mut cache);
+        resolve_users_batch(&client, "fake-token", &ids, &mut cache);
         assert_eq!(cache.get("U1"), Some(&"Alice".to_string()));
     }
 
@@ -1065,9 +1079,10 @@ mod tests {
             display_name: "DM with U456".into(), conversation_type: "im".into(),
             user: Some("U456".into()), is_channel: None, is_group: None, is_im: Some(true), is_mpim: None,
         }];
+        let client = reqwest::blocking::Client::new();
         let mut cache = HashMap::new();
         cache.insert("U456".to_string(), "Bob".to_string());
-        resolve_channel_display_names(&mut channels, "fake-token", &mut cache);
+        resolve_channel_display_names(&mut channels, &client, "fake-token", &mut cache);
         assert_eq!(channels[0].display_name, "DM with Bob");
     }
 

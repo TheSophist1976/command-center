@@ -1771,77 +1771,97 @@ fn handle_note_picker(app: &mut App, key: KeyCode) -> Result<(), String> {
 }
 
 fn sync_slack_inbox_bg(token: &str, channel_ids: &[String], known_channels: &[slack::SlackChannel]) -> Result<BgTaskResult, String> {
+    let client = reqwest::blocking::Client::new();
     let mut inbox = slack::load_inbox();
 
     if inbox.workspace.is_empty() {
-        inbox.workspace = slack::fetch_workspace_name(token).unwrap_or_default();
+        inbox.workspace = slack::fetch_workspace_name(&client, token).unwrap_or_default();
     }
 
     let mut user_cache = slack::read_user_cache();
     let mut new_count = 0;
 
-    for channel_id in channel_ids {
-        // Use Slack's last_read as the fetch boundary, capped to 72 hours
-        let last_read = match slack::fetch_channel_info(token, channel_id) {
-            Ok(info) => {
-                if !info.has_unread() {
-                    continue; // No unread messages, skip
-                }
-                info.last_read
-            }
-            Err(_) => None,
-        };
+    // Cap oldest to 72 hours ago — compute once for all channels
+    let cutoff_72h = format!("{:.6}", Utc::now().timestamp() as f64 - 72.0 * 3600.0);
 
-        // Cap oldest to 72 hours ago — don't fetch messages older than that
-        let cutoff_72h = format!("{:.6}", Utc::now().timestamp() as f64 - 72.0 * 3600.0);
-        let oldest = match &last_read {
-            Some(lr) if lr.as_str() > cutoff_72h.as_str() => lr.clone(),
-            _ => cutoff_72h,
-        };
-
-        match slack::fetch_messages(token, channel_id, Some(&oldest), 200) {
-            Ok(messages) => {
-                if messages.is_empty() {
-                    continue;
-                }
-                let author_ids: Vec<String> = messages.iter().filter_map(|m| m.user.clone()).collect();
-                slack::resolve_users_batch(token, &author_ids, &mut user_cache);
-
-                let ch_name = known_channels.iter()
-                    .find(|c| c.id == *channel_id)
-                    .map(|c| c.display_name.clone())
-                    .unwrap_or_else(|| channel_id.clone());
-
-                for msg in &messages {
-                    // Skip system messages (joins, topic changes, etc.) and empty messages
-                    if msg.subtype.is_some() || msg.text.trim().is_empty() {
-                        continue;
+    // Fetch all channels concurrently in batches of 6
+    let mut channel_results: Vec<(String, Vec<slack::SlackMessage>)> = Vec::new();
+    for chunk in channel_ids.chunks(6) {
+        std::thread::scope(|s| {
+            let client = &client; // reborrow as &Client (Copy) so move closures can copy it
+            let handles: Vec<_> = chunk.iter().map(|channel_id| {
+                let cutoff = &cutoff_72h;
+                s.spawn(move || -> Option<(String, Vec<slack::SlackMessage>)> {
+                    let last_read = match slack::fetch_channel_info(client, token, channel_id) {
+                        Ok(info) => {
+                            if !info.has_unread() {
+                                return None;
+                            }
+                            info.last_read
+                        }
+                        Err(_) => None,
+                    };
+                    let oldest = match &last_read {
+                        Some(lr) if lr.as_str() > cutoff.as_str() => lr.clone(),
+                        _ => cutoff.to_string(),
+                    };
+                    match slack::fetch_messages(&client, token, channel_id, Some(&oldest), 200) {
+                        Ok(messages) if !messages.is_empty() => Some((channel_id.clone(), messages)),
+                        Ok(_) => None,
+                        Err(e) => {
+                            eprintln!("Warning: skipping channel {}: {}", channel_id, e);
+                            None
+                        }
                     }
-                    if slack::inbox_has_message(&inbox, channel_id, &msg.ts) {
-                        continue;
-                    }
-                    let user_name = msg.user.as_ref()
-                        .and_then(|uid| user_cache.get(uid).cloned())
-                        .unwrap_or_else(|| msg.user.clone().unwrap_or_else(|| "unknown".to_string()));
-                    let user_id = msg.user.clone().unwrap_or_default();
-                    let link = slack::deep_link(&inbox.workspace, channel_id, &msg.ts);
+                })
+            }).collect();
 
-                    inbox.messages.push(slack::SlackInboxMessage {
-                        channel_id: channel_id.clone(),
-                        channel_name: ch_name.clone(),
-                        user_id,
-                        user_name,
-                        text: msg.text.clone(),
-                        ts: msg.ts.clone(),
-                        status: slack::InboxMessageStatus::Open,
-                        link,
-                    });
-                    new_count += 1;
+            for handle in handles {
+                if let Ok(Some(result)) = handle.join() {
+                    channel_results.push(result);
                 }
             }
-            Err(e) => {
-                eprintln!("Warning: skipping channel {}: {}", channel_id, e);
+        });
+    }
+
+    // Batch-resolve all unknown user IDs after all channel fetches complete
+    let all_author_ids: Vec<String> = channel_results.iter()
+        .flat_map(|(_, msgs)| msgs.iter().filter_map(|m| m.user.clone()))
+        .collect();
+    slack::resolve_users_batch(&client, token, &all_author_ids, &mut user_cache);
+
+    // Add messages to inbox
+    for (channel_id, messages) in channel_results {
+        let ch_name = known_channels.iter()
+            .find(|c| c.id == channel_id)
+            .map(|c| c.display_name.clone())
+            .unwrap_or_else(|| channel_id.clone());
+
+        for msg in &messages {
+            // Skip system messages (joins, topic changes, etc.) and empty messages
+            if msg.subtype.is_some() || msg.text.trim().is_empty() {
+                continue;
             }
+            if slack::inbox_has_message(&inbox, &channel_id, &msg.ts) {
+                continue;
+            }
+            let user_name = msg.user.as_ref()
+                .and_then(|uid| user_cache.get(uid).cloned())
+                .unwrap_or_else(|| msg.user.clone().unwrap_or_else(|| "unknown".to_string()));
+            let user_id = msg.user.clone().unwrap_or_default();
+            let link = slack::deep_link(&inbox.workspace, &channel_id, &msg.ts);
+
+            inbox.messages.push(slack::SlackInboxMessage {
+                channel_id: channel_id.clone(),
+                channel_name: ch_name.clone(),
+                user_id,
+                user_name,
+                text: msg.text.clone(),
+                ts: msg.ts.clone(),
+                status: slack::InboxMessageStatus::Open,
+                link,
+            });
+            new_count += 1;
         }
     }
 
@@ -1854,13 +1874,14 @@ fn sync_slack_inbox_bg(token: &str, channel_ids: &[String], known_channels: &[sl
 }
 
 fn auto_discover_sync_bg(token: &str) -> Result<BgTaskResult, String> {
-    let result = slack::fetch_channels(token, None)?;
+    let client = reqwest::blocking::Client::new();
+    let result = slack::fetch_channels(&client, token, None)?;
     let mut channels = result.channels;
     if channels.is_empty() {
         return Err("No Slack channels found.".to_string());
     }
     let mut cache = slack::read_user_cache();
-    slack::resolve_channel_display_names(&mut channels, token, &mut cache);
+    slack::resolve_channel_display_names(&mut channels, &client, token, &mut cache);
     let _ = slack::write_user_cache(&cache);
 
     let member_ids: Vec<String> = channels.iter()
@@ -1876,13 +1897,14 @@ fn auto_discover_sync_bg(token: &str) -> Result<BgTaskResult, String> {
 }
 
 fn fetch_channels_bg(token: &str) -> Result<BgTaskResult, String> {
-    let result = slack::fetch_channels(token, None)?;
+    let client = reqwest::blocking::Client::new();
+    let result = slack::fetch_channels(&client, token, None)?;
     let mut channels = result.channels;
     if channels.is_empty() {
         return Err("No Slack channels found.".to_string());
     }
     let mut cache = slack::read_user_cache();
-    slack::resolve_channel_display_names(&mut channels, token, &mut cache);
+    slack::resolve_channel_display_names(&mut channels, &client, token, &mut cache);
     let _ = slack::write_user_cache(&cache);
 
     let previously_selected: Vec<String> = config::read_config_value("slack-channels")
@@ -1912,7 +1934,8 @@ fn handle_slack_inbox(app: &mut App, key: KeyCode) -> Result<(), String> {
                 if let Some(msg) = open_msgs.get(app.slack_inbox_selected) {
                     let channel_id = msg.channel_id.clone();
                     if let Some(token) = auth::read_slack_token() {
-                        match slack::send_message(&token, &channel_id, &text) {
+                        let client = reqwest::blocking::Client::new();
+                        match slack::send_message(&client, &token, &channel_id, &text) {
                             Ok(()) => {
                                 app.status_message = Some("Reply sent".to_string());
                             }
@@ -2004,7 +2027,8 @@ fn handle_slack_inbox(app: &mut App, key: KeyCode) -> Result<(), String> {
                     // Sync read state back to Slack (best-effort, non-blocking)
                     if let Some(token) = auth::read_slack_token() {
                         let _ = std::thread::spawn(move || {
-                            if let Err(e) = slack::mark_read(&token, &channel_id, &ts) {
+                            let client = reqwest::blocking::Client::new();
+                            if let Err(e) = slack::mark_read(&client, &token, &channel_id, &ts) {
                                 eprintln!("Warning: could not sync read state: {}", e);
                             }
                         });
