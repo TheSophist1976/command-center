@@ -16,7 +16,7 @@ The TUI SHALL provide a `SlackInbox` mode that displays unread Slack messages in
 - **THEN** the TUI SHALL open the channel picker to let the user select channels before syncing
 
 ### Requirement: Inbox message display
-Each message in the inbox SHALL be displayed as a row showing the channel name, sender name, message text (truncated), relative timestamp, and a link indicator. The currently selected message SHALL be visually highlighted.
+Each message in the inbox SHALL be displayed as a row showing the channel name, sender name, message text (truncated), relative timestamp, and a link indicator. The currently selected message SHALL be visually highlighted. When the preview pane is visible, the message text column MAY show fewer characters to accommodate the reduced table height.
 
 #### Scenario: Message row rendering
 - **WHEN** the SlackInbox mode displays a message from `#general` by `Alice` saying "Can you review the deploy script?" from 2 hours ago
@@ -82,8 +82,12 @@ The user SHALL press `Esc` to exit SlackInbox mode and return to Normal mode.
 - **THEN** the TUI SHALL return to Normal mode with the task list visible
 
 ### Requirement: Inbox layout
-The SlackInbox mode SHALL render a table with columns: Channel, Sender, Message, and Time. The layout SHALL include a header showing "Slack Inbox -- N messages" and a footer with keybinding hints: `j/k:nav  Enter/d:done  r:reply  o:open  S:sync  Esc:back`.
+The SlackInbox mode SHALL render a table with columns: Channel, Sender, Message, and Time. The layout SHALL include a header showing "Slack Inbox -- N messages" and a footer with keybinding hints. When the preview pane is visible, the footer SHALL show `j/k:nav  Enter/d:done  r:reply  o:open  p:preview  S:sync  Esc:back`. When the preview pane is hidden, the footer SHALL show `j/k:nav  Enter/d:done  r:reply  o:open  p:preview  S:sync  Esc:back`. During SlackReplying mode, the footer SHALL show `Enter:send  Esc:cancel  ←→:move cursor  Home/End:jump`.
 
-#### Scenario: Inbox layout rendering
-- **WHEN** the SlackInbox mode is active with 12 open messages
-- **THEN** the header SHALL show "Slack Inbox -- 12 messages" and the footer SHALL show the keybinding hints
+#### Scenario: Inbox layout with preview pane
+- **WHEN** the SlackInbox mode is active with 12 open messages and preview pane visible
+- **THEN** the header SHALL show "Slack Inbox -- 12 messages", the table SHALL occupy the upper portion, the preview pane SHALL occupy the lower portion, and the footer SHALL include the `p:preview` keybinding hint
+
+#### Scenario: Inbox layout during reply
+- **WHEN** the user is composing a reply in SlackReplying mode
+- **THEN** the footer SHALL show reply-specific keybinding hints: `Enter:send  Esc:cancel  ←→:move cursor  Home/End:jump`

@@ -23,7 +23,7 @@ ask_yn() {
     else
         printf "${BLUE}▸${NC} %s [y/N] " "$prompt"
     fi
-    read -r yn
+    read -r yn < /dev/tty
     yn="${yn:-$default}"
     [[ "$yn" =~ ^[Yy] ]]
 }
@@ -57,10 +57,14 @@ success "cargo found: $(cargo --version)"
 # =========================================================
 header "2. Running tests"
 
-if ! cargo test -- --skip auth::tests --skip todoist::tests; then
+if ! cargo test -- --skip auth::tests --skip todoist::tests < /dev/null; then
+    stty sane < /dev/tty 2>/dev/null || true
     error "Tests failed. See errors above."
     exit 1
 fi
+# Restore terminal settings — TUI tests may put /dev/tty into raw mode
+# via crossterm even when spawned with piped stdin
+stty sane < /dev/tty 2>/dev/null || true
 success "All tests passed"
 
 # =========================================================
@@ -68,7 +72,7 @@ success "All tests passed"
 # =========================================================
 header "3. Building project (release mode)"
 
-if ! RUSTFLAGS="-D warnings" cargo build --release; then
+if ! RUSTFLAGS="-D warnings" cargo build --release < /dev/null; then
     error "Build failed. See errors above."
     exit 1
 fi
@@ -153,7 +157,7 @@ if [[ -n "$current_dir" ]]; then
 else
     info "No default task directory configured."
     printf "${BLUE}▸${NC} Enter the directory for your tasks (e.g., ~/tasks): "
-    read -r task_dir
+    read -r task_dir < /dev/tty
 
     if [[ -z "$task_dir" ]]; then
         warn "Skipped default-dir configuration"
@@ -197,7 +201,7 @@ else
         echo "  https://app.todoist.com/app/settings/integrations/developer"
         echo ""
         printf "${BLUE}▸${NC} Paste your Todoist API token: "
-        read -r todoist_token
+        read -r todoist_token < /dev/tty
 
         if [[ -n "$todoist_token" ]]; then
             mkdir -p "$CONFIG_DIR"
@@ -232,7 +236,7 @@ else
         echo "  https://console.anthropic.com/settings/keys"
         echo ""
         printf "${BLUE}▸${NC} Paste your Claude API key: "
-        read -r claude_key
+        read -r claude_key < /dev/tty
 
         if [[ -n "$claude_key" ]]; then
             mkdir -p "$CONFIG_DIR"
@@ -270,7 +274,7 @@ else
         info "Install to your workspace, then copy the User OAuth Token."
         echo ""
         printf "${BLUE}▸${NC} Paste your Slack OAuth Token (xoxp-... or xoxb-...): "
-        read -r slack_token
+        read -r slack_token < /dev/tty
 
         if [[ -n "$slack_token" ]]; then
             if [[ "$slack_token" != xoxp-* ]] && [[ "$slack_token" != xoxb-* ]]; then

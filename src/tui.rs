@@ -11,7 +11,7 @@ use crossterm::{
 };
 use ratatui::{
     prelude::*,
-    widgets::{Block, Borders, Cell, Paragraph, Row, Table, TableState},
+    widgets::{Block, Borders, Cell, Paragraph, Row, Table, TableState, Wrap},
 };
 
 mod theme {
@@ -874,6 +874,8 @@ struct App {
     slack_channel_selected: Vec<bool>,
     slack_channel_idx: usize,
     slack_channel_filter: String,
+    slack_preview_visible: bool,
+    slack_reply_cursor: usize,
     bg_task: Option<(BgTaskKind, mpsc::Receiver<Result<BgTaskResult, String>>)>,
     bg_spinner_frame: u8,
 }
@@ -915,6 +917,8 @@ impl App {
             slack_channel_selected: Vec::new(),
             slack_channel_idx: 0,
             slack_channel_filter: String::new(),
+            slack_preview_visible: true,
+            slack_reply_cursor: 0,
             bg_task: None,
             bg_spinner_frame: 0,
         };
@@ -1896,6 +1900,7 @@ fn handle_slack_inbox(app: &mut App, key: KeyCode) -> Result<(), String> {
         match key {
             KeyCode::Esc => {
                 app.input_buffer.clear();
+                app.slack_reply_cursor = 0;
                 app.mode = Mode::SlackInbox;
             }
             KeyCode::Enter => {
@@ -1918,13 +1923,51 @@ fn handle_slack_inbox(app: &mut App, key: KeyCode) -> Result<(), String> {
                     }
                 }
                 app.input_buffer.clear();
+                app.slack_reply_cursor = 0;
                 app.mode = Mode::SlackInbox;
             }
+            KeyCode::Left => {
+                if app.slack_reply_cursor > 0 {
+                    // Move to previous character boundary
+                    let prev = app.input_buffer[..app.slack_reply_cursor]
+                        .char_indices()
+                        .last()
+                        .map(|(i, _)| i)
+                        .unwrap_or(0);
+                    app.slack_reply_cursor = prev;
+                }
+            }
+            KeyCode::Right => {
+                if app.slack_reply_cursor < app.input_buffer.len() {
+                    // Move to next character boundary
+                    let next = app.input_buffer[app.slack_reply_cursor..]
+                        .char_indices()
+                        .nth(1)
+                        .map(|(i, _)| app.slack_reply_cursor + i)
+                        .unwrap_or(app.input_buffer.len());
+                    app.slack_reply_cursor = next;
+                }
+            }
+            KeyCode::Home => {
+                app.slack_reply_cursor = 0;
+            }
+            KeyCode::End => {
+                app.slack_reply_cursor = app.input_buffer.len();
+            }
             KeyCode::Char(c) => {
-                app.input_buffer.push(c);
+                app.input_buffer.insert(app.slack_reply_cursor, c);
+                app.slack_reply_cursor += c.len_utf8();
             }
             KeyCode::Backspace => {
-                app.input_buffer.pop();
+                if app.slack_reply_cursor > 0 {
+                    let prev = app.input_buffer[..app.slack_reply_cursor]
+                        .char_indices()
+                        .last()
+                        .map(|(i, _)| i)
+                        .unwrap_or(0);
+                    app.input_buffer.remove(prev);
+                    app.slack_reply_cursor = prev;
+                }
             }
             _ => {}
         }
@@ -1978,13 +2021,13 @@ fn handle_slack_inbox(app: &mut App, key: KeyCode) -> Result<(), String> {
         }
         KeyCode::Char('r') => {
             if open_count > 0 {
-                let open_msgs = app.slack_inbox.open_messages();
-                if let Some(msg) = open_msgs.get(app.slack_inbox_selected) {
-                    app.status_message = Some(format!("Reply to {}:", msg.channel_name));
-                    app.input_buffer.clear();
-                    app.mode = Mode::SlackReplying;
-                }
+                app.input_buffer.clear();
+                app.slack_reply_cursor = 0;
+                app.mode = Mode::SlackReplying;
             }
+        }
+        KeyCode::Char('p') => {
+            app.slack_preview_visible = !app.slack_preview_visible;
         }
         KeyCode::Char('o') => {
             let open_msgs = app.slack_inbox.open_messages();
@@ -3625,6 +3668,22 @@ fn draw_note_picker(frame: &mut Frame, app: &App, area: Rect) {
 
 fn draw_slack_inbox(frame: &mut Frame, app: &App, area: Rect) {
     let open_msgs = app.slack_inbox.open_messages();
+    let show_panel = app.slack_preview_visible && !open_msgs.is_empty();
+
+    let (table_area, panel_area) = if show_panel {
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Percentage(60),
+                Constraint::Min(3),
+            ])
+            .split(area);
+        (chunks[0], Some(chunks[1]))
+    } else {
+        (area, None)
+    };
+
+    // Draw the message table
     let title = format!(" Slack Inbox — {} messages ", open_msgs.len());
     let items: Vec<Row> = open_msgs
         .iter()
@@ -3658,7 +3717,74 @@ fn draw_slack_inbox(frame: &mut Frame, app: &App, area: Rect) {
 
     let mut state = TableState::default();
     state.select(Some(app.slack_inbox_selected));
-    frame.render_stateful_widget(table, area, &mut state);
+    frame.render_stateful_widget(table, table_area, &mut state);
+
+    // Draw the panel below (preview or reply)
+    if let Some(panel) = panel_area {
+        if app.mode == Mode::SlackReplying {
+            draw_slack_reply_panel(frame, app, panel);
+        } else {
+            draw_slack_preview(frame, app, panel);
+        }
+    }
+}
+
+fn draw_slack_preview(frame: &mut Frame, app: &App, area: Rect) {
+    let open_msgs = app.slack_inbox.open_messages();
+    if let Some(msg) = open_msgs.get(app.slack_inbox_selected) {
+        let time = slack::relative_time(&msg.ts);
+        let header = format!("{} · {} · {}", msg.user_name, msg.channel_name, time);
+        let text = format!("{}\n\n{}", header, msg.text);
+        let paragraph = Paragraph::new(text)
+            .wrap(Wrap { trim: false })
+            .block(Block::default().borders(Borders::ALL).title(" Preview "));
+        frame.render_widget(paragraph, area);
+    }
+}
+
+fn draw_slack_reply_panel(frame: &mut Frame, app: &App, area: Rect) {
+    let open_msgs = app.slack_inbox.open_messages();
+    let quoted = if let Some(msg) = open_msgs.get(app.slack_inbox_selected) {
+        format!("{} · {}\n> {}", msg.user_name, msg.channel_name, msg.text.replace('\n', "\n> "))
+    } else {
+        String::new()
+    };
+
+    let channel_name = open_msgs.get(app.slack_inbox_selected)
+        .map(|m| m.channel_name.as_str())
+        .unwrap_or("channel");
+
+    // Split panel: quoted message on top, input below
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Percentage(50),
+            Constraint::Min(3),
+        ])
+        .split(area);
+
+    let quote = Paragraph::new(quoted)
+        .wrap(Wrap { trim: false })
+        .block(Block::default().borders(Borders::ALL).title(" Original Message "));
+    frame.render_widget(quote, chunks[0]);
+
+    // Build input text with cursor indicator
+    let buf = &app.input_buffer;
+    let cursor = app.slack_reply_cursor.min(buf.len());
+    let (before, after) = buf.split_at(cursor);
+    let input_display = if after.is_empty() {
+        format!("{}█", before)
+    } else {
+        let mut chars = after.chars();
+        let cursor_char = chars.next().unwrap();
+        format!("{}[{}]{}", before, cursor_char, chars.as_str())
+    };
+
+    let title = format!(" Reply to {}: ", channel_name);
+    let input = Paragraph::new(input_display)
+        .wrap(Wrap { trim: false })
+        .block(Block::default().borders(Borders::ALL).title(title));
+    frame.render_widget(input, chunks[1]);
 }
 
 fn draw_slack_channel_picker(frame: &mut Frame, app: &App, area: Rect) {
@@ -3800,10 +3926,10 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
             " j/k:nav  Enter:select  Esc:cancel ".to_string()
         }
         Mode::SlackInbox => {
-            " j/k:nav  Enter/d:done  r:reply  o:open  S:sync  Esc:back ".to_string()
+            " j/k:nav  Enter/d:done  r:reply  o:open  p:preview  S:sync  Esc:back ".to_string()
         }
         Mode::SlackReplying => {
-            format!(" Reply: {}_ ", app.input_buffer)
+            " Enter:send  Esc:cancel  \u{2190}\u{2192}:move cursor  Home/End:jump ".to_string()
         }
         Mode::SlackChannelPicker => {
             if app.slack_channel_filter.is_empty() {
@@ -4137,6 +4263,8 @@ mod tests {
             slack_channel_selected: Vec::new(),
             slack_channel_idx: 0,
             slack_channel_filter: String::new(),
+            slack_preview_visible: true,
+            slack_reply_cursor: 0,
             bg_task: None,
             bg_spinner_frame: 0,
         }
@@ -4246,6 +4374,8 @@ mod tests {
             slack_channel_selected: Vec::new(),
             slack_channel_idx: 0,
             slack_channel_filter: String::new(),
+            slack_preview_visible: true,
+            slack_reply_cursor: 0,
             bg_task: None,
             bg_spinner_frame: 0,
         }
@@ -4899,5 +5029,142 @@ mod tests {
         let _ = handle_normal(&mut app, KeyCode::Esc);
         assert!(app.bg_task.is_none());
         assert_eq!(app.bg_spinner_frame, 0);
+    }
+
+    // -- Slack UX tests --
+
+    fn make_slack_app() -> App {
+        let mut app = make_app_with_tasks(vec![make_task(None)]);
+        app.slack_inbox.messages.push(slack::SlackInboxMessage {
+            channel_id: "C123".to_string(),
+            channel_name: "#general".to_string(),
+            user_id: "U456".to_string(),
+            user_name: "Alice".to_string(),
+            text: "Can you review the deploy script? I made changes to the rollback logic and added error handling for the new edge cases we discussed yesterday in the standup meeting.".to_string(),
+            ts: "1709654321.000100".to_string(),
+            status: slack::InboxMessageStatus::Open,
+            link: "https://team.slack.com/archives/C123/p1709654321000100".to_string(),
+        });
+        app.slack_inbox.messages.push(slack::SlackInboxMessage {
+            channel_id: "C789".to_string(),
+            channel_name: "#engineering".to_string(),
+            user_id: "U101".to_string(),
+            user_name: "Bob".to_string(),
+            text: "Deployed v2.3.1 to staging".to_string(),
+            ts: "1709654400.000200".to_string(),
+            status: slack::InboxMessageStatus::Open,
+            link: String::new(),
+        });
+        app.mode = Mode::SlackInbox;
+        app.slack_inbox_selected = 0;
+        app
+    }
+
+    #[test]
+    fn slack_preview_shows_full_message() {
+        let app = make_slack_app();
+        assert!(app.slack_preview_visible);
+        let open_msgs = app.slack_inbox.open_messages();
+        let msg = open_msgs.get(app.slack_inbox_selected).unwrap();
+        // The full text should be available (not truncated to 60 chars)
+        assert!(msg.text.len() > 60);
+        assert!(msg.text.contains("discussed yesterday in the standup meeting"));
+    }
+
+    #[test]
+    fn slack_cursor_insert_at_position() {
+        let mut app = make_slack_app();
+        app.mode = Mode::SlackReplying;
+        app.input_buffer = "hllo".to_string();
+        app.slack_reply_cursor = 1; // between 'h' and 'l'
+
+        // Insert 'e' at cursor position
+        let _ = handle_slack_inbox(&mut app, KeyCode::Char('e'));
+        assert_eq!(app.input_buffer, "hello");
+        assert_eq!(app.slack_reply_cursor, 2); // cursor advances past 'e'
+    }
+
+    #[test]
+    fn slack_cursor_backspace_at_position() {
+        let mut app = make_slack_app();
+        app.mode = Mode::SlackReplying;
+        app.input_buffer = "hello".to_string();
+        app.slack_reply_cursor = 3; // after 'l'
+
+        let _ = handle_slack_inbox(&mut app, KeyCode::Backspace);
+        assert_eq!(app.input_buffer, "helo");
+        assert_eq!(app.slack_reply_cursor, 2);
+    }
+
+    #[test]
+    fn slack_cursor_home_end() {
+        let mut app = make_slack_app();
+        app.mode = Mode::SlackReplying;
+        app.input_buffer = "hello world".to_string();
+        app.slack_reply_cursor = 5;
+
+        let _ = handle_slack_inbox(&mut app, KeyCode::Home);
+        assert_eq!(app.slack_reply_cursor, 0);
+
+        let _ = handle_slack_inbox(&mut app, KeyCode::End);
+        assert_eq!(app.slack_reply_cursor, 11);
+    }
+
+    #[test]
+    fn slack_preview_toggle() {
+        let mut app = make_slack_app();
+        assert!(app.slack_preview_visible);
+
+        let _ = handle_slack_inbox(&mut app, KeyCode::Char('p'));
+        assert!(!app.slack_preview_visible);
+
+        let _ = handle_slack_inbox(&mut app, KeyCode::Char('p'));
+        assert!(app.slack_preview_visible);
+    }
+
+    #[test]
+    fn slack_existing_keybindings_unchanged() {
+        let mut app = make_slack_app();
+
+        // j navigates down
+        let _ = handle_slack_inbox(&mut app, KeyCode::Char('j'));
+        assert_eq!(app.slack_inbox_selected, 1);
+
+        // k navigates up
+        let _ = handle_slack_inbox(&mut app, KeyCode::Char('k'));
+        assert_eq!(app.slack_inbox_selected, 0);
+
+        // Esc exits to Normal
+        let _ = handle_slack_inbox(&mut app, KeyCode::Esc);
+        assert_eq!(app.mode, Mode::Normal);
+    }
+
+    #[test]
+    fn slack_reply_mode_resets_cursor() {
+        let mut app = make_slack_app();
+        app.input_buffer = "leftover".to_string();
+        app.slack_reply_cursor = 5;
+
+        // Press 'r' to enter reply mode
+        let _ = handle_slack_inbox(&mut app, KeyCode::Char('r'));
+        assert_eq!(app.mode, Mode::SlackReplying);
+        assert!(app.input_buffer.is_empty());
+        assert_eq!(app.slack_reply_cursor, 0);
+    }
+
+    #[test]
+    fn slack_preview_persists_across_reply() {
+        let mut app = make_slack_app();
+        assert!(app.slack_preview_visible);
+
+        // Enter reply mode
+        let _ = handle_slack_inbox(&mut app, KeyCode::Char('r'));
+        assert_eq!(app.mode, Mode::SlackReplying);
+        assert!(app.slack_preview_visible); // unchanged
+
+        // Exit reply mode
+        let _ = handle_slack_inbox(&mut app, KeyCode::Esc);
+        assert_eq!(app.mode, Mode::SlackInbox);
+        assert!(app.slack_preview_visible); // still true
     }
 }
