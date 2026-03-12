@@ -487,25 +487,38 @@ pub fn resolve_users_batch(client: &reqwest::blocking::Client, token: &str, user
     }
 
     let mut resolved: Vec<(String, String)> = Vec::new();
-    for chunk in unique.chunks(6) {
+    let mut missing_scope = false;
+    'chunks: for chunk in unique.chunks(6) {
+        let mut chunk_missing_scope = false;
         std::thread::scope(|s| {
             let handles: Vec<_> = chunk.iter().map(|user_id| {
-                s.spawn(move || -> Option<(String, String)> {
+                s.spawn(move || -> Result<Option<(String, String)>, ()> {
                     match fetch_user_info(client, token, user_id) {
-                        Ok(name) => Some((user_id.clone(), name)),
+                        Ok(name) => Ok(Some((user_id.clone(), name))),
+                        Err(e) if e.contains("missing_scope") => Err(()),
                         Err(e) => {
                             eprintln!("Warning: could not resolve user {}: {}", user_id, e);
-                            None
+                            Ok(None)
                         }
                     }
                 })
             }).collect();
             for handle in handles {
-                if let Ok(Some(pair)) = handle.join() {
-                    resolved.push(pair);
+                match handle.join() {
+                    Ok(Ok(Some(pair))) => resolved.push(pair),
+                    Ok(Err(())) => { chunk_missing_scope = true; }
+                    _ => {}
                 }
             }
         });
+        if chunk_missing_scope {
+            missing_scope = true;
+            break 'chunks;
+        }
+    }
+
+    if missing_scope {
+        eprintln!("Warning: Slack token is missing 'users:read' scope — user names cannot be resolved. Re-authenticate with `task auth slack`.");
     }
 
     for (id, name) in resolved {
