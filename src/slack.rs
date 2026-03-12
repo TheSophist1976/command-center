@@ -466,11 +466,12 @@ pub fn fetch_user_info(client: &reqwest::blocking::Client, token: &str, user_id:
     let profile = &body["user"]["profile"];
     let display = profile["display_name"].as_str().filter(|s| !s.is_empty());
     let real = profile["real_name"].as_str().filter(|s| !s.is_empty());
+    let real_norm = profile["real_name_normalized"].as_str().filter(|s| !s.is_empty());
     let name = body["user"]["name"].as_str().filter(|s| !s.is_empty());
 
-    display.or(real).or(name)
-        .map(|s| s.to_string())
-        .ok_or_else(|| format!("No display name found for user {}", user_id))
+    Ok(display.or(real).or(real_norm).or(name)
+        .unwrap_or(user_id)
+        .to_string())
 }
 
 pub fn resolve_users_batch(client: &reqwest::blocking::Client, token: &str, user_ids: &[String], cache: &mut HashMap<String, String>) {
@@ -490,9 +491,13 @@ pub fn resolve_users_batch(client: &reqwest::blocking::Client, token: &str, user
         std::thread::scope(|s| {
             let handles: Vec<_> = chunk.iter().map(|user_id| {
                 s.spawn(move || -> Option<(String, String)> {
-                    fetch_user_info(client, token, user_id)
-                        .ok()
-                        .map(|name| (user_id.clone(), name))
+                    match fetch_user_info(client, token, user_id) {
+                        Ok(name) => Some((user_id.clone(), name)),
+                        Err(e) => {
+                            eprintln!("Warning: could not resolve user {}: {}", user_id, e);
+                            None
+                        }
+                    }
                 })
             }).collect();
             for handle in handles {
