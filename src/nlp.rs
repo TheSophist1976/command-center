@@ -131,7 +131,7 @@ Fill in non-null values for the fields the user wants to filter by. Values: stat
 
 2. To bulk-update tasks:
 {{"action":"update","match":{{"project":null,"status":null,"priority":null,"tag":null,"title_contains":null}},"task_ids":null,"set":{{"priority":null,"status":null,"tags":null,"due_date":null}},"description":"Human-readable description of the change"}}
-Fill in "match" with criteria to find tasks, and "set" with fields to change. Only include non-null fields in "set". You can use EITHER "match" criteria OR "task_ids" (an array of task ID numbers) to select tasks. Use "task_ids" when you know the exact task IDs to update. The due_date field should be in YYYY-MM-DD format — resolve relative dates like "today", "tomorrow", "next monday" to absolute dates using the provided current date. Set due_date to "" to clear a task's due date.
+Fill in "match" with criteria to find tasks, and "set" with fields to change. Only include non-null fields in "set". You can use EITHER "match" criteria OR "task_ids" (an array of task ID numbers) to select tasks. Use "task_ids" when you know the exact task IDs to update. The due_date field should be in YYYY-MM-DD format — resolve relative dates like "today", "tomorrow", "next monday" to absolute dates using the provided current date. For period-relative expressions, always use the first day of the period: "next week" → Monday of the following calendar week, "next month" → the 1st of the following calendar month, "next year" → January 1st of the following calendar year. Set due_date to "" to clear a task's due date.
 
 3. To respond with a message (for questions, unclear queries, or unsupported actions):
 {{"action":"message","text":"Your response text here"}}
@@ -1154,5 +1154,17 @@ mod tests {
         let prompt = build_system_prompt(&ctx, "2026-03-04 (Wednesday)");
         assert!(prompt.contains("query_tasks"));
         assert!(prompt.contains("date-based queries"));
+    }
+
+    #[test]
+    fn system_prompt_specifies_next_period_start_dates() {
+        let ctx = build_task_context(&[make_task(1, "Test")]);
+        let prompt = build_system_prompt(&ctx, "2026-03-12 (Thursday)");
+        assert!(prompt.contains("next week"), "prompt should mention next week");
+        assert!(prompt.contains("Monday of the following calendar week"), "next week should resolve to Monday");
+        assert!(prompt.contains("next month"), "prompt should mention next month");
+        assert!(prompt.contains("1st of the following calendar month"), "next month should resolve to the 1st");
+        assert!(prompt.contains("next year"), "prompt should mention next year");
+        assert!(prompt.contains("January 1st of the following calendar year"), "next year should resolve to Jan 1st");
     }
 }

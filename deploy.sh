@@ -35,6 +35,7 @@ STATUS_CONFIG=""
 STATUS_TODOIST=""
 STATUS_CLAUDE=""
 STATUS_SLACK=""
+STATUS_SKILL=""
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
@@ -90,6 +91,13 @@ cp target/release/task "$INSTALL_DIR/task"
 chmod +x "$INSTALL_DIR/task"
 success "Installed task to $INSTALL_DIR/task"
 STATUS_BINARY="installed → $INSTALL_DIR/task"
+
+WORKSPACE_DIR="$HOME/workspace"
+if [[ -d "$WORKSPACE_DIR" ]]; then
+    cp target/release/task "$WORKSPACE_DIR/task"
+    chmod +x "$WORKSPACE_DIR/task"
+    success "Copied task to $WORKSPACE_DIR/task (Cowork workspace)"
+fi
 
 # =========================================================
 # 5. PATH detection & shell profile
@@ -296,7 +304,25 @@ else
 fi
 
 # =========================================================
-# 8. Summary
+# 8. Cowork skill
+# =========================================================
+header "8. Installing Cowork skill"
+
+SKILL_SRC="$SCRIPT_DIR/skills/task-manager"
+SKILL_DEST="$HOME/.claude/skills/task-manager"
+
+if [[ -d "$SKILL_SRC" ]]; then
+    mkdir -p "$HOME/.claude/skills"
+    cp -r "$SKILL_SRC" "$HOME/.claude/skills/"
+    success "Installed Cowork skill to $SKILL_DEST"
+    STATUS_SKILL="installed → $SKILL_DEST"
+else
+    warn "skills/task-manager/ not found — skipping skill install"
+    STATUS_SKILL="skipped (source not found)"
+fi
+
+# =========================================================
+# 9. Summary
 # =========================================================
 header "Setup Complete"
 echo ""
@@ -306,5 +332,6 @@ printf "  %-16s %s\n" "Config:" "$STATUS_CONFIG"
 printf "  %-16s %s\n" "Todoist:" "$STATUS_TODOIST"
 printf "  %-16s %s\n" "Claude API:" "$STATUS_CLAUDE"
 printf "  %-16s %s\n" "Slack:" "$STATUS_SLACK"
+printf "  %-16s %s\n" "Skill:" "$STATUS_SKILL"
 echo ""
 success "Done! Run 'task' to get started."
