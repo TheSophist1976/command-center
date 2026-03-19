@@ -41,6 +41,9 @@ mod theme {
 }
 
 use crate::auth;
+use crate::claude_session::{
+    self, ClaudeSession, ClaudeSessionStatus, SessionEvent,
+};
 use crate::config;
 use crate::nlp::{self, ApiMessage, NlpAction};
 use crate::slack;
@@ -98,6 +101,9 @@ enum Mode {
     SlackReplying,
     SlackChannelPicker,
     SlackCreatingTask,
+    SessionDirectoryPicker,
+    Sessions,
+    SessionReply,
 }
 
 #[derive(Debug, Clone)]
@@ -911,6 +917,16 @@ struct App {
     slack_reply_cursor: usize,
     bg_task: Option<(BgTaskKind, mpsc::Receiver<Result<BgTaskResult, String>>)>,
     bg_spinner_frame: u8,
+    // Claude sessions
+    claude_sessions: Vec<ClaudeSession>,
+    next_session_id: usize,
+    session_selected: usize,
+    session_dir_picker: Vec<PathBuf>,
+    session_dir_picker_selected: usize,
+    session_pending_context: Option<String>,
+    session_reply_input: String,
+    session_viewing_output: bool,
+    session_output_scroll: usize,
 }
 
 impl App {
@@ -954,8 +970,22 @@ impl App {
             slack_reply_cursor: 0,
             bg_task: None,
             bg_spinner_frame: 0,
+            claude_sessions: Vec::new(),
+            next_session_id: 0,
+            session_selected: 0,
+            session_dir_picker: Vec::new(),
+            session_dir_picker_selected: 0,
+            session_pending_context: None,
+            session_reply_input: String::new(),
+            session_viewing_output: false,
+            session_output_scroll: 0,
         };
         app.table_state.select(Some(0));
+        // Load persisted sessions
+        let task_dir = app.task_dir();
+        let loaded = claude_session::load_sessions(&task_dir);
+        app.next_session_id = loaded.iter().map(|s| s.id).max().map_or(0, |m| m + 1);
+        app.claude_sessions = loaded;
         Ok(app)
     }
 
@@ -1046,6 +1076,15 @@ pub fn run(path: &Path) -> Result<(), String> {
 
     let result = event_loop(&mut terminal, &mut app);
 
+    // Kill any running claude sessions before exit
+    for session in &mut app.claude_sessions {
+        if session.status == ClaudeSessionStatus::Running {
+            if let Some(ref mut child) = session.child {
+                let _ = child.kill();
+            }
+        }
+    }
+
     // Restore terminal
     let _ = disable_raw_mode();
     let _ = execute!(terminal.backend_mut(), LeaveAlternateScreen);
@@ -1080,6 +1119,54 @@ fn event_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut A
                     app.nlp_spinner_frame = 0;
                     app.status_message = None;
                     app.chat_history.push(ChatMessage::Error("NLP request failed unexpectedly".to_string()));
+                }
+            }
+        }
+
+        // Poll claude sessions for output
+        {
+            let n = app.claude_sessions.len();
+            for i in 0..n {
+                let mut lines_to_add: Vec<String> = Vec::new();
+                let mut new_status: Option<ClaudeSessionStatus> = None;
+                let mut clear_rx = false;
+
+                if let Some(ref rx) = app.claude_sessions[i].rx {
+                    loop {
+                        match rx.try_recv() {
+                            Ok(SessionEvent::Line(line)) => lines_to_add.push(line),
+                            Ok(SessionEvent::Done) => {
+                                new_status = Some(ClaudeSessionStatus::WaitingForInput);
+                                clear_rx = true;
+                                break;
+                            }
+                            Ok(SessionEvent::Error(e)) => {
+                                new_status = Some(ClaudeSessionStatus::Failed);
+                                clear_rx = true;
+                                lines_to_add.push(format!("Error: {}", e));
+                                break;
+                            }
+                            Err(mpsc::TryRecvError::Empty) => break,
+                            Err(mpsc::TryRecvError::Disconnected) => {
+                                new_status = Some(ClaudeSessionStatus::Failed);
+                                clear_rx = true;
+                                break;
+                            }
+                        }
+                    }
+                }
+
+                for line in lines_to_add {
+                    claude_session::push_output_line(&mut app.claude_sessions[i].output, line);
+                }
+                if let Some(status) = new_status {
+                    app.claude_sessions[i].status = status;
+                }
+                if clear_rx {
+                    app.claude_sessions[i].rx = None;
+                    app.claude_sessions[i].child = None;
+                    let task_dir = app.task_dir();
+                    let _ = claude_session::save_session(&task_dir, &app.claude_sessions[i]);
                 }
             }
         }
@@ -1245,6 +1332,18 @@ fn handle_key(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut A
         }
         Mode::SlackChannelPicker => {
             handle_slack_channel_picker(app, key)?;
+            Ok(false)
+        }
+        Mode::SessionDirectoryPicker => {
+            handle_session_dir_picker(app, key)?;
+            Ok(false)
+        }
+        Mode::Sessions => {
+            handle_sessions(app, key)?;
+            Ok(false)
+        }
+        Mode::SessionReply => {
+            handle_session_reply(app, key)?;
             Ok(false)
         }
     }
@@ -1425,6 +1524,28 @@ fn handle_normal(app: &mut App, key: KeyCode) -> Result<bool, String> {
             app.selected = 0;
             app.table_state.select(Some(0));
             app.clamp_selection();
+        }
+        KeyCode::Char('C') => {
+            // If sessions exist, re-open sessions panel; press n inside to start a new one
+            if !app.claude_sessions.is_empty() {
+                app.session_selected = app.session_selected.min(app.claude_sessions.len().saturating_sub(1));
+                app.session_viewing_output = false;
+                app.mode = Mode::Sessions;
+            } else {
+                // No sessions yet — build context from selected task and open dir picker
+                let filtered = app.filtered_indices();
+                let context = if let Some(&idx) = filtered.get(app.selected) {
+                    let task = &app.task_file.tasks[idx];
+                    let body = task.description.as_deref().unwrap_or("");
+                    claude_session::build_session_context(&task.title, body)
+                } else {
+                    String::new()
+                };
+                app.session_pending_context = Some(context);
+                populate_session_dir_picker(app);
+                app.session_dir_picker_selected = 0;
+                app.mode = Mode::SessionDirectoryPicker;
+            }
         }
         KeyCode::Char('i') => {
             if app.bg_task.is_some() {
@@ -1629,6 +1750,21 @@ fn handle_normal_notes(app: &mut App, key: KeyCode) -> Result<bool, String> {
                 app.input_buffer = note.slug.clone();
                 app.mode = Mode::Confirming;
             }
+        }
+        KeyCode::Char('C') => {
+            let context = if let Some(note) = app.notes_list.get(app.notes_selected) {
+                let note_path = app.task_dir().join(format!("{}.md", note.slug));
+                let body = crate::note::read_note(&note_path)
+                    .map(|n| n.body)
+                    .unwrap_or_default();
+                claude_session::build_session_context(&note.title, &body)
+            } else {
+                String::new()
+            };
+            app.session_pending_context = Some(context);
+            populate_session_dir_picker(app);
+            app.session_dir_picker_selected = 0;
+            app.mode = Mode::SessionDirectoryPicker;
         }
         KeyCode::Char('v') => {
             let next = app.view.next();
@@ -3268,6 +3404,28 @@ fn draw(frame: &mut Frame, app: &mut App) {
         draw_footer(frame, app, chunks[2]);
         return;
     }
+    if app.mode == Mode::SessionDirectoryPicker
+        || app.mode == Mode::Sessions
+        || app.mode == Mode::SessionReply
+    {
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(1),
+                Constraint::Min(0),
+                Constraint::Length(1),
+            ])
+            .split(frame.area());
+
+        draw_header(frame, app, chunks[0]);
+        if app.mode == Mode::SessionDirectoryPicker {
+            draw_session_dir_picker(frame, app, chunks[1]);
+        } else {
+            draw_sessions_panel(frame, app, chunks[1]);
+        }
+        draw_footer(frame, app, chunks[2]);
+        return;
+    }
     if app.view == View::Notes && app.mode == Mode::Normal {
         let chunks = Layout::default()
             .direction(Direction::Vertical)
@@ -4021,6 +4179,334 @@ fn draw_slack_channel_picker(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_stateful_widget(table, inner_layout[1], &mut state);
 }
 
+// ---------------------------------------------------------------------------
+// Session directory picker (3.1–3.3)
+// ---------------------------------------------------------------------------
+
+fn populate_session_dir_picker(app: &mut App) {
+    let root = claude_session::claude_code_dir();
+    let mut dirs: Vec<PathBuf> = match std::fs::read_dir(&root) {
+        Ok(rd) => rd
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_type().map_or(false, |t| t.is_dir()))
+            .map(|e| e.path())
+            .collect(),
+        Err(_) => Vec::new(),
+    };
+    dirs.sort();
+    app.session_dir_picker = dirs;
+}
+
+fn draw_session_dir_picker(frame: &mut Frame, app: &App, area: Rect) {
+    if app.session_dir_picker.is_empty() {
+        let msg = Paragraph::new("No projects found — set `claude-code-dir` in config")
+            .block(Block::default().borders(Borders::ALL).title(" Select Project Directory "));
+        frame.render_widget(msg, area);
+        return;
+    }
+
+    let items: Vec<Row> = app
+        .session_dir_picker
+        .iter()
+        .enumerate()
+        .map(|(i, path)| {
+            let name = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("?")
+                .to_string();
+            let style = if i == app.session_dir_picker_selected {
+                Style::default().bg(theme::HIGHLIGHT_BG)
+            } else {
+                Style::default()
+            };
+            Row::new(vec![Cell::from(name)]).style(style)
+        })
+        .collect();
+
+    let widths = [Constraint::Percentage(100)];
+    let table = Table::new(items, widths)
+        .block(Block::default().borders(Borders::ALL).title(" Select Project Directory "));
+
+    let mut state = TableState::default();
+    state.select(Some(app.session_dir_picker_selected));
+    frame.render_stateful_widget(table, area, &mut state);
+}
+
+fn handle_session_dir_picker(app: &mut App, key: KeyCode) -> Result<(), String> {
+    match key {
+        KeyCode::Char('j') | KeyCode::Down => {
+            if !app.session_dir_picker.is_empty()
+                && app.session_dir_picker_selected < app.session_dir_picker.len() - 1
+            {
+                app.session_dir_picker_selected += 1;
+            }
+        }
+        KeyCode::Char('k') | KeyCode::Up => {
+            if app.session_dir_picker_selected > 0 {
+                app.session_dir_picker_selected -= 1;
+            }
+        }
+        KeyCode::Enter => {
+            if let Some(dir) = app
+                .session_dir_picker
+                .get(app.session_dir_picker_selected)
+                .cloned()
+            {
+                if !claude_session::claude_available() {
+                    app.status_message = Some(
+                        "claude binary not found — install Claude Code to use sessions".to_string(),
+                    );
+                    app.mode = Mode::Normal;
+                    return Ok(());
+                }
+                let context = app.session_pending_context.take().unwrap_or_default();
+                let id = app.next_session_id;
+                app.next_session_id += 1;
+                let label = dir
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("session")
+                    .to_string();
+                match claude_session::launch_claude_session(id, label, dir, context) {
+                    Ok(session) => {
+                        app.claude_sessions.push(session);
+                        app.session_selected = app.claude_sessions.len() - 1;
+                        app.session_viewing_output = false;
+                        app.mode = Mode::Sessions;
+                    }
+                    Err(e) => {
+                        app.status_message = Some(format!("Failed to launch session: {}", e));
+                        app.mode = Mode::Normal;
+                    }
+                }
+            } else if app.session_dir_picker.is_empty() {
+                app.mode = Mode::Normal;
+            }
+        }
+        KeyCode::Esc => {
+            app.session_pending_context = None;
+            app.mode = Mode::Normal;
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Sessions panel (6.1–6.3)
+// ---------------------------------------------------------------------------
+
+fn draw_sessions_panel(frame: &mut Frame, app: &App, area: Rect) {
+    if app.session_viewing_output {
+        // Full output detail for selected session
+        if let Some(session) = app.claude_sessions.get(app.session_selected) {
+            let visible_height = area.height.saturating_sub(2) as usize;
+            let total = session.output.len();
+            let start = app.session_output_scroll.min(total.saturating_sub(visible_height));
+            let lines: Vec<Line> = session
+                .output
+                .iter()
+                .skip(start)
+                .take(visible_height)
+                .map(|l| Line::from(l.as_str()))
+                .collect();
+            let title = format!(" {} — output ({}/{}) ", session.label, start + lines.len(), total);
+            let para = Paragraph::new(lines)
+                .block(Block::default().borders(Borders::ALL).title(title));
+            frame.render_widget(para, area);
+        }
+        return;
+    }
+
+    if app.claude_sessions.is_empty() {
+        let msg = Paragraph::new("No sessions yet. Press C on a task or note to start one.")
+            .block(Block::default().borders(Borders::ALL).title(" Claude Sessions "));
+        frame.render_widget(msg, area);
+        return;
+    }
+
+    // Split area for list + reply input if in SessionReply
+    let (list_area, reply_area) = if app.mode == Mode::SessionReply {
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Min(3), Constraint::Length(3)])
+            .split(area);
+        (chunks[0], Some(chunks[1]))
+    } else {
+        (area, None)
+    };
+
+    let items: Vec<Row> = app
+        .claude_sessions
+        .iter()
+        .enumerate()
+        .map(|(i, session)| {
+            let status_str = match session.status {
+                ClaudeSessionStatus::Running => "⠿ Running",
+                ClaudeSessionStatus::WaitingForInput => "● Waiting",
+                ClaudeSessionStatus::Failed => "✗ Failed",
+                ClaudeSessionStatus::Done => "✓ Done",
+            };
+            let dir_name = session
+                .working_dir
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("?");
+            let last_line = session.output.last().map(|s| s.as_str()).unwrap_or("");
+            let style = if i == app.session_selected {
+                Style::default().bg(theme::HIGHLIGHT_BG)
+            } else {
+                Style::default()
+            };
+            Row::new(vec![
+                Cell::from(session.label.clone()),
+                Cell::from(dir_name.to_string()),
+                Cell::from(status_str),
+                Cell::from(last_line.to_string()),
+            ])
+            .style(style)
+        })
+        .collect();
+
+    let widths = [
+        Constraint::Percentage(25),
+        Constraint::Percentage(20),
+        Constraint::Length(12),
+        Constraint::Min(10),
+    ];
+    let table = Table::new(items, widths)
+        .header(Row::new(vec!["Label", "Directory", "Status", "Last output"]).style(
+            Style::default().fg(Color::DarkGray),
+        ))
+        .block(Block::default().borders(Borders::ALL).title(" Claude Sessions "));
+
+    let mut state = TableState::default();
+    state.select(Some(app.session_selected));
+    frame.render_stateful_widget(table, list_area, &mut state);
+
+    if let Some(reply_area) = reply_area {
+        draw_session_reply(frame, app, reply_area);
+    }
+}
+
+fn handle_sessions(app: &mut App, key: KeyCode) -> Result<(), String> {
+    if app.session_viewing_output {
+        match key {
+            KeyCode::Char('j') | KeyCode::Down => {
+                let max_scroll = app
+                    .claude_sessions
+                    .get(app.session_selected)
+                    .map(|s| s.output.len())
+                    .unwrap_or(0)
+                    .saturating_sub(1);
+                if app.session_output_scroll < max_scroll {
+                    app.session_output_scroll += 1;
+                }
+            }
+            KeyCode::Char('k') | KeyCode::Up => {
+                if app.session_output_scroll > 0 {
+                    app.session_output_scroll -= 1;
+                }
+            }
+            KeyCode::Esc => {
+                app.session_viewing_output = false;
+            }
+            _ => {}
+        }
+        return Ok(());
+    }
+
+    match key {
+        KeyCode::Char('j') | KeyCode::Down => {
+            if !app.claude_sessions.is_empty()
+                && app.session_selected < app.claude_sessions.len() - 1
+            {
+                app.session_selected += 1;
+            }
+        }
+        KeyCode::Char('k') | KeyCode::Up => {
+            if app.session_selected > 0 {
+                app.session_selected -= 1;
+            }
+        }
+        KeyCode::Enter => {
+            if app.claude_sessions.get(app.session_selected).is_some() {
+                app.session_viewing_output = true;
+                // Scroll to end by default
+                let total = app.claude_sessions[app.session_selected].output.len();
+                app.session_output_scroll = total.saturating_sub(1);
+            }
+        }
+        KeyCode::Char('r') => {
+            if let Some(session) = app.claude_sessions.get(app.session_selected) {
+                if session.status == ClaudeSessionStatus::WaitingForInput {
+                    app.session_reply_input.clear();
+                    app.mode = Mode::SessionReply;
+                }
+            }
+        }
+        KeyCode::Char('n') => {
+            // Start a new session from the sessions panel (no task context)
+            app.session_pending_context = Some(String::new());
+            populate_session_dir_picker(app);
+            app.session_dir_picker_selected = 0;
+            app.mode = Mode::SessionDirectoryPicker;
+        }
+        KeyCode::Esc | KeyCode::Char('q') => {
+            app.session_viewing_output = false;
+            app.mode = Mode::Normal;
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Session reply (7.1–7.3)
+// ---------------------------------------------------------------------------
+
+fn draw_session_reply(frame: &mut Frame, app: &App, area: Rect) {
+    let text = format!(" > {}_ ", app.session_reply_input);
+    let para = Paragraph::new(text)
+        .block(Block::default().borders(Borders::ALL).title(" Reply "));
+    frame.render_widget(para, area);
+}
+
+fn handle_session_reply(app: &mut App, key: KeyCode) -> Result<(), String> {
+    match key {
+        KeyCode::Char(c) => {
+            app.session_reply_input.push(c);
+        }
+        KeyCode::Backspace => {
+            app.session_reply_input.pop();
+        }
+        KeyCode::Enter => {
+            send_session_reply(app)?;
+        }
+        KeyCode::Esc => {
+            app.session_reply_input.clear();
+            app.mode = Mode::Sessions;
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn send_session_reply(app: &mut App) -> Result<(), String> {
+    let message = app.session_reply_input.trim().to_string();
+    if message.is_empty() {
+        return Ok(());
+    }
+    if let Some(session) = app.claude_sessions.get_mut(app.session_selected) {
+        claude_session::continue_claude_session(session, message)
+            .map_err(|e| format!("Failed to send reply: {}", e))?;
+    }
+    app.session_reply_input.clear();
+    app.mode = Mode::Sessions;
+    Ok(())
+}
+
 fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
     let text = match &app.mode {
         Mode::Normal => {
@@ -4030,11 +4516,11 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
             } else if let Some(ref msg) = app.status_message {
                 format!(" {} ", msg)
             } else if app.view == View::Notes {
-                " a:new  Enter:edit  d:delete  v:view  q:quit ".to_string()
+                " a:new  Enter:edit  d:delete  v:view  C:claude  q:quit ".to_string()
             } else if app.show_detail_panel {
                 " j/k:nav  Enter:edit  Space:toggle  a:add  d:delete  f:filter  p:priority  e:edit-title  t:tags  r:desc  R:recur  n:note  g:go-note  v:view  Tab:details  q:quit ".to_string()
             } else {
-                " j/k:nav  Enter:toggle  a:add  d:delete  f:filter  p:priority  e:edit  t:tags  r:desc  R:recur  n:note  g:go-note  v:view  i:import  s:slack  S:channels  ::command  D:set-dir  T/N/W/M/Q/Y:due  X:clr-due  Tab:details  q:quit ".to_string()
+                " j/k:nav  Enter:toggle  a:add  d:delete  f:filter  p:priority  e:edit  t:tags  r:desc  R:recur  n:note  g:go-note  v:view  C:claude  i:import  s:slack  S:channels  ::command  D:set-dir  T/N/W/M/Q/Y:due  X:clr-due  Tab:details  q:quit ".to_string()
             }
         }
         Mode::Adding => {
@@ -4118,6 +4604,19 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
             } else {
                 " Type to search  Bksp:clear  Up/Down:nav  Space:toggle  Enter:save  Esc:cancel ".to_string()
             }
+        }
+        Mode::SessionDirectoryPicker => {
+            " j/k:nav  Enter:select  Esc:cancel ".to_string()
+        }
+        Mode::Sessions => {
+            if app.session_viewing_output {
+                " j/k:scroll  Esc:back ".to_string()
+            } else {
+                " j/k:nav  Enter:output  r:reply  n:new  Esc:back ".to_string()
+            }
+        }
+        Mode::SessionReply => {
+            format!(" Reply: {}_ ", app.session_reply_input)
         }
     };
 
@@ -4448,6 +4947,15 @@ mod tests {
             slack_reply_cursor: 0,
             bg_task: None,
             bg_spinner_frame: 0,
+            claude_sessions: Vec::new(),
+            next_session_id: 0,
+            session_selected: 0,
+            session_dir_picker: Vec::new(),
+            session_dir_picker_selected: 0,
+            session_pending_context: None,
+            session_reply_input: String::new(),
+            session_viewing_output: false,
+            session_output_scroll: 0,
         }
     }
 
@@ -4559,6 +5067,15 @@ mod tests {
             slack_reply_cursor: 0,
             bg_task: None,
             bg_spinner_frame: 0,
+            claude_sessions: Vec::new(),
+            next_session_id: 0,
+            session_selected: 0,
+            session_dir_picker: Vec::new(),
+            session_dir_picker_selected: 0,
+            session_pending_context: None,
+            session_reply_input: String::new(),
+            session_viewing_output: false,
+            session_output_scroll: 0,
         }
     }
 
