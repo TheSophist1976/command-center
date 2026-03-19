@@ -454,6 +454,14 @@ impl NoteEditor {
         }
     }
 
+    fn move_to_line_start(&mut self) {
+        self.cursor_col = 0;
+    }
+
+    fn move_to_line_end(&mut self) {
+        self.cursor_col = self.lines[self.cursor_row].chars().count();
+    }
+
     fn clamp_col(&mut self) {
         let line_len = self.lines[self.cursor_row].chars().count();
         if self.cursor_col > line_len {
@@ -461,14 +469,38 @@ impl NoteEditor {
         }
     }
 
-    fn ensure_cursor_visible(&mut self, visible_height: usize) {
+    fn ensure_cursor_visible(&mut self, visible_height: usize, text_width: usize) {
         if visible_height == 0 {
             return;
         }
+        // Scroll up: cursor moved above the viewport
         if self.cursor_row < self.viewport_offset {
             self.viewport_offset = self.cursor_row;
-        } else if self.cursor_row >= self.viewport_offset + visible_height {
-            self.viewport_offset = self.cursor_row - visible_height + 1;
+            return;
+        }
+        // Scroll down: advance viewport_offset one logical line at a time until
+        // the cursor's visual row fits within visible_height.
+        let cols_per_row = text_width.max(1);
+        let visual_rows_for = |line: &str| -> usize {
+            let n = line.chars().count();
+            if n == 0 { 1 } else { (n + cols_per_row - 1) / cols_per_row }
+        };
+        loop {
+            // Count display rows from viewport_offset up to (not including) cursor_row
+            let mut display_row: usize = 0;
+            for row in self.viewport_offset..self.cursor_row.min(self.lines.len()) {
+                display_row += visual_rows_for(&self.lines[row]);
+            }
+            // Add the visual row within the cursor's logical line
+            display_row += self.cursor_col / cols_per_row;
+            if display_row < visible_height {
+                break;
+            }
+            if self.viewport_offset < self.cursor_row {
+                self.viewport_offset += 1;
+            } else {
+                break;
+            }
         }
     }
 
@@ -1661,6 +1693,12 @@ fn handle_note_editor(app: &mut App, key: KeyCode) -> Result<(), String> {
         }
         KeyCode::Right => {
             editor.move_right();
+        }
+        KeyCode::Home => {
+            editor.move_to_line_start();
+        }
+        KeyCode::End => {
+            editor.move_to_line_end();
         }
         KeyCode::Esc => {
             if editor.dirty {
@@ -3693,10 +3731,17 @@ fn draw_note_editor(frame: &mut Frame, app: &mut App, area: Rect) {
     frame.render_widget(inner, area);
 
     let visible_height = inner_area.height as usize;
-    editor.ensure_cursor_visible(visible_height);
-
     let line_num_width = 4u16;
     let text_width = inner_area.width.saturating_sub(line_num_width + 1);
+    let text_width_usize = text_width as usize;
+    let cols_per_row = text_width_usize.max(1);
+
+    editor.ensure_cursor_visible(visible_height, text_width_usize);
+
+    let visual_rows_for = |line: &str| -> usize {
+        let n = line.chars().count();
+        if n == 0 { 1 } else { (n + cols_per_row - 1) / cols_per_row }
+    };
 
     // Compute code block state up to viewport_offset by scanning from line 0
     let mut in_code_block = false;
@@ -3705,38 +3750,61 @@ fn draw_note_editor(frame: &mut Frame, app: &mut App, area: Rect) {
         in_code_block = new_state;
     }
 
-    for (i, line_idx) in (editor.viewport_offset..).enumerate() {
-        if i >= visible_height || line_idx >= editor.lines.len() {
-            break;
+    // Render lines with word wrap
+    let mut display_row: usize = 0;
+    let mut line_idx = editor.viewport_offset;
+    while display_row < visible_height && line_idx < editor.lines.len() {
+        let line = editor.lines[line_idx].clone();
+        let visual_rows = visual_rows_for(&line);
+
+        for vis_row in 0..visual_rows {
+            if display_row >= visible_height {
+                break;
+            }
+            let y = inner_area.y + display_row as u16;
+
+            // Line number gutter: only on the first visual row of this logical line
+            if vis_row == 0 {
+                let num_str = format!("{:>3} ", line_idx + 1);
+                let num_span = Span::styled(num_str, Style::default().fg(Color::DarkGray));
+                frame.render_widget(
+                    Paragraph::new(num_span),
+                    Rect::new(inner_area.x, y, line_num_width, 1),
+                );
+            } else {
+                frame.render_widget(
+                    Paragraph::new("    "),
+                    Rect::new(inner_area.x, y, line_num_width, 1),
+                );
+            }
+
+            // Render the chunk of this logical line for this visual row
+            let chunk_start = vis_row * cols_per_row;
+            let chunk: String = line.chars().skip(chunk_start).take(cols_per_row).collect();
+            let (spans, new_state) = md_style::style_markdown_line(&chunk, in_code_block);
+            // Only advance code-block state on the last visual row of this logical line
+            if vis_row == visual_rows - 1 {
+                in_code_block = new_state;
+            }
+            frame.render_widget(
+                Paragraph::new(Line::from(spans)),
+                Rect::new(inner_area.x + line_num_width, y, text_width, 1),
+            );
+
+            display_row += 1;
         }
-        let y = inner_area.y + i as u16;
-
-        // Line number
-        let num_str = format!("{:>3} ", line_idx + 1);
-        let num_span = Span::styled(num_str, Style::default().fg(Color::DarkGray));
-        frame.render_widget(
-            Paragraph::new(num_span),
-            Rect::new(inner_area.x, y, line_num_width, 1),
-        );
-
-        // Line content with markdown styling
-        let line = &editor.lines[line_idx];
-        let display: String = if line.len() > text_width as usize {
-            line.chars().take(text_width as usize).collect()
-        } else {
-            line.clone()
-        };
-        let (spans, new_state) = md_style::style_markdown_line(&display, in_code_block);
-        in_code_block = new_state;
-        frame.render_widget(
-            Paragraph::new(Line::from(spans)),
-            Rect::new(inner_area.x + line_num_width, y, text_width, 1),
-        );
+        line_idx += 1;
     }
 
-    // Set cursor position
-    let cursor_screen_row = editor.cursor_row.saturating_sub(editor.viewport_offset);
-    let cursor_x = inner_area.x + line_num_width + editor.cursor_col as u16;
+    // Set cursor position accounting for wrapped visual rows
+    let visual_row_within_line = editor.cursor_col / cols_per_row;
+    let visual_col_within_row = editor.cursor_col % cols_per_row;
+    let mut cursor_screen_row: usize = 0;
+    for row in editor.viewport_offset..editor.cursor_row.min(editor.lines.len()) {
+        cursor_screen_row += visual_rows_for(&editor.lines[row]);
+    }
+    cursor_screen_row += visual_row_within_line;
+    let cursor_x = inner_area.x + line_num_width + visual_col_within_row as u16;
     let cursor_y = inner_area.y + cursor_screen_row as u16;
     if cursor_y < inner_area.y + inner_area.height && cursor_x < inner_area.x + inner_area.width {
         frame.set_cursor_position((cursor_x, cursor_y));
@@ -5057,12 +5125,51 @@ mod tests {
         let mut ed = NoteEditor::new("s", "T", "a\nb\nc\nd\ne\nf");
         ed.viewport_offset = 0;
         ed.cursor_row = 5;
-        ed.ensure_cursor_visible(3);
+        ed.ensure_cursor_visible(3, 80);
         assert_eq!(ed.viewport_offset, 3); // scrolled so row 5 is visible in 3-line viewport
 
         ed.cursor_row = 1;
-        ed.ensure_cursor_visible(3);
+        ed.ensure_cursor_visible(3, 80);
         assert_eq!(ed.viewport_offset, 1); // scrolled up
+    }
+
+    #[test]
+    fn note_editor_move_to_line_start() {
+        let mut ed = NoteEditor::new("s", "T", "hello");
+        ed.cursor_col = 3;
+        ed.move_to_line_start();
+        assert_eq!(ed.cursor_col, 0);
+        // Already at start — no-op
+        ed.move_to_line_start();
+        assert_eq!(ed.cursor_col, 0);
+    }
+
+    #[test]
+    fn note_editor_move_to_line_end() {
+        let mut ed = NoteEditor::new("s", "T", "hello");
+        ed.cursor_col = 0;
+        ed.move_to_line_end();
+        assert_eq!(ed.cursor_col, 5); // "hello".chars().count()
+        // Empty line stays at 0
+        let mut ed2 = NoteEditor::new("s", "T", "");
+        ed2.move_to_line_end();
+        assert_eq!(ed2.cursor_col, 0);
+    }
+
+    #[test]
+    fn note_editor_visual_row_counting() {
+        // A 10-char line with cols_per_row=4 produces ceil(10/4)=3 visual rows
+        let line = "0123456789"; // 10 chars
+        let cols_per_row: usize = 4;
+        let n = line.chars().count();
+        let visual_rows = if n == 0 { 1 } else { (n + cols_per_row - 1) / cols_per_row };
+        assert_eq!(visual_rows, 3);
+
+        // Empty line always produces 1 visual row
+        let empty = "";
+        let n2 = empty.chars().count();
+        let visual_rows2 = if n2 == 0 { 1 } else { (n2 + cols_per_row - 1) / cols_per_row };
+        assert_eq!(visual_rows2, 1);
     }
 
     #[test]
