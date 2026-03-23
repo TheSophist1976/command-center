@@ -214,6 +214,8 @@ CONFIG_FILE="$CONFIG_DIR/config.md"
 current_dir=""
 if [[ -f "$CONFIG_FILE" ]]; then
     current_dir="$(grep '^default-dir:' "$CONFIG_FILE" 2>/dev/null | sed 's/^default-dir:[[:space:]]*//' || true)"
+    # Expand leading tilde (stored literally by `task config set`)
+    current_dir="${current_dir/#\~/$HOME}"
 fi
 
 if [[ -n "$current_dir" ]]; then
