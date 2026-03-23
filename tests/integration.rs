@@ -5,6 +5,10 @@ fn task_bin() -> Command {
     Command::new(env!("CARGO_BIN_EXE_task"))
 }
 
+fn task_tui_bin() -> Command {
+    Command::new(env!("CARGO_BIN_EXE_task-tui"))
+}
+
 fn temp_dir() -> tempfile::TempDir {
     tempfile::tempdir().unwrap()
 }
@@ -32,9 +36,9 @@ fn test_tui_help() {
 
 #[test]
 fn test_tui_fails_without_terminal() {
-    // Running task tui without a real terminal should fail gracefully.
+    // Running task-tui without a real terminal should fail gracefully.
     let dir = temp_dir();
-    let out = task_bin()
+    let out = task_tui_bin()
         .args(["tui"])
         .current_dir(dir.path())
         .output()
@@ -48,23 +52,23 @@ fn test_tui_fails_without_terminal() {
 
 #[test]
 fn test_no_subcommand_launches_tui() {
-    // Running `task` with no subcommand should launch the TUI (which fails without terminal).
+    // Running `task` with no subcommand should print a redirect message (TUI is in task-tui).
     let dir = temp_dir();
     let out = task_bin()
         .current_dir(dir.path())
         .output()
         .unwrap();
-    // Should fail with exit code 1 (no terminal available), same as `task tui`
-    assert_eq!(out.status.code(), Some(1));
+    // CLI binary exits 0 and prints redirect message to stderr
+    assert_eq!(out.status.code(), Some(0));
     let s = stderr(&out);
-    assert!(s.contains("Failed") || s.contains("raw mode") || s.contains("terminal") || s.contains("Error"),
-        "Expected terminal error in stderr, got: {}", s);
+    assert!(s.contains("task-tui"),
+        "Expected redirect message mentioning task-tui, got: {}", s);
 }
 
 #[test]
 fn test_tui_with_pseudo_terminal() {
-    // Use `expect` to run task tui through a pseudo-terminal.
-    let task_bin_path = env!("CARGO_BIN_EXE_task");
+    // Use `expect` to run task-tui through a pseudo-terminal.
+    let task_bin_path = env!("CARGO_BIN_EXE_task-tui");
     let dir = temp_dir();
 
     // Check if `expect` is available

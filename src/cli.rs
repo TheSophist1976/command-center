@@ -1,7 +1,7 @@
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
-#[command(name = "task", about = "A fast CLI task manager with an interactive TUI")]
+#[command(name = "task", about = "A fast CLI task manager with an interactive TUI", version)]
 pub struct Cli {
     /// Path to the task file (default: tasks.md)
     #[arg(long, global = true)]
@@ -27,6 +27,12 @@ pub enum Command {
         #[command(subcommand)]
         subcommand: ConfigCommand,
     },
+
+    /// Manage notes
+    Note {
+        #[command(subcommand)]
+        subcommand: NoteCommand,
+    },
 }
 
 #[derive(Subcommand)]
@@ -43,13 +49,6 @@ pub enum AuthCommand {
         /// Claude API key (skips interactive prompt)
         #[arg(long)]
         key: Option<String>,
-    },
-
-    /// Authenticate with Slack using a Bot User OAuth Token
-    Slack {
-        /// Slack Bot Token (skips interactive prompt)
-        #[arg(long)]
-        token: Option<String>,
     },
 
     /// Show authentication status
@@ -74,5 +73,62 @@ pub enum ConfigCommand {
     Get {
         /// Configuration key (e.g., default-dir)
         key: String,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum NoteCommand {
+    /// List all notes
+    List,
+
+    /// Create a new note
+    Add {
+        /// Note title
+        title: String,
+
+        /// Link note to this task ID
+        #[arg(long)]
+        task: Option<u32>,
+    },
+
+    /// Show a note's content
+    Show {
+        /// Note slug
+        slug: String,
+    },
+
+    /// Edit a note's title or body
+    Edit {
+        /// Note slug
+        slug: String,
+
+        /// New title
+        #[arg(long)]
+        title: Option<String>,
+
+        /// New body (replaces entire body)
+        #[arg(long)]
+        body: Option<String>,
+    },
+
+    /// Delete a note
+    Rm {
+        /// Note slug
+        slug: String,
+    },
+
+    /// Link a note to a task
+    Link {
+        /// Note slug
+        slug: String,
+
+        /// Task ID to link to
+        task_id: u32,
+    },
+
+    /// Unlink the note from a task
+    Unlink {
+        /// Task ID to unlink
+        task_id: u32,
     },
 }

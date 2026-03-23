@@ -9,7 +9,7 @@ The user's tasks are stored in a markdown file at:
 ~/Documents/Mark-main/Tasks/tasks.md
 ```
 
-Read and edit this file directly. The `task` CLI only supports `tui`, `auth`, and `config` — do NOT attempt to run `task list`, `task add`, or any other task CRUD commands.
+Read and edit this file directly for task operations. For note operations, use the `task note` CLI subcommands documented below.
 
 ## File Format
 
@@ -61,3 +61,30 @@ Remove the line with the matching `id:` entirely.
 **Due date:** `YYYY-MM-DD` — e.g., `due:2026-03-25`
 
 **Timestamps:** ISO 8601 — e.g., `2026-03-18T12:00:00Z`
+
+## Notes
+
+Notes are markdown files stored in the same directory as `tasks.md`. Each note has a slug (derived from its title) and is stored as `<slug>.md`. Use the `task note` CLI subcommands to manage notes.
+
+### Commands
+
+| Command | Description | Output |
+|---------|-------------|--------|
+| `task note list` | List all notes | `<slug>  <title>` per line, sorted by slug |
+| `task note add "<title>"` | Create a new note with empty body | File path of created note |
+| `task note add "<title>" --task <id>` | Create a note and link it to a task | File path (links `note` field on the task) |
+| `task note show <slug>` | Print the note's title and body | Raw markdown content |
+| `task note edit <slug> --title "<new title>"` | Update the note's title | File path |
+| `task note edit <slug> --body "<new body>"` | Replace the note's body | File path |
+| `task note edit <slug> --title "..." --body "..."` | Update both title and body | File path |
+| `task note rm <slug>` | Delete the note file | Confirmation message |
+| `task note link <slug> <task-id>` | Link an existing note to a task | Confirmation message |
+| `task note unlink <task-id>` | Remove the note link from a task | Confirmation message |
+
+### Notes
+
+- `task note edit` requires at least one of `--title` or `--body`; omitting both is an error
+- `task note add --task <id>` creates the note even if the task is not found, but exits with code 1 and prints a warning
+- `task note rm` does not automatically clear the `note` field on tasks that referenced the deleted note
+- `task note unlink` is idempotent — succeeds even if the task has no note linked
+- The `--file` flag (global) can be used to target a different task file: `task --file /path/to/tasks.md note list`

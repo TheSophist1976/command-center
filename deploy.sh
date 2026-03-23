@@ -29,16 +29,60 @@ ask_yn() {
 }
 
 # Track status for summary
+STATUS_VERSION=""
 STATUS_BINARY=""
 STATUS_PATH=""
 STATUS_CONFIG=""
 STATUS_TODOIST=""
 STATUS_CLAUDE=""
-STATUS_SLACK=""
 STATUS_SKILL=""
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
+
+# =========================================================
+# 0. Version bump
+# =========================================================
+header "0. Version bump"
+
+CURRENT_VERSION="$(grep '^version' Cargo.toml | head -1 | sed 's/version = "\(.*\)"/\1/')"
+info "Current version: $CURRENT_VERSION"
+
+if ask_yn "Bump version before deploying?"; then
+    echo ""
+    printf "${BLUE}▸${NC} Bump type: [1] patch  [2] minor  [3] major  [4] custom: "
+    read -r bump_choice < /dev/tty
+
+    IFS='.' read -r V_MAJOR V_MINOR V_PATCH <<< "$CURRENT_VERSION"
+
+    case "$bump_choice" in
+        1) NEW_VERSION="${V_MAJOR}.${V_MINOR}.$((V_PATCH + 1))" ;;
+        2) NEW_VERSION="${V_MAJOR}.$((V_MINOR + 1)).0" ;;
+        3) NEW_VERSION="$((V_MAJOR + 1)).0.0" ;;
+        4)
+            printf "${BLUE}▸${NC} Enter new version (X.Y.Z): "
+            read -r NEW_VERSION < /dev/tty
+            if ! [[ "$NEW_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+                error "Invalid version format: '$NEW_VERSION'. Expected X.Y.Z"
+                exit 1
+            fi
+            ;;
+        *)
+            error "Invalid choice: '$bump_choice'. Enter 1, 2, 3, or 4."
+            exit 1
+            ;;
+    esac
+
+    sed -i '' "s/^version = \"${CURRENT_VERSION}\"/version = \"${NEW_VERSION}\"/" Cargo.toml
+    git add Cargo.toml
+    git commit -m "chore: bump to v${NEW_VERSION}"
+    git tag "v${NEW_VERSION}"
+    success "Bumped: ${CURRENT_VERSION} → ${NEW_VERSION} (tagged v${NEW_VERSION})"
+    STATUS_VERSION="bumped ${CURRENT_VERSION} → ${NEW_VERSION}"
+else
+    info "Skipped version bump (current: ${CURRENT_VERSION})"
+    STATUS_VERSION="skipped (${CURRENT_VERSION})"
+fi
 
 # =========================================================
 # 1. Pre-flight checks
@@ -58,7 +102,7 @@ success "cargo found: $(cargo --version)"
 # =========================================================
 header "2. Running tests"
 
-if ! cargo test -- --skip auth::tests --skip todoist::tests < /dev/null; then
+if ! cargo test --features tui -- --skip auth::tests --skip todoist::tests < /dev/null; then
     stty sane < /dev/tty 2>/dev/null || true
     error "Tests failed. See errors above."
     exit 1
@@ -77,12 +121,18 @@ if ! RUSTFLAGS="-D warnings" cargo build --release < /dev/null; then
     error "Build failed. See errors above."
     exit 1
 fi
-success "Build complete: target/release/task"
+success "Build complete: target/release/task (CLI)"
+
+if ! RUSTFLAGS="-D warnings" cargo build --release --features tui < /dev/null; then
+    error "TUI build failed. See errors above."
+    exit 1
+fi
+success "Build complete: target/release/task-tui (TUI)"
 
 # =========================================================
-# 4. Install binary
+# 4. Install binaries
 # =========================================================
-header "4. Installing binary"
+header "4. Installing binaries"
 
 INSTALL_DIR="${INSTALL_DIR:-$HOME/.local/bin}"
 mkdir -p "$INSTALL_DIR"
@@ -90,13 +140,19 @@ mkdir -p "$INSTALL_DIR"
 cp target/release/task "$INSTALL_DIR/task"
 chmod +x "$INSTALL_DIR/task"
 success "Installed task to $INSTALL_DIR/task"
-STATUS_BINARY="installed → $INSTALL_DIR/task"
+
+cp target/release/task-tui "$INSTALL_DIR/task-tui"
+chmod +x "$INSTALL_DIR/task-tui"
+success "Installed task-tui to $INSTALL_DIR/task-tui"
+STATUS_BINARY="installed → $INSTALL_DIR/task + $INSTALL_DIR/task-tui"
 
 WORKSPACE_DIR="$HOME/workspace"
 if [[ -d "$WORKSPACE_DIR" ]]; then
     cp target/release/task "$WORKSPACE_DIR/task"
     chmod +x "$WORKSPACE_DIR/task"
-    success "Copied task to $WORKSPACE_DIR/task (Cowork workspace)"
+    cp target/release/task-tui "$WORKSPACE_DIR/task-tui"
+    chmod +x "$WORKSPACE_DIR/task-tui"
+    success "Copied task + task-tui to $WORKSPACE_DIR (Cowork workspace)"
 fi
 
 # =========================================================
@@ -262,47 +318,6 @@ else
     fi
 fi
 
-# --- Slack Bot Token ---
-
-SLACK_TOKEN_FILE="$CONFIG_DIR/slack_token"
-
-if [[ -n "${SLACK_BOT_TOKEN:-}" ]]; then
-    success "Slack: configured (env var)"
-    STATUS_SLACK="configured (env var)"
-elif [[ -f "$SLACK_TOKEN_FILE" ]] && [[ -s "$SLACK_TOKEN_FILE" ]]; then
-    success "Slack: configured (file)"
-    STATUS_SLACK="configured (file)"
-else
-    if ask_yn "Set up Slack integration?"; then
-        echo ""
-        info "Create a Slack App at:"
-        echo "  https://api.slack.com/apps"
-        echo ""
-        info "Add User Token Scopes: channels:history, channels:read"
-        info "Install to your workspace, then copy the User OAuth Token."
-        echo ""
-        printf "${BLUE}▸${NC} Paste your Slack OAuth Token (xoxp-... or xoxb-...): "
-        read -r slack_token < /dev/tty
-
-        if [[ -n "$slack_token" ]]; then
-            if [[ "$slack_token" != xoxp-* ]] && [[ "$slack_token" != xoxb-* ]]; then
-                warn "Token doesn't start with 'xoxp-' or 'xoxb-' — saving anyway"
-            fi
-            mkdir -p "$CONFIG_DIR"
-            printf "%s" "$slack_token" > "$SLACK_TOKEN_FILE"
-            chmod 600 "$SLACK_TOKEN_FILE"
-            success "Slack token saved"
-            STATUS_SLACK="configured (file)"
-        else
-            warn "Empty token, skipped"
-            STATUS_SLACK="skipped"
-        fi
-    else
-        info "Skipped Slack setup"
-        STATUS_SLACK="skipped"
-    fi
-fi
-
 # =========================================================
 # 8. Cowork skill
 # =========================================================
@@ -326,12 +341,12 @@ fi
 # =========================================================
 header "Setup Complete"
 echo ""
-printf "  %-16s %s\n" "Binary:" "$STATUS_BINARY"
+printf "  %-16s %s\n" "Version:" "$STATUS_VERSION"
+printf "  %-16s %s\n" "Binaries:" "$STATUS_BINARY"
 printf "  %-16s %s\n" "PATH:" "$STATUS_PATH"
 printf "  %-16s %s\n" "Config:" "$STATUS_CONFIG"
 printf "  %-16s %s\n" "Todoist:" "$STATUS_TODOIST"
 printf "  %-16s %s\n" "Claude API:" "$STATUS_CLAUDE"
-printf "  %-16s %s\n" "Slack:" "$STATUS_SLACK"
 printf "  %-16s %s\n" "Skill:" "$STATUS_SKILL"
 echo ""
 success "Done! Run 'task' to get started."

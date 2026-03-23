@@ -1,10 +1,11 @@
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::mpsc;
 use std::thread;
 
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 // ---------------------------------------------------------------------------
 // 1.1 Config helper
@@ -25,7 +26,7 @@ pub fn claude_code_dir() -> PathBuf {
 }
 
 // ---------------------------------------------------------------------------
-// 2.1–2.3 Types
+// Types
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -36,29 +37,52 @@ pub enum ClaudeSessionStatus {
     Done,
 }
 
+/// A single structured output event stored in the session ring buffer.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum SessionOutputEvent {
+    Text(String),
+    ToolCall {
+        name: String,
+        input_preview: String,
+        result_lines: Vec<String>,
+        collapsed: bool,
+    },
+    PermissionRequest {
+        tool: String,
+        input_preview: String,
+    },
+    TurnSeparator,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ClaudeSession {
     pub id: usize,
     pub label: String,
     pub working_dir: PathBuf,
     pub status: ClaudeSessionStatus,
-    /// Ring buffer — max MAX_OUTPUT_LINES entries
-    pub output: Vec<String>,
+    pub output: Vec<SessionOutputEvent>,
+    pub session_id: Option<String>,
     #[serde(skip)]
     pub child: Option<Child>,
+    #[serde(skip)]
+    pub stdin: Option<ChildStdin>,
     #[serde(skip)]
     pub rx: Option<mpsc::Receiver<SessionEvent>>,
 }
 
+/// Events sent from the reader thread to the TUI polling loop.
 #[derive(Debug)]
 pub enum SessionEvent {
-    Line(String),
+    OutputEvent(SessionOutputEvent),
+    AppendToolResult { lines: Vec<String> },
+    PermissionRequest { tool: String, input_preview: String },
+    SessionIdCaptured(String),
     Done,
     Error(String),
 }
 
 // ---------------------------------------------------------------------------
-// 4.1 Context builder
+// Context builder
 // ---------------------------------------------------------------------------
 
 pub fn build_session_context(title: &str, body: &str) -> String {
@@ -70,7 +94,7 @@ pub fn build_session_context(title: &str, body: &str) -> String {
 }
 
 // ---------------------------------------------------------------------------
-// 4.2–4.3 Session launch
+// Session launch
 // ---------------------------------------------------------------------------
 
 pub fn claude_available() -> bool {
@@ -92,21 +116,29 @@ pub fn launch_claude_session(
 
     let mut child = Command::new("claude")
         .arg("--print")
+        .arg("--output-format")
+        .arg("stream-json")
+        .arg("--verbose")
         .arg("-p")
         .arg(&context)
         .current_dir(&working_dir)
+        .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .spawn()
         .map_err(|e| format!("Failed to spawn claude: {}", e))?;
 
+    let stdin = child.stdin.take();
     let stdout = child.stdout.take().expect("stdout was piped");
+
     thread::spawn(move || {
         let reader = BufReader::new(stdout);
         for line in reader.lines() {
             match line {
                 Ok(l) => {
-                    let _ = tx.send(SessionEvent::Line(l));
+                    for event in parse_stream_json_line(&l) {
+                        let _ = tx.send(event);
+                    }
                 }
                 Err(e) => {
                     let _ = tx.send(SessionEvent::Error(e.to_string()));
@@ -123,32 +155,59 @@ pub fn launch_claude_session(
         working_dir,
         status: ClaudeSessionStatus::Running,
         output: Vec::new(),
+        session_id: None,
         child: Some(child),
+        stdin,
         rx: Some(rx),
     })
 }
 
 pub fn continue_claude_session(session: &mut ClaudeSession, message: String) -> Result<(), String> {
+    push_output_event(&mut session.output, SessionOutputEvent::TurnSeparator);
+
     let (tx, rx) = mpsc::channel::<SessionEvent>();
 
-    let mut child = Command::new("claude")
-        .arg("--print")
-        .arg("--continue")
-        .arg("-p")
+    // Use --resume <id> if we captured a session_id, otherwise fall back to --continue
+    let resume_arg: Box<dyn AsRef<std::ffi::OsStr>> = if let Some(ref sid) = session.session_id {
+        Box::new(sid.clone())
+    } else {
+        Box::new("--continue")
+    };
+
+    let mut cmd = Command::new("claude");
+    cmd.arg("--print")
+        .arg("--output-format")
+        .arg("stream-json")
+        .arg("--verbose");
+
+    if session.session_id.is_some() {
+        cmd.arg("--resume").arg(resume_arg.as_ref());
+    } else {
+        cmd.arg("--continue");
+    }
+
+    cmd.arg("-p")
         .arg(&message)
         .current_dir(&session.working_dir)
+        .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
+        .stderr(Stdio::null());
+
+    let mut child = cmd
         .spawn()
         .map_err(|e| format!("Failed to spawn claude: {}", e))?;
 
+    let stdin = child.stdin.take();
     let stdout = child.stdout.take().expect("stdout was piped");
+
     thread::spawn(move || {
         let reader = BufReader::new(stdout);
         for line in reader.lines() {
             match line {
                 Ok(l) => {
-                    let _ = tx.send(SessionEvent::Line(l));
+                    for event in parse_stream_json_line(&l) {
+                        let _ = tx.send(event);
+                    }
                 }
                 Err(e) => {
                     let _ = tx.send(SessionEvent::Error(e.to_string()));
@@ -160,26 +219,185 @@ pub fn continue_claude_session(session: &mut ClaudeSession, message: String) -> 
     });
 
     session.child = Some(child);
+    session.stdin = stdin;
     session.rx = Some(rx);
     session.status = ClaudeSessionStatus::Running;
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
-// Ring buffer helper
-// ---------------------------------------------------------------------------
-
-const MAX_OUTPUT_LINES: usize = 500;
-
-pub fn push_output_line(output: &mut Vec<String>, line: String) {
-    if output.len() >= MAX_OUTPUT_LINES {
-        output.remove(0);
+/// Write a permission response to the session subprocess stdin.
+/// `allowed`: true → "y\n", false → "n\n"
+pub fn respond_to_permission(session: &mut ClaudeSession, allowed: bool) {
+    if let Some(ref mut stdin) = session.stdin {
+        let response = if allowed { "y\n" } else { "n\n" };
+        let _ = stdin.write_all(response.as_bytes());
+        let _ = stdin.flush();
     }
-    output.push(line);
 }
 
 // ---------------------------------------------------------------------------
-// 10.1–10.6 Persistence
+// Stream-JSON parser
+// ---------------------------------------------------------------------------
+
+fn extract_tool_input_preview(input: &Value) -> String {
+    input["command"]
+        .as_str()
+        .or_else(|| input["description"].as_str())
+        .or_else(|| input["prompt"].as_str())
+        .or_else(|| input["path"].as_str())
+        .or_else(|| input["pattern"].as_str())
+        .unwrap_or("")
+        .lines()
+        .next()
+        .unwrap_or("")
+        .to_string()
+}
+
+/// Parse a single newline-delimited stream-json event and return zero or more `SessionEvent`s.
+pub fn parse_stream_json_line(raw: &str) -> Vec<SessionEvent> {
+    let v: Value = match serde_json::from_str(raw) {
+        Ok(v) => v,
+        Err(_) => {
+            // Not JSON — emit as plain text if non-empty
+            let s = raw.trim();
+            if s.is_empty() {
+                return vec![];
+            }
+            return vec![SessionEvent::OutputEvent(SessionOutputEvent::Text(s.to_string()))];
+        }
+    };
+
+    let event_type = v["type"].as_str().unwrap_or("");
+
+    match event_type {
+        "system" => {
+            // Check for permission_request subtype
+            let subtype = v["subtype"].as_str().unwrap_or("");
+            if subtype.contains("permission") {
+                let tool = v["tool_name"]
+                    .as_str()
+                    .or_else(|| v["tool"].as_str())
+                    .unwrap_or("tool")
+                    .to_string();
+                let input_preview = extract_tool_input_preview(&v["input"]);
+                return vec![SessionEvent::PermissionRequest { tool, input_preview }];
+            }
+            vec![]
+        }
+
+        "result" => {
+            // Capture session_id
+            let mut events = vec![];
+            if let Some(sid) = v["session_id"].as_str() {
+                events.push(SessionEvent::SessionIdCaptured(sid.to_string()));
+            }
+            events
+        }
+
+        "assistant" => {
+            let mut events = Vec::new();
+            if let Some(content) = v["message"]["content"].as_array() {
+                for item in content {
+                    match item["type"].as_str().unwrap_or("") {
+                        "thinking" => {
+                            events.push(SessionEvent::OutputEvent(SessionOutputEvent::Text(
+                                "💭 thinking...".to_string(),
+                            )));
+                        }
+                        "tool_use" => {
+                            let name = item["name"].as_str().unwrap_or("tool").to_string();
+                            let input_preview = extract_tool_input_preview(&item["input"]);
+                            events.push(SessionEvent::OutputEvent(SessionOutputEvent::ToolCall {
+                                name,
+                                input_preview,
+                                result_lines: Vec::new(),
+                                collapsed: true,
+                            }));
+                        }
+                        "text" => {
+                            let text = item["text"].as_str().unwrap_or("");
+                            for line in text.lines() {
+                                events.push(SessionEvent::OutputEvent(SessionOutputEvent::Text(
+                                    line.to_string(),
+                                )));
+                            }
+                            if text.is_empty() {
+                                events.push(SessionEvent::OutputEvent(SessionOutputEvent::Text(
+                                    String::new(),
+                                )));
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            events
+        }
+
+        "user" => {
+            let mut events = Vec::new();
+            if let Some(content) = v["message"]["content"].as_array() {
+                for item in content {
+                    if item["type"].as_str() == Some("tool_result") {
+                        let output = v["tool_use_result"]["stdout"]
+                            .as_str()
+                            .or_else(|| item["content"].as_str())
+                            .unwrap_or("");
+                        let mut lines: Vec<String> =
+                            output.lines().take(50).map(|l| strip_ansi(l)).collect();
+                        let total = output.lines().count();
+                        if total > 50 {
+                            lines.push(format!("… ({} more lines)", total - 50));
+                        }
+                        events.push(SessionEvent::AppendToolResult { lines });
+                    }
+                }
+            }
+            events
+        }
+
+        _ => vec![],
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Ring buffer
+// ---------------------------------------------------------------------------
+
+const MAX_OUTPUT_EVENTS: usize = 500;
+
+pub const TURN_SEPARATOR_LABEL: &str = "──── reply ────";
+
+/// Push a `SessionOutputEvent` into the ring buffer, evicting oldest if full.
+pub fn push_output_event(output: &mut Vec<SessionOutputEvent>, event: SessionOutputEvent) {
+    if output.len() >= MAX_OUTPUT_EVENTS {
+        output.remove(0);
+    }
+    output.push(event);
+}
+
+/// Strip ANSI escape sequences (ESC [ ... cmd_byte) from a string.
+pub fn strip_ansi(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out = String::with_capacity(s.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'\x1b' && i + 1 < bytes.len() && bytes[i + 1] == b'[' {
+            i += 2;
+            while i < bytes.len() && !(0x40..=0x7e).contains(&bytes[i]) {
+                i += 1;
+            }
+            i += 1;
+        } else {
+            out.push(bytes[i] as char);
+            i += 1;
+        }
+    }
+    out
+}
+
+// ---------------------------------------------------------------------------
+// Persistence
 // ---------------------------------------------------------------------------
 
 pub fn session_dir(task_dir: &Path) -> PathBuf {
@@ -259,7 +477,6 @@ pub fn load_sessions(task_dir: &Path) -> Vec<ClaudeSession> {
         .filter_map(|e| {
             let data = std::fs::read_to_string(e.path()).ok()?;
             let mut session: ClaudeSession = serde_json::from_str(&data).ok()?;
-            // Loaded sessions are never Running
             if session.status == ClaudeSessionStatus::Running {
                 session.status = ClaudeSessionStatus::Failed;
             }
@@ -274,6 +491,28 @@ pub fn load_sessions(task_dir: &Path) -> Vec<ClaudeSession> {
 mod tests {
     use super::*;
     use std::path::PathBuf;
+
+    #[test]
+    fn test_strip_ansi_color_codes() {
+        assert_eq!(strip_ansi("\x1b[32mHello\x1b[0m"), "Hello");
+    }
+
+    #[test]
+    fn test_strip_ansi_plain_text_unchanged() {
+        assert_eq!(strip_ansi("plain text"), "plain text");
+    }
+
+    #[test]
+    fn test_strip_ansi_partial_sequence_at_end() {
+        let s = "ok\x1b[";
+        let result = strip_ansi(s);
+        assert!(!result.contains('\x1b'));
+    }
+
+    #[test]
+    fn test_strip_ansi_multiple_sequences() {
+        assert_eq!(strip_ansi("\x1b[1m\x1b[33mWarn\x1b[0m: msg"), "Warn: msg");
+    }
 
     #[test]
     fn test_build_session_context_with_body() {
@@ -295,27 +534,92 @@ mod tests {
     }
 
     #[test]
-    fn test_push_output_line_ring_buffer() {
+    fn test_push_output_event_ring_buffer() {
         let mut output = Vec::new();
-        for i in 0..MAX_OUTPUT_LINES + 10 {
-            push_output_line(&mut output, format!("line {}", i));
+        for i in 0..MAX_OUTPUT_EVENTS + 10 {
+            push_output_event(&mut output, SessionOutputEvent::Text(format!("line {}", i)));
         }
-        assert_eq!(output.len(), MAX_OUTPUT_LINES);
-        assert_eq!(output[0], "line 10");
+        assert_eq!(output.len(), MAX_OUTPUT_EVENTS);
+        // Oldest 10 evicted — first remaining is "line 10"
+        if let SessionOutputEvent::Text(s) = &output[0] {
+            assert_eq!(s, "line 10");
+        } else {
+            panic!("expected Text event");
+        }
+    }
+
+    #[test]
+    fn test_parse_stream_json_text_event() {
+        let json = r#"{"type":"assistant","message":{"content":[{"type":"text","text":"Hello\nWorld"}]}}"#;
+        let events = parse_stream_json_line(json);
+        assert_eq!(events.len(), 2);
+        if let SessionEvent::OutputEvent(SessionOutputEvent::Text(s)) = &events[0] {
+            assert_eq!(s, "Hello");
+        } else {
+            panic!("expected Text");
+        }
+    }
+
+    #[test]
+    fn test_parse_stream_json_tool_use() {
+        let json = r#"{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Bash","input":{"command":"ls -la"}}]}}"#;
+        let events = parse_stream_json_line(json);
+        assert_eq!(events.len(), 1);
+        if let SessionEvent::OutputEvent(SessionOutputEvent::ToolCall { name, input_preview, collapsed, .. }) = &events[0] {
+            assert_eq!(name, "Bash");
+            assert_eq!(input_preview, "ls -la");
+            assert!(*collapsed);
+        } else {
+            panic!("expected ToolCall");
+        }
+    }
+
+    #[test]
+    fn test_parse_stream_json_tool_result() {
+        let json = r#"{"type":"user","message":{"content":[{"type":"tool_result","content":"output here"}]},"tool_use_result":{"stdout":"output here","stderr":"","interrupted":false,"isImage":false,"noOutputExpected":false}}"#;
+        let events = parse_stream_json_line(json);
+        assert_eq!(events.len(), 1);
+        if let SessionEvent::AppendToolResult { lines } = &events[0] {
+            assert_eq!(lines[0], "output here");
+        } else {
+            panic!("expected AppendToolResult");
+        }
+    }
+
+    #[test]
+    fn test_parse_stream_json_session_id() {
+        let json = r#"{"type":"result","subtype":"success","session_id":"abc-123","result":"done"}"#;
+        let events = parse_stream_json_line(json);
+        assert!(events.iter().any(|e| matches!(e, SessionEvent::SessionIdCaptured(s) if s == "abc-123")));
+    }
+
+    #[test]
+    fn test_parse_stream_json_system_skipped() {
+        let json = r#"{"type":"system","subtype":"hook_started","hook_name":"test"}"#;
+        let events = parse_stream_json_line(json);
+        assert!(events.is_empty());
+    }
+
+    fn make_session(id: usize) -> ClaudeSession {
+        ClaudeSession {
+            id,
+            label: format!("session-{}", id),
+            working_dir: PathBuf::from("/tmp"),
+            status: ClaudeSessionStatus::Done,
+            output: Vec::new(),
+            session_id: None,
+            child: None,
+            stdin: None,
+            rx: None,
+        }
     }
 
     #[test]
     fn test_status_never_running_after_load() {
         let dir = tempfile::tempdir().unwrap();
-        let session = ClaudeSession {
-            id: 1,
-            label: "test".to_string(),
-            working_dir: PathBuf::from("/tmp"),
-            status: ClaudeSessionStatus::Running,
-            output: vec!["hello".to_string()],
-            child: None,
-            rx: None,
-        };
+        let mut session = make_session(1);
+        session.status = ClaudeSessionStatus::Running;
+        session.output.push(SessionOutputEvent::Text("hello".to_string()));
         save_session(dir.path(), &session).unwrap();
         let loaded = load_sessions(dir.path());
         assert_eq!(loaded.len(), 1);
@@ -325,15 +629,12 @@ mod tests {
     #[test]
     fn test_save_load_round_trip() {
         let dir = tempfile::tempdir().unwrap();
-        let session = ClaudeSession {
-            id: 42,
-            label: "my-feature".to_string(),
-            working_dir: PathBuf::from("/projects/foo"),
-            status: ClaudeSessionStatus::WaitingForInput,
-            output: vec!["line 1".to_string(), "line 2".to_string()],
-            child: None,
-            rx: None,
-        };
+        let mut session = make_session(42);
+        session.label = "my-feature".to_string();
+        session.working_dir = PathBuf::from("/projects/foo");
+        session.status = ClaudeSessionStatus::WaitingForInput;
+        session.output.push(SessionOutputEvent::Text("line 1".to_string()));
+        session.output.push(SessionOutputEvent::Text("line 2".to_string()));
         save_session(dir.path(), &session).unwrap();
         let loaded = load_sessions(dir.path());
         assert_eq!(loaded.len(), 1);
@@ -347,16 +648,7 @@ mod tests {
     fn test_retention_deletes_oldest() {
         let dir = tempfile::tempdir().unwrap();
         for i in 0..35usize {
-            let session = ClaudeSession {
-                id: i,
-                label: format!("session-{}", i),
-                working_dir: PathBuf::from("/tmp"),
-                status: ClaudeSessionStatus::Done,
-                output: Vec::new(),
-                child: None,
-                rx: None,
-            };
-            save_session(dir.path(), &session).unwrap();
+            save_session(dir.path(), &make_session(i)).unwrap();
         }
         let loaded = load_sessions(dir.path());
         assert_eq!(loaded.len(), 30);

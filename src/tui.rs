@@ -42,41 +42,14 @@ mod theme {
 
 use crate::auth;
 use crate::claude_session::{
-    self, ClaudeSession, ClaudeSessionStatus, SessionEvent,
+    self, ClaudeSession, ClaudeSessionStatus, SessionEvent, SessionOutputEvent,
 };
 use crate::config;
 use crate::nlp::{self, ApiMessage, NlpAction};
-use crate::slack;
 use crate::storage;
 use crate::task::{Priority, Status, Task, TaskFile};
-use crate::todoist;
-
-const SPINNER_CHARS: &[char] = &['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
-
 // -- Types --
 
-#[derive(Debug, Clone, PartialEq)]
-enum BgTaskKind {
-    TodoistImport,
-    SlackSync,
-    SlackChannelFetch,
-}
-
-impl BgTaskKind {
-    fn label(&self) -> &'static str {
-        match self {
-            BgTaskKind::TodoistImport => "Importing from Todoist",
-            BgTaskKind::SlackSync => "Syncing Slack",
-            BgTaskKind::SlackChannelFetch => "Loading channels",
-        }
-    }
-}
-
-enum BgTaskResult {
-    TodoistImport { imported: usize, skipped: usize, task_file: TaskFile },
-    SlackSync { inbox: slack::SlackInbox, new_count: usize },
-    SlackChannelFetch { channels: Vec<slack::SlackChannel>, selected: Vec<bool>, scope_warnings: Vec<String> },
-}
 
 #[derive(Debug, Clone, PartialEq)]
 enum Mode {
@@ -97,13 +70,10 @@ enum Mode {
     EditingNote,
     ConfirmingNoteExit,
     NotePicker,
-    SlackInbox,
-    SlackReplying,
-    SlackChannelPicker,
-    SlackCreatingTask,
     SessionDirectoryPicker,
     Sessions,
     SessionReply,
+    PermissionModal,
 }
 
 #[derive(Debug, Clone)]
@@ -907,16 +877,6 @@ struct App {
     note_picker_items: Vec<String>,
     note_picker_selected: usize,
     note_picker_task_idx: Option<usize>,
-    slack_inbox: slack::SlackInbox,
-    slack_inbox_selected: usize,
-    slack_channels: Vec<slack::SlackChannel>,
-    slack_channel_selected: Vec<bool>,
-    slack_channel_idx: usize,
-    slack_channel_filter: String,
-    slack_preview_visible: bool,
-    slack_reply_cursor: usize,
-    bg_task: Option<(BgTaskKind, mpsc::Receiver<Result<BgTaskResult, String>>)>,
-    bg_spinner_frame: u8,
     // Claude sessions
     claude_sessions: Vec<ClaudeSession>,
     next_session_id: usize,
@@ -927,6 +887,10 @@ struct App {
     session_reply_input: String,
     session_viewing_output: bool,
     session_output_scroll: usize,
+    session_output_follow: bool,
+    session_focused_event: usize,
+    permission_modal_tool: String,
+    permission_modal_input: String,
 }
 
 impl App {
@@ -960,16 +924,6 @@ impl App {
             note_picker_items: Vec::new(),
             note_picker_selected: 0,
             note_picker_task_idx: None,
-            slack_inbox: slack::SlackInbox::new(),
-            slack_inbox_selected: 0,
-            slack_channels: Vec::new(),
-            slack_channel_selected: Vec::new(),
-            slack_channel_idx: 0,
-            slack_channel_filter: String::new(),
-            slack_preview_visible: true,
-            slack_reply_cursor: 0,
-            bg_task: None,
-            bg_spinner_frame: 0,
             claude_sessions: Vec::new(),
             next_session_id: 0,
             session_selected: 0,
@@ -979,6 +933,10 @@ impl App {
             session_reply_input: String::new(),
             session_viewing_output: false,
             session_output_scroll: 0,
+            session_output_follow: true,
+            session_focused_event: 0,
+            permission_modal_tool: String::new(),
+            permission_modal_input: String::new(),
         };
         app.table_state.select(Some(0));
         // Load persisted sessions
@@ -1127,14 +1085,26 @@ fn event_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut A
         {
             let n = app.claude_sessions.len();
             for i in 0..n {
-                let mut lines_to_add: Vec<String> = Vec::new();
+                let mut events_to_add: Vec<SessionOutputEvent> = Vec::new();
+                let mut tool_result_batches: Vec<Vec<String>> = Vec::new();
                 let mut new_status: Option<ClaudeSessionStatus> = None;
                 let mut clear_rx = false;
+                let mut captured_session_id: Option<String> = None;
+                let mut permission_req: Option<(String, String)> = None;
 
                 if let Some(ref rx) = app.claude_sessions[i].rx {
                     loop {
                         match rx.try_recv() {
-                            Ok(SessionEvent::Line(line)) => lines_to_add.push(line),
+                            Ok(SessionEvent::OutputEvent(e)) => events_to_add.push(e),
+                            Ok(SessionEvent::AppendToolResult { lines }) => {
+                                tool_result_batches.push(lines);
+                            }
+                            Ok(SessionEvent::SessionIdCaptured(sid)) => {
+                                captured_session_id = Some(sid);
+                            }
+                            Ok(SessionEvent::PermissionRequest { tool, input_preview }) => {
+                                permission_req = Some((tool, input_preview));
+                            }
                             Ok(SessionEvent::Done) => {
                                 new_status = Some(ClaudeSessionStatus::WaitingForInput);
                                 clear_rx = true;
@@ -1143,7 +1113,7 @@ fn event_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut A
                             Ok(SessionEvent::Error(e)) => {
                                 new_status = Some(ClaudeSessionStatus::Failed);
                                 clear_rx = true;
-                                lines_to_add.push(format!("Error: {}", e));
+                                events_to_add.push(SessionOutputEvent::Text(format!("Error: {}", e)));
                                 break;
                             }
                             Err(mpsc::TryRecvError::Empty) => break,
@@ -1156,8 +1126,39 @@ fn event_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut A
                     }
                 }
 
-                for line in lines_to_add {
-                    claude_session::push_output_line(&mut app.claude_sessions[i].output, line);
+                let had_new = !events_to_add.is_empty() || !tool_result_batches.is_empty();
+
+                for event in events_to_add {
+                    claude_session::push_output_event(&mut app.claude_sessions[i].output, event);
+                }
+                // Append tool results to the last ToolCall in the buffer
+                for lines in tool_result_batches {
+                    let output = &mut app.claude_sessions[i].output;
+                    if let Some(SessionOutputEvent::ToolCall { result_lines, .. }) =
+                        output.iter_mut().rev().find(|e| matches!(e, SessionOutputEvent::ToolCall { .. }))
+                    {
+                        result_lines.extend(lines);
+                    }
+                }
+                if let Some(sid) = captured_session_id {
+                    app.claude_sessions[i].session_id = Some(sid);
+                }
+                if let Some((tool, input_preview)) = permission_req {
+                    app.permission_modal_tool = tool;
+                    app.permission_modal_input = input_preview;
+                    if i == app.session_selected {
+                        app.mode = Mode::PermissionModal;
+                    } else {
+                        app.claude_sessions[i].status = ClaudeSessionStatus::WaitingForInput;
+                    }
+                }
+                if had_new
+                    && app.session_viewing_output
+                    && i == app.session_selected
+                    && app.session_output_follow
+                {
+                    let total = app.claude_sessions[i].output.len();
+                    app.session_output_scroll = total.saturating_sub(1);
                 }
                 if let Some(status) = new_status {
                     app.claude_sessions[i].status = status;
@@ -1165,31 +1166,13 @@ fn event_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut A
                 if clear_rx {
                     app.claude_sessions[i].rx = None;
                     app.claude_sessions[i].child = None;
+                    app.claude_sessions[i].stdin = None;
                     let task_dir = app.task_dir();
                     let _ = claude_session::save_session(&task_dir, &app.claude_sessions[i]);
                 }
             }
         }
 
-        // Check for background task result
-        if let Some((ref kind, ref rx)) = app.bg_task {
-            match rx.try_recv() {
-                Ok(result) => {
-                    let kind = kind.clone();
-                    app.bg_task = None;
-                    app.bg_spinner_frame = 0;
-                    apply_bg_result(app, &kind, result)?;
-                }
-                Err(mpsc::TryRecvError::Empty) => {
-                    app.bg_spinner_frame = app.bg_spinner_frame.wrapping_add(1);
-                }
-                Err(mpsc::TryRecvError::Disconnected) => {
-                    app.bg_task = None;
-                    app.bg_spinner_frame = 0;
-                    app.status_message = Some("Operation failed unexpectedly".to_string());
-                }
-            }
-        }
 
         terminal
             .draw(|frame| draw(frame, app))
@@ -1322,18 +1305,6 @@ fn handle_key(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut A
             handle_note_picker(app, key)?;
             Ok(false)
         }
-        Mode::SlackInbox | Mode::SlackReplying => {
-            handle_slack_inbox(app, key)?;
-            Ok(false)
-        }
-        Mode::SlackCreatingTask => {
-            handle_slack_creating_task(app, key)?;
-            Ok(false)
-        }
-        Mode::SlackChannelPicker => {
-            handle_slack_channel_picker(app, key)?;
-            Ok(false)
-        }
         Mode::SessionDirectoryPicker => {
             handle_session_dir_picker(app, key)?;
             Ok(false)
@@ -1346,51 +1317,13 @@ fn handle_key(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut A
             handle_session_reply(app, key)?;
             Ok(false)
         }
+        Mode::PermissionModal => {
+            handle_permission_modal(app, key)?;
+            Ok(false)
+        }
     }
 }
 
-fn apply_bg_result(app: &mut App, _kind: &BgTaskKind, result: Result<BgTaskResult, String>) -> Result<(), String> {
-    match result {
-        Ok(bg_result) => match bg_result {
-            BgTaskResult::TodoistImport { imported, skipped, task_file } => {
-                app.task_file = task_file;
-                app.save()?;
-                app.clamp_selection();
-                app.status_message = Some(format!(
-                    "Imported {} tasks, skipped {} (already exported)",
-                    imported, skipped
-                ));
-            }
-            BgTaskResult::SlackSync { inbox, new_count } => {
-                app.slack_inbox = inbox;
-                let open_count = app.slack_inbox.open_messages().len();
-                if open_count == 0 {
-                    app.status_message = Some("No unread Slack messages".to_string());
-                } else {
-                    app.slack_inbox_selected = 0;
-                    app.mode = Mode::SlackInbox;
-                    if new_count > 0 {
-                        app.status_message = Some(format!("Synced {} new messages", new_count));
-                    }
-                }
-            }
-            BgTaskResult::SlackChannelFetch { channels, selected, scope_warnings } => {
-                app.slack_channels = channels;
-                app.slack_channel_selected = selected;
-                app.slack_channel_idx = 0;
-                app.slack_channel_filter.clear();
-                app.mode = Mode::SlackChannelPicker;
-                if !scope_warnings.is_empty() {
-                    app.status_message = Some("Some conversation types skipped — update OAuth scopes for full access".to_string());
-                }
-            }
-        },
-        Err(e) => {
-            app.status_message = Some(e);
-        }
-    }
-    Ok(())
-}
 
 fn handle_normal(app: &mut App, key: KeyCode) -> Result<bool, String> {
     // Clear any status message on keypress
@@ -1547,28 +1480,6 @@ fn handle_normal(app: &mut App, key: KeyCode) -> Result<bool, String> {
                 app.mode = Mode::SessionDirectoryPicker;
             }
         }
-        KeyCode::Char('i') => {
-            if app.bg_task.is_some() {
-                app.status_message = Some("Operation in progress, please wait".to_string());
-            } else {
-                match auth::read_token() {
-                    None => {
-                        app.status_message = Some("No Todoist token. Run `task auth todoist` from the CLI.".to_string());
-                    }
-                    Some(token) => {
-                        let mut task_file = app.task_file.clone();
-                        let (tx, rx) = mpsc::channel();
-                        std::thread::spawn(move || {
-                            let result = todoist::run_import(&token, &mut task_file, false)
-                                .map(|(imported, skipped)| BgTaskResult::TodoistImport { imported, skipped, task_file });
-                            let _ = tx.send(result);
-                        });
-                        app.bg_task = Some((BgTaskKind::TodoistImport, rx));
-                        app.bg_spinner_frame = 0;
-                    }
-                }
-            }
-        }
         KeyCode::Char(':') => {
             app.mode = Mode::NlpChat;
             app.input_buffer.clear();
@@ -1642,68 +1553,8 @@ fn handle_normal(app: &mut App, key: KeyCode) -> Result<bool, String> {
                 }
             }
         }
-        KeyCode::Char('s') => {
-            if app.bg_task.is_some() {
-                app.status_message = Some("Operation in progress, please wait".to_string());
-            } else {
-                match auth::read_slack_token() {
-                    None => {
-                        app.status_message = Some("No Slack token. Run `task auth slack` from the CLI.".to_string());
-                    }
-                    Some(token) => {
-                        let channels_config = config::read_config_value("slack-channels");
-                        let has_channels = channels_config.as_ref().map_or(false, |s| !s.is_empty());
-                        let channels = app.slack_channels.clone();
-                        let (tx, rx) = mpsc::channel();
-                        if has_channels {
-                            let channel_str = channels_config.unwrap();
-                            let channel_ids: Vec<String> = channel_str.split(',')
-                                .map(|s| s.trim().to_string())
-                                .filter(|s| !s.is_empty())
-                                .collect();
-                            std::thread::spawn(move || {
-                                let result = sync_slack_inbox_bg(&token, &channel_ids, &channels);
-                                let _ = tx.send(result);
-                            });
-                        } else {
-                            // Auto-discover: fetch all member channels and sync unread
-                            std::thread::spawn(move || {
-                                let result = auto_discover_sync_bg(&token);
-                                let _ = tx.send(result);
-                            });
-                        }
-                        app.bg_task = Some((BgTaskKind::SlackSync, rx));
-                        app.bg_spinner_frame = 0;
-                    }
-                }
-            }
-        }
-        KeyCode::Char('S') => {
-            if app.bg_task.is_some() {
-                app.status_message = Some("Operation in progress, please wait".to_string());
-            } else {
-                match auth::read_slack_token() {
-                    None => {
-                        app.status_message = Some("No Slack token. Run `task auth slack` from the CLI.".to_string());
-                    }
-                    Some(token) => {
-                        let (tx, rx) = mpsc::channel();
-                        std::thread::spawn(move || {
-                            let result = fetch_channels_bg(&token);
-                            let _ = tx.send(result);
-                        });
-                        app.bg_task = Some((BgTaskKind::SlackChannelFetch, rx));
-                        app.bg_spinner_frame = 0;
-                    }
-                }
-            }
-        }
         KeyCode::Esc => {
-            if app.bg_task.is_some() {
-                app.bg_task = None;
-                app.bg_spinner_frame = 0;
-                app.status_message = None;
-            } else if app.filter.is_active() {
+            if app.filter.is_active() {
                 app.filter = Filter::default();
                 app.selected = 0;
                 app.table_state.select(Some(0));
@@ -1943,498 +1794,6 @@ fn handle_note_picker(app: &mut App, key: KeyCode) -> Result<(), String> {
         KeyCode::Esc => {
             app.note_picker_task_idx = None;
             app.mode = Mode::Normal;
-        }
-        _ => {}
-    }
-    Ok(())
-}
-
-fn sync_slack_inbox_bg(token: &str, channel_ids: &[String], known_channels: &[slack::SlackChannel]) -> Result<BgTaskResult, String> {
-    let client = reqwest::blocking::Client::new();
-    let mut inbox = slack::load_inbox();
-
-    if inbox.workspace.is_empty() {
-        inbox.workspace = slack::fetch_workspace_name(&client, token).unwrap_or_default();
-    }
-
-    let mut user_cache = slack::read_user_cache();
-    let mut new_count = 0;
-
-    // Cap oldest to 72 hours ago — compute once for all channels
-    let cutoff_72h = format!("{:.6}", Utc::now().timestamp() as f64 - 72.0 * 3600.0);
-
-    // Fetch all channels concurrently in batches of 6
-    let mut channel_results: Vec<(String, Vec<slack::SlackMessage>)> = Vec::new();
-    for chunk in channel_ids.chunks(6) {
-        std::thread::scope(|s| {
-            let client = &client; // reborrow as &Client (Copy) so move closures can copy it
-            let handles: Vec<_> = chunk.iter().map(|channel_id| {
-                let cutoff = &cutoff_72h;
-                s.spawn(move || -> Option<(String, Vec<slack::SlackMessage>)> {
-                    let last_read = match slack::fetch_channel_info(client, token, channel_id) {
-                        Ok(info) => {
-                            if !info.has_unread() {
-                                return None;
-                            }
-                            info.last_read
-                        }
-                        Err(_) => None,
-                    };
-                    let oldest = match &last_read {
-                        Some(lr) if lr.as_str() > cutoff.as_str() => lr.clone(),
-                        _ => cutoff.to_string(),
-                    };
-                    match slack::fetch_messages(&client, token, channel_id, Some(&oldest), 200) {
-                        Ok(messages) if !messages.is_empty() => Some((channel_id.clone(), messages)),
-                        Ok(_) => None,
-                        Err(e) => {
-                            eprintln!("Warning: skipping channel {}: {}", channel_id, e);
-                            None
-                        }
-                    }
-                })
-            }).collect();
-
-            for handle in handles {
-                if let Ok(Some(result)) = handle.join() {
-                    channel_results.push(result);
-                }
-            }
-        });
-    }
-
-    // Batch-resolve all unknown user IDs after all channel fetches complete
-    let all_author_ids: Vec<String> = channel_results.iter()
-        .flat_map(|(_, msgs)| msgs.iter().filter_map(|m| m.user.clone()))
-        .collect();
-    slack::resolve_users_batch(&client, token, &all_author_ids, &mut user_cache);
-
-    // Add messages to inbox
-    for (channel_id, messages) in channel_results {
-        let ch_name = known_channels.iter()
-            .find(|c| c.id == channel_id)
-            .map(|c| c.display_name.clone())
-            .unwrap_or_else(|| channel_id.clone());
-
-        for msg in &messages {
-            // Skip system messages (joins, topic changes, etc.) and empty messages
-            if msg.subtype.is_some() || msg.text.trim().is_empty() {
-                continue;
-            }
-            if slack::inbox_has_message(&inbox, &channel_id, &msg.ts) {
-                continue;
-            }
-            let user_name = msg.user.as_ref()
-                .and_then(|uid| user_cache.get(uid).cloned())
-                .unwrap_or_else(|| msg.user.clone().unwrap_or_else(|| "unknown".to_string()));
-            let user_id = msg.user.clone().unwrap_or_default();
-            let link = slack::deep_link(&inbox.workspace, &channel_id, &msg.ts);
-
-            inbox.messages.push(slack::SlackInboxMessage {
-                channel_id: channel_id.clone(),
-                channel_name: ch_name.clone(),
-                user_id,
-                user_name,
-                text: msg.text.clone(),
-                ts: msg.ts.clone(),
-                status: slack::InboxMessageStatus::Open,
-                link,
-            });
-            new_count += 1;
-        }
-    }
-
-    let _ = slack::write_user_cache(&user_cache);
-    slack::prune_done_messages(&mut inbox);
-    inbox.last_sync = Some(Utc::now());
-    slack::save_inbox(&inbox)?;
-
-    Ok(BgTaskResult::SlackSync { inbox, new_count })
-}
-
-fn auto_discover_sync_bg(token: &str) -> Result<BgTaskResult, String> {
-    let client = reqwest::blocking::Client::new();
-    let result = slack::fetch_channels(&client, token, None)?;
-    let mut channels = result.channels;
-    if channels.is_empty() {
-        return Err("No Slack channels found.".to_string());
-    }
-    let mut cache = slack::read_user_cache();
-    slack::resolve_channel_display_names(&mut channels, &client, token, &mut cache);
-    let _ = slack::write_user_cache(&cache);
-
-    let member_ids: Vec<String> = channels.iter()
-        .filter(|ch| ch.is_member)
-        .map(|ch| ch.id.clone())
-        .collect();
-
-    if member_ids.is_empty() {
-        return Err("No member channels found.".to_string());
-    }
-
-    sync_slack_inbox_bg(token, &member_ids, &channels)
-}
-
-fn fetch_channels_bg(token: &str) -> Result<BgTaskResult, String> {
-    let client = reqwest::blocking::Client::new();
-    let result = slack::fetch_channels(&client, token, None)?;
-    let mut channels = result.channels;
-    if channels.is_empty() {
-        return Err("No Slack channels found.".to_string());
-    }
-    let mut cache = slack::read_user_cache();
-    slack::resolve_channel_display_names(&mut channels, &client, token, &mut cache);
-    let _ = slack::write_user_cache(&cache);
-
-    let previously_selected: Vec<String> = config::read_config_value("slack-channels")
-        .map(|s| s.split(',').map(|id| id.trim().to_string()).collect())
-        .unwrap_or_default();
-    let selected: Vec<bool> = channels.iter()
-        .map(|ch| previously_selected.contains(&ch.id))
-        .collect();
-
-    Ok(BgTaskResult::SlackChannelFetch { channels, selected, scope_warnings: result.scope_warnings })
-}
-
-fn handle_slack_inbox(app: &mut App, key: KeyCode) -> Result<(), String> {
-    if app.mode == Mode::SlackReplying {
-        match key {
-            KeyCode::Esc => {
-                app.input_buffer.clear();
-                app.slack_reply_cursor = 0;
-                app.mode = Mode::SlackInbox;
-            }
-            KeyCode::Enter => {
-                let text = app.input_buffer.trim().to_string();
-                if text.is_empty() {
-                    return Ok(());
-                }
-                let open_msgs = app.slack_inbox.open_messages();
-                if let Some(msg) = open_msgs.get(app.slack_inbox_selected) {
-                    let channel_id = msg.channel_id.clone();
-                    if let Some(token) = auth::read_slack_token() {
-                        let client = reqwest::blocking::Client::new();
-                        match slack::send_message(&client, &token, &channel_id, &text) {
-                            Ok(()) => {
-                                app.status_message = Some("Reply sent".to_string());
-                            }
-                            Err(e) => {
-                                app.status_message = Some(e);
-                            }
-                        }
-                    }
-                }
-                app.input_buffer.clear();
-                app.slack_reply_cursor = 0;
-                app.mode = Mode::SlackInbox;
-            }
-            KeyCode::Left => {
-                if app.slack_reply_cursor > 0 {
-                    // Move to previous character boundary
-                    let prev = app.input_buffer[..app.slack_reply_cursor]
-                        .char_indices()
-                        .last()
-                        .map(|(i, _)| i)
-                        .unwrap_or(0);
-                    app.slack_reply_cursor = prev;
-                }
-            }
-            KeyCode::Right => {
-                if app.slack_reply_cursor < app.input_buffer.len() {
-                    // Move to next character boundary
-                    let next = app.input_buffer[app.slack_reply_cursor..]
-                        .char_indices()
-                        .nth(1)
-                        .map(|(i, _)| app.slack_reply_cursor + i)
-                        .unwrap_or(app.input_buffer.len());
-                    app.slack_reply_cursor = next;
-                }
-            }
-            KeyCode::Home => {
-                app.slack_reply_cursor = 0;
-            }
-            KeyCode::End => {
-                app.slack_reply_cursor = app.input_buffer.len();
-            }
-            KeyCode::Char(c) => {
-                app.input_buffer.insert(app.slack_reply_cursor, c);
-                app.slack_reply_cursor += c.len_utf8();
-            }
-            KeyCode::Backspace => {
-                if app.slack_reply_cursor > 0 {
-                    let prev = app.input_buffer[..app.slack_reply_cursor]
-                        .char_indices()
-                        .last()
-                        .map(|(i, _)| i)
-                        .unwrap_or(0);
-                    app.input_buffer.remove(prev);
-                    app.slack_reply_cursor = prev;
-                }
-            }
-            _ => {}
-        }
-        return Ok(());
-    }
-
-    let open_count = app.slack_inbox.open_messages().len();
-
-    match key {
-        KeyCode::Char('j') | KeyCode::Down => {
-            if open_count > 0 && app.slack_inbox_selected < open_count - 1 {
-                app.slack_inbox_selected += 1;
-            }
-        }
-        KeyCode::Char('k') | KeyCode::Up => {
-            if app.slack_inbox_selected > 0 {
-                app.slack_inbox_selected -= 1;
-            }
-        }
-        KeyCode::Enter | KeyCode::Char('d') => {
-            if open_count > 0 {
-                // Find the actual message index in the full list
-                let open_indices: Vec<usize> = app.slack_inbox.messages.iter()
-                    .enumerate()
-                    .filter(|(_, m)| m.status == slack::InboxMessageStatus::Open)
-                    .map(|(i, _)| i)
-                    .collect();
-                if let Some(&idx) = open_indices.get(app.slack_inbox_selected) {
-                    let msg = &app.slack_inbox.messages[idx];
-                    let channel_id = msg.channel_id.clone();
-                    let ts = msg.ts.clone();
-                    app.slack_inbox.messages[idx].status = slack::InboxMessageStatus::Done;
-                    let _ = slack::save_inbox(&app.slack_inbox);
-                    // Sync read state back to Slack (best-effort, non-blocking)
-                    if let Some(token) = auth::read_slack_token() {
-                        let _ = std::thread::spawn(move || {
-                            let client = reqwest::blocking::Client::new();
-                            if let Err(e) = slack::mark_read(&client, &token, &channel_id, &ts) {
-                                eprintln!("Warning: could not sync read state: {}", e);
-                            }
-                        });
-                    }
-                }
-                let new_open = app.slack_inbox.open_messages().len();
-                if new_open == 0 {
-                    app.status_message = Some("All messages handled".to_string());
-                    app.mode = Mode::Normal;
-                } else if app.slack_inbox_selected >= new_open {
-                    app.slack_inbox_selected = new_open - 1;
-                }
-            }
-        }
-        KeyCode::Char('r') => {
-            if open_count > 0 {
-                app.input_buffer.clear();
-                app.slack_reply_cursor = 0;
-                app.mode = Mode::SlackReplying;
-            }
-        }
-        KeyCode::Char('t') => {
-            if open_count > 0 {
-                let open_msgs = app.slack_inbox.open_messages();
-                if let Some(msg) = open_msgs.get(app.slack_inbox_selected) {
-                    let prefill: String = msg.text.replace('\n', " ").chars().take(120).collect();
-                    app.input_buffer = prefill;
-                    app.mode = Mode::SlackCreatingTask;
-                }
-            }
-        }
-        KeyCode::Char('p') => {
-            app.slack_preview_visible = !app.slack_preview_visible;
-        }
-        KeyCode::Char('o') => {
-            let open_msgs = app.slack_inbox.open_messages();
-            if let Some(msg) = open_msgs.get(app.slack_inbox_selected) {
-                if !msg.link.is_empty() {
-                    let _ = std::process::Command::new("open")
-                        .arg(&msg.link)
-                        .spawn();
-                }
-            }
-        }
-        KeyCode::Char('S') => {
-            if app.bg_task.is_some() {
-                app.status_message = Some("Operation in progress, please wait".to_string());
-            } else if let Some(token) = auth::read_slack_token() {
-                let channels = app.slack_channels.clone();
-                let (tx, rx) = mpsc::channel();
-                let channels_config = config::read_config_value("slack-channels");
-                let has_channels = channels_config.as_ref().map_or(false, |s| !s.is_empty());
-                if has_channels {
-                    let channel_ids: Vec<String> = channels_config.unwrap().split(',')
-                        .map(|s| s.trim().to_string())
-                        .filter(|s| !s.is_empty())
-                        .collect();
-                    std::thread::spawn(move || {
-                        let result = sync_slack_inbox_bg(&token, &channel_ids, &channels);
-                        let _ = tx.send(result);
-                    });
-                } else {
-                    std::thread::spawn(move || {
-                        let result = auto_discover_sync_bg(&token);
-                        let _ = tx.send(result);
-                    });
-                }
-                app.bg_task = Some((BgTaskKind::SlackSync, rx));
-                app.bg_spinner_frame = 0;
-            }
-        }
-        KeyCode::Esc => {
-            app.mode = Mode::Normal;
-        }
-        _ => {}
-    }
-    Ok(())
-}
-
-fn handle_slack_creating_task(app: &mut App, key: KeyCode) -> Result<(), String> {
-    match key {
-        KeyCode::Esc => {
-            app.input_buffer.clear();
-            app.mode = Mode::SlackInbox;
-        }
-        KeyCode::Enter => {
-            let title = app.input_buffer.trim().to_string();
-            app.input_buffer.clear();
-            app.mode = Mode::SlackInbox;
-            if title.is_empty() {
-                return Ok(());
-            }
-            // Create the task
-            let id = app.task_file.next_id;
-            app.task_file.next_id += 1;
-            app.task_file.tasks.push(Task {
-                id,
-                title: title.clone(),
-                status: Status::Open,
-                priority: Priority::Medium,
-                tags: Vec::new(),
-                created: Utc::now(),
-                updated: None,
-                description: None,
-                due_date: None,
-                project: None,
-                recurrence: None,
-                note: None,
-            });
-            app.save()?;
-            // Dismiss the source inbox message
-            let open_indices: Vec<usize> = app.slack_inbox.messages.iter()
-                .enumerate()
-                .filter(|(_, m)| m.status == slack::InboxMessageStatus::Open)
-                .map(|(i, _)| i)
-                .collect();
-            if let Some(&idx) = open_indices.get(app.slack_inbox_selected) {
-                app.slack_inbox.messages[idx].status = slack::InboxMessageStatus::Done;
-                let _ = slack::save_inbox(&app.slack_inbox);
-            }
-            // Clamp selection
-            let new_open = app.slack_inbox.open_messages().len();
-            if new_open == 0 {
-                app.mode = Mode::Normal;
-            } else if app.slack_inbox_selected >= new_open {
-                app.slack_inbox_selected = new_open - 1;
-            }
-            app.status_message = Some(format!("Task created: {}", title));
-        }
-        KeyCode::Char(c) => {
-            app.input_buffer.push(c);
-        }
-        KeyCode::Backspace => {
-            app.input_buffer.pop();
-        }
-        _ => {}
-    }
-    Ok(())
-}
-
-fn slack_channel_filtered_indices(app: &App) -> Vec<usize> {
-    let filter = app.slack_channel_filter.to_lowercase();
-    app.slack_channels.iter().enumerate()
-        .filter(|(_, ch)| filter.is_empty() || ch.name.to_lowercase().contains(&filter))
-        .map(|(i, _)| i)
-        .collect()
-}
-
-fn handle_slack_channel_picker(app: &mut App, key: KeyCode) -> Result<(), String> {
-    let filtered = slack_channel_filtered_indices(app);
-
-    match key {
-        KeyCode::Down => {
-            if !filtered.is_empty() && app.slack_channel_idx < filtered.len() - 1 {
-                app.slack_channel_idx += 1;
-            }
-        }
-        KeyCode::Up => {
-            if app.slack_channel_idx > 0 {
-                app.slack_channel_idx -= 1;
-            }
-        }
-        KeyCode::Char(' ') => {
-            if let Some(&orig_idx) = filtered.get(app.slack_channel_idx) {
-                app.slack_channel_selected[orig_idx] = !app.slack_channel_selected[orig_idx];
-            }
-        }
-        KeyCode::Backspace => {
-            if app.slack_channel_filter.pop().is_some() {
-                let new_filtered = slack_channel_filtered_indices(app);
-                if app.slack_channel_idx >= new_filtered.len() {
-                    app.slack_channel_idx = new_filtered.len().saturating_sub(1);
-                }
-            }
-        }
-        KeyCode::Enter => {
-            let selected_ids: Vec<String> = app.slack_channels.iter()
-                .zip(app.slack_channel_selected.iter())
-                .filter(|(_, sel)| **sel)
-                .map(|(ch, _)| ch.id.clone())
-                .collect();
-
-            if selected_ids.is_empty() {
-                app.status_message = Some("No channels selected".to_string());
-                app.mode = Mode::Normal;
-                return Ok(());
-            }
-
-            let channels_str = selected_ids.join(",");
-            config::write_config_value("slack-channels", &channels_str).map_err(|e| e.to_string())?;
-
-            let token = match auth::read_slack_token() {
-                Some(t) => t,
-                None => {
-                    app.mode = Mode::Normal;
-                    return Ok(());
-                }
-            };
-            let channels = app.slack_channels.clone();
-            let (tx, rx) = mpsc::channel();
-            std::thread::spawn(move || {
-                let result = sync_slack_inbox_bg(&token, &selected_ids, &channels);
-                let _ = tx.send(result);
-            });
-            app.bg_task = Some((BgTaskKind::SlackSync, rx));
-            app.bg_spinner_frame = 0;
-            app.mode = Mode::Normal;
-        }
-        KeyCode::Esc => {
-            app.mode = Mode::Normal;
-        }
-        KeyCode::Char(c) if c != 'j' && c != 'k' || !app.slack_channel_filter.is_empty() => {
-            app.slack_channel_filter.push(c);
-            let new_filtered = slack_channel_filtered_indices(app);
-            if app.slack_channel_idx >= new_filtered.len() {
-                app.slack_channel_idx = new_filtered.len().saturating_sub(1);
-            }
-        }
-        KeyCode::Char('j') => {
-            if !filtered.is_empty() && app.slack_channel_idx < filtered.len() - 1 {
-                app.slack_channel_idx += 1;
-            }
-        }
-        KeyCode::Char('k') => {
-            if app.slack_channel_idx > 0 {
-                app.slack_channel_idx -= 1;
-            }
         }
         _ => {}
     }
@@ -3374,39 +2733,10 @@ fn draw(frame: &mut Frame, app: &mut App) {
         draw_footer(frame, app, chunks[2]);
         return;
     }
-    if app.mode == Mode::SlackInbox || app.mode == Mode::SlackReplying {
-        let chunks = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Length(1),
-                Constraint::Min(0),
-                Constraint::Length(1),
-            ])
-            .split(frame.area());
-
-        draw_header(frame, app, chunks[0]);
-        draw_slack_inbox(frame, app, chunks[1]);
-        draw_footer(frame, app, chunks[2]);
-        return;
-    }
-    if app.mode == Mode::SlackChannelPicker {
-        let chunks = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Length(1),
-                Constraint::Min(0),
-                Constraint::Length(1),
-            ])
-            .split(frame.area());
-
-        draw_header(frame, app, chunks[0]);
-        draw_slack_channel_picker(frame, app, chunks[1]);
-        draw_footer(frame, app, chunks[2]);
-        return;
-    }
     if app.mode == Mode::SessionDirectoryPicker
         || app.mode == Mode::Sessions
         || app.mode == Mode::SessionReply
+        || app.mode == Mode::PermissionModal
     {
         let chunks = Layout::default()
             .direction(Direction::Vertical)
@@ -3424,6 +2754,9 @@ fn draw(frame: &mut Frame, app: &mut App) {
             draw_sessions_panel(frame, app, chunks[1]);
         }
         draw_footer(frame, app, chunks[2]);
+        if app.mode == Mode::PermissionModal {
+            draw_permission_modal(frame, app);
+        }
         return;
     }
     if app.view == View::Notes && app.mode == Mode::Normal {
@@ -3992,193 +3325,6 @@ fn draw_note_picker(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_stateful_widget(table, area, &mut state);
 }
 
-fn draw_slack_inbox(frame: &mut Frame, app: &App, area: Rect) {
-    let open_msgs = app.slack_inbox.open_messages();
-    let show_panel = (app.slack_preview_visible || app.mode == Mode::SlackCreatingTask) && !open_msgs.is_empty();
-
-    let (table_area, panel_area) = if show_panel {
-        let chunks = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Percentage(60),
-                Constraint::Min(3),
-            ])
-            .split(area);
-        (chunks[0], Some(chunks[1]))
-    } else {
-        (area, None)
-    };
-
-    // Draw the message table
-    let title = format!(" Slack Inbox — {} messages ", open_msgs.len());
-    let items: Vec<Row> = open_msgs
-        .iter()
-        .enumerate()
-        .map(|(i, m)| {
-            let style = if i == app.slack_inbox_selected {
-                Style::default().bg(theme::HIGHLIGHT_BG)
-            } else {
-                Style::default()
-            };
-            let snippet: String = m.text.chars().take(60).collect();
-            let time = slack::relative_time(&m.ts);
-            Row::new(vec![
-                Cell::from(m.channel_name.as_str()),
-                Cell::from(m.user_name.as_str()),
-                Cell::from(snippet),
-                Cell::from(time),
-            ]).style(style)
-        })
-        .collect();
-
-    let widths = [
-        Constraint::Length(18),
-        Constraint::Length(14),
-        Constraint::Percentage(55),
-        Constraint::Length(12),
-    ];
-    let table = Table::new(items, widths)
-        .header(Row::new(vec!["Channel", "Sender", "Message", "Time"]).style(Style::default().add_modifier(Modifier::BOLD)))
-        .block(Block::default().borders(Borders::ALL).title(title));
-
-    let mut state = TableState::default();
-    state.select(Some(app.slack_inbox_selected));
-    frame.render_stateful_widget(table, table_area, &mut state);
-
-    // Draw the panel below (preview, reply, or task-create input)
-    if let Some(panel) = panel_area {
-        if app.mode == Mode::SlackReplying {
-            draw_slack_reply_panel(frame, app, panel);
-        } else if app.mode == Mode::SlackCreatingTask {
-            draw_slack_task_create_panel(frame, app, panel);
-        } else {
-            draw_slack_preview(frame, app, panel);
-        }
-    }
-}
-
-fn draw_slack_preview(frame: &mut Frame, app: &App, area: Rect) {
-    let open_msgs = app.slack_inbox.open_messages();
-    if let Some(msg) = open_msgs.get(app.slack_inbox_selected) {
-        let time = slack::relative_time(&msg.ts);
-        let header = format!("{} · {} · {}", msg.user_name, msg.channel_name, time);
-        let text = format!("{}\n\n{}", header, msg.text);
-        let paragraph = Paragraph::new(text)
-            .wrap(Wrap { trim: false })
-            .block(Block::default().borders(Borders::ALL).title(" Preview "));
-        frame.render_widget(paragraph, area);
-    }
-}
-
-fn draw_slack_reply_panel(frame: &mut Frame, app: &App, area: Rect) {
-    let open_msgs = app.slack_inbox.open_messages();
-    let quoted = if let Some(msg) = open_msgs.get(app.slack_inbox_selected) {
-        format!("{} · {}\n> {}", msg.user_name, msg.channel_name, msg.text.replace('\n', "\n> "))
-    } else {
-        String::new()
-    };
-
-    let channel_name = open_msgs.get(app.slack_inbox_selected)
-        .map(|m| m.channel_name.as_str())
-        .unwrap_or("channel");
-
-    // Split panel: quoted message on top, input below
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Percentage(50),
-            Constraint::Min(3),
-        ])
-        .split(area);
-
-    let quote = Paragraph::new(quoted)
-        .wrap(Wrap { trim: false })
-        .block(Block::default().borders(Borders::ALL).title(" Original Message "));
-    frame.render_widget(quote, chunks[0]);
-
-    // Build input text with cursor indicator
-    let buf = &app.input_buffer;
-    let cursor = app.slack_reply_cursor.min(buf.len());
-    let (before, after) = buf.split_at(cursor);
-    let input_display = if after.is_empty() {
-        format!("{}█", before)
-    } else {
-        let mut chars = after.chars();
-        let cursor_char = chars.next().unwrap();
-        format!("{}[{}]{}", before, cursor_char, chars.as_str())
-    };
-
-    let title = format!(" Reply to {}: ", channel_name);
-    let input = Paragraph::new(input_display)
-        .wrap(Wrap { trim: false })
-        .block(Block::default().borders(Borders::ALL).title(title));
-    frame.render_widget(input, chunks[1]);
-}
-
-fn draw_slack_task_create_panel(frame: &mut Frame, app: &App, area: Rect) {
-    let input_display = format!("{}█", app.input_buffer);
-    let input = Paragraph::new(input_display)
-        .wrap(Wrap { trim: false })
-        .block(Block::default().borders(Borders::ALL).title(" New Task — edit title and press Enter "));
-    frame.render_widget(input, area);
-}
-
-fn draw_slack_channel_picker(frame: &mut Frame, app: &App, area: Rect) {
-    let filtered = slack_channel_filtered_indices(app);
-
-    let search_height = if app.slack_channel_filter.is_empty() { 0 } else { 3 };
-    let inner_layout = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(search_height),
-            Constraint::Min(0),
-        ])
-        .split(area);
-
-    if !app.slack_channel_filter.is_empty() {
-        let search_text = format!(" Search: {}_ ", app.slack_channel_filter);
-        let search_bar = Paragraph::new(search_text)
-            .block(Block::default().borders(Borders::ALL).title(" Filter "));
-        frame.render_widget(search_bar, inner_layout[0]);
-    }
-
-    let items: Vec<Row> = filtered
-        .iter()
-        .enumerate()
-        .map(|(display_idx, &orig_idx)| {
-            let ch = &app.slack_channels[orig_idx];
-            let style = if display_idx == app.slack_channel_idx {
-                Style::default().bg(theme::HIGHLIGHT_BG)
-            } else {
-                Style::default()
-            };
-            let checked = if app.slack_channel_selected.get(orig_idx).copied().unwrap_or(false) {
-                "[x]"
-            } else {
-                "[ ]"
-            };
-            Row::new(vec![
-                Cell::from(checked),
-                Cell::from(ch.display_name.as_str()),
-                Cell::from(ch.id.as_str()),
-            ]).style(style)
-        })
-        .collect();
-
-    let widths = [
-        Constraint::Length(5),
-        Constraint::Percentage(60),
-        Constraint::Percentage(30),
-    ];
-    let title = format!(" Select Slack Channels ({}/{}) ", filtered.len(), app.slack_channels.len());
-    let table = Table::new(items, widths)
-        .block(Block::default().borders(Borders::ALL).title(title));
-
-    let mut state = TableState::default();
-    state.select(Some(app.slack_channel_idx));
-    frame.render_stateful_widget(table, inner_layout[1], &mut state);
-}
-
 // ---------------------------------------------------------------------------
 // Session directory picker (3.1–3.3)
 // ---------------------------------------------------------------------------
@@ -4302,18 +3448,64 @@ fn draw_sessions_panel(frame: &mut Frame, app: &App, area: Rect) {
         // Full output detail for selected session
         if let Some(session) = app.claude_sessions.get(app.session_selected) {
             let visible_height = area.height.saturating_sub(2) as usize;
-            let total = session.output.len();
-            let start = app.session_output_scroll.min(total.saturating_sub(visible_height));
-            let lines: Vec<Line> = session
-                .output
-                .iter()
-                .skip(start)
-                .take(visible_height)
-                .map(|l| Line::from(l.as_str()))
-                .collect();
-            let title = format!(" {} — output ({}/{}) ", session.label, start + lines.len(), total);
-            let para = Paragraph::new(lines)
-                .block(Block::default().borders(Borders::ALL).title(title));
+
+            // Build a flat list of rendered lines from structured events
+            let mut rendered: Vec<Line> = Vec::new();
+            let mut in_code_block = false;
+            for (event_idx, event) in session.output.iter().enumerate() {
+                match event {
+                    SessionOutputEvent::TurnSeparator => {
+                        rendered.push(Line::from(Span::styled(
+                            claude_session::TURN_SEPARATOR_LABEL,
+                            Style::default().fg(Color::DarkGray),
+                        )));
+                    }
+                    SessionOutputEvent::Text(s) => {
+                        let (spans, updated) = md_style::style_markdown_line(s, in_code_block);
+                        in_code_block = updated;
+                        rendered.push(Line::from(spans));
+                    }
+                    SessionOutputEvent::ToolCall { name, input_preview, result_lines, collapsed } => {
+                        let focused = event_idx == app.session_focused_event;
+                        let bracket = if *collapsed { "[+]" } else { "[-]" };
+                        let header = if input_preview.is_empty() {
+                            format!("⚙  {} {}{}",
+                                name, bracket,
+                                if focused { " ◀" } else { "" })
+                        } else {
+                            format!("⚙  {}: {} {}{}",
+                                name, input_preview, bracket,
+                                if focused { " ◀" } else { "" })
+                        };
+                        rendered.push(Line::from(Span::styled(
+                            header,
+                            Style::default().fg(Color::Rgb(255, 200, 80)),
+                        )));
+                        if !collapsed {
+                            for rl in result_lines {
+                                rendered.push(Line::from(Span::styled(
+                                    format!("  {}", rl),
+                                    Style::default().fg(Color::Rgb(150, 200, 150)),
+                                )));
+                            }
+                        }
+                    }
+                    SessionOutputEvent::PermissionRequest { tool, input_preview } => {
+                        rendered.push(Line::from(Span::styled(
+                            format!("⚠  Permission: {} — {}", tool, input_preview),
+                            Style::default().fg(Color::Yellow),
+                        )));
+                    }
+                }
+            }
+
+            let total_lines = rendered.len();
+            let start = app.session_output_scroll.min(total_lines.saturating_sub(visible_height));
+            let display: Vec<Line> = rendered.into_iter().skip(start).take(visible_height).collect();
+            let title = format!(" {} — output ({}/{}) ", session.label, start + display.len(), total_lines);
+            let para = Paragraph::new(display)
+                .block(Block::default().borders(Borders::ALL).title(title))
+                .wrap(Wrap { trim: false });
             frame.render_widget(para, area);
         }
         return;
@@ -4353,7 +3545,13 @@ fn draw_sessions_panel(frame: &mut Frame, app: &App, area: Rect) {
                 .file_name()
                 .and_then(|n| n.to_str())
                 .unwrap_or("?");
-            let last_line = session.output.last().map(|s| s.as_str()).unwrap_or("");
+            let last_line = session.output.iter().rev().find_map(|e| match e {
+                SessionOutputEvent::Text(s) if !s.trim().is_empty() => Some(s.as_str()),
+                SessionOutputEvent::ToolCall { input_preview, .. } if !input_preview.is_empty() => {
+                    Some(input_preview.as_str())
+                }
+                _ => None,
+            }).unwrap_or("");
             let style = if i == app.session_selected {
                 Style::default().bg(theme::HIGHLIGHT_BG)
             } else {
@@ -4394,19 +3592,49 @@ fn handle_sessions(app: &mut App, key: KeyCode) -> Result<(), String> {
     if app.session_viewing_output {
         match key {
             KeyCode::Char('j') | KeyCode::Down => {
-                let max_scroll = app
-                    .claude_sessions
+                // Move focused event down, scroll if needed
+                let n = app.claude_sessions
                     .get(app.session_selected)
                     .map(|s| s.output.len())
-                    .unwrap_or(0)
-                    .saturating_sub(1);
+                    .unwrap_or(0);
+                if app.session_focused_event + 1 < n {
+                    app.session_focused_event += 1;
+                }
+                let max_scroll = n.saturating_sub(1);
                 if app.session_output_scroll < max_scroll {
                     app.session_output_scroll += 1;
                 }
+                app.session_output_follow = false;
             }
             KeyCode::Char('k') | KeyCode::Up => {
+                app.session_focused_event = app.session_focused_event.saturating_sub(1);
                 if app.session_output_scroll > 0 {
                     app.session_output_scroll -= 1;
+                }
+                app.session_output_follow = false;
+            }
+            KeyCode::Home | KeyCode::Char('g') => {
+                app.session_output_scroll = 0;
+                app.session_focused_event = 0;
+                app.session_output_follow = false;
+            }
+            KeyCode::End | KeyCode::Char('G') => {
+                let total = app
+                    .claude_sessions
+                    .get(app.session_selected)
+                    .map(|s| s.output.len())
+                    .unwrap_or(0);
+                app.session_output_scroll = total.saturating_sub(1);
+                app.session_focused_event = total.saturating_sub(1);
+                app.session_output_follow = true;
+            }
+            KeyCode::Enter | KeyCode::Char(' ') => {
+                // Toggle collapse on focused ToolCall event
+                let idx = app.session_focused_event;
+                if let Some(session) = app.claude_sessions.get_mut(app.session_selected) {
+                    if let Some(SessionOutputEvent::ToolCall { collapsed, .. }) = session.output.get_mut(idx) {
+                        *collapsed = !*collapsed;
+                    }
                 }
             }
             KeyCode::Esc => {
@@ -4433,9 +3661,10 @@ fn handle_sessions(app: &mut App, key: KeyCode) -> Result<(), String> {
         KeyCode::Enter => {
             if app.claude_sessions.get(app.session_selected).is_some() {
                 app.session_viewing_output = true;
-                // Scroll to end by default
+                app.session_output_follow = true;
                 let total = app.claude_sessions[app.session_selected].output.len();
                 app.session_output_scroll = total.saturating_sub(1);
+                app.session_focused_event = total.saturating_sub(1);
             }
         }
         KeyCode::Char('r') => {
@@ -4465,6 +3694,56 @@ fn handle_sessions(app: &mut App, key: KeyCode) -> Result<(), String> {
 // ---------------------------------------------------------------------------
 // Session reply (7.1–7.3)
 // ---------------------------------------------------------------------------
+
+fn draw_permission_modal(frame: &mut Frame, app: &App) {
+    // Centered modal overlay
+    let area = frame.area();
+    let modal_w = (area.width.saturating_sub(4)).min(60);
+    let modal_h = 7u16;
+    let x = area.x + area.width.saturating_sub(modal_w) / 2;
+    let y = area.y + area.height.saturating_sub(modal_h) / 2;
+    let modal_area = Rect { x, y, width: modal_w, height: modal_h };
+
+    frame.render_widget(ratatui::widgets::Clear, modal_area);
+
+    let content = vec![
+        Line::from(""),
+        Line::from(Span::styled(
+            format!("  Tool: {}", app.permission_modal_tool),
+            Style::default().fg(Color::Yellow),
+        )),
+        Line::from(Span::styled(
+            format!("  Input: {}", app.permission_modal_input),
+            Style::default().fg(Color::White),
+        )),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("  [y] Allow  ", Style::default().fg(Color::Green)),
+            Span::styled("[n] Deny  ", Style::default().fg(Color::Red)),
+            Span::styled("[a] Allow session", Style::default().fg(Color::Cyan)),
+        ]),
+    ];
+
+    let para = Paragraph::new(content)
+        .block(Block::default().borders(Borders::ALL).title(" ⚠  Permission Request ").border_style(Style::default().fg(Color::Yellow)));
+    frame.render_widget(para, modal_area);
+}
+
+fn handle_permission_modal(app: &mut App, key: KeyCode) -> Result<(), String> {
+    let selected = app.session_selected;
+    match key {
+        KeyCode::Char('y') | KeyCode::Char('a') => {
+            claude_session::respond_to_permission(&mut app.claude_sessions[selected], true);
+            app.mode = Mode::Sessions;
+        }
+        KeyCode::Char('n') => {
+            claude_session::respond_to_permission(&mut app.claude_sessions[selected], false);
+            app.mode = Mode::Sessions;
+        }
+        _ => {}
+    }
+    Ok(())
+}
 
 fn draw_session_reply(frame: &mut Frame, app: &App, area: Rect) {
     let text = format!(" > {}_ ", app.session_reply_input);
@@ -4510,17 +3789,14 @@ fn send_session_reply(app: &mut App) -> Result<(), String> {
 fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
     let text = match &app.mode {
         Mode::Normal => {
-            if let Some((ref kind, _)) = app.bg_task {
-                let spinner = SPINNER_CHARS[app.bg_spinner_frame as usize % SPINNER_CHARS.len()];
-                format!(" {} {} ", kind.label(), spinner)
-            } else if let Some(ref msg) = app.status_message {
+            if let Some(ref msg) = app.status_message {
                 format!(" {} ", msg)
             } else if app.view == View::Notes {
                 " a:new  Enter:edit  d:delete  v:view  C:claude  q:quit ".to_string()
             } else if app.show_detail_panel {
                 " j/k:nav  Enter:edit  Space:toggle  a:add  d:delete  f:filter  p:priority  e:edit-title  t:tags  r:desc  R:recur  n:note  g:go-note  v:view  Tab:details  q:quit ".to_string()
             } else {
-                " j/k:nav  Enter:toggle  a:add  d:delete  f:filter  p:priority  e:edit  t:tags  r:desc  R:recur  n:note  g:go-note  v:view  C:claude  i:import  s:slack  S:channels  ::command  D:set-dir  T/N/W/M/Q/Y:due  X:clr-due  Tab:details  q:quit ".to_string()
+                " j/k:nav  Enter:toggle  a:add  d:delete  f:filter  p:priority  e:edit  t:tags  r:desc  R:recur  n:note  g:go-note  v:view  C:claude  ::command  D:set-dir  T/N/W/M/Q/Y:due  X:clr-due  Tab:details  q:quit ".to_string()
             }
         }
         Mode::Adding => {
@@ -4589,22 +3865,6 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
         Mode::NotePicker => {
             " j/k:nav  Enter:select  Esc:cancel ".to_string()
         }
-        Mode::SlackInbox => {
-            " j/k:nav  Enter/d:done  r:reply  o:open  p:preview  t:task  S:sync  Esc:back ".to_string()
-        }
-        Mode::SlackCreatingTask => {
-            " Enter:confirm  Esc:cancel ".to_string()
-        }
-        Mode::SlackReplying => {
-            " Enter:send  Esc:cancel  \u{2190}\u{2192}:move cursor  Home/End:jump ".to_string()
-        }
-        Mode::SlackChannelPicker => {
-            if app.slack_channel_filter.is_empty() {
-                " Type to search  j/k:nav  Space:toggle  Enter:save  Esc:cancel ".to_string()
-            } else {
-                " Type to search  Bksp:clear  Up/Down:nav  Space:toggle  Enter:save  Esc:cancel ".to_string()
-            }
-        }
         Mode::SessionDirectoryPicker => {
             " j/k:nav  Enter:select  Esc:cancel ".to_string()
         }
@@ -4617,6 +3877,9 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
         }
         Mode::SessionReply => {
             format!(" Reply: {}_ ", app.session_reply_input)
+        }
+        Mode::PermissionModal => {
+            " y:Allow  n:Deny  a:Allow session ".to_string()
         }
     };
 
@@ -4937,16 +4200,6 @@ mod tests {
             note_picker_items: Vec::new(),
             note_picker_selected: 0,
             note_picker_task_idx: None,
-            slack_inbox: slack::SlackInbox::new(),
-            slack_inbox_selected: 0,
-            slack_channels: Vec::new(),
-            slack_channel_selected: Vec::new(),
-            slack_channel_idx: 0,
-            slack_channel_filter: String::new(),
-            slack_preview_visible: true,
-            slack_reply_cursor: 0,
-            bg_task: None,
-            bg_spinner_frame: 0,
             claude_sessions: Vec::new(),
             next_session_id: 0,
             session_selected: 0,
@@ -4956,6 +4209,10 @@ mod tests {
             session_reply_input: String::new(),
             session_viewing_output: false,
             session_output_scroll: 0,
+            session_output_follow: true,
+            session_focused_event: 0,
+            permission_modal_tool: String::new(),
+            permission_modal_input: String::new(),
         }
     }
 
@@ -5057,16 +4314,6 @@ mod tests {
             note_picker_items: Vec::new(),
             note_picker_selected: 0,
             note_picker_task_idx: None,
-            slack_inbox: slack::SlackInbox::new(),
-            slack_inbox_selected: 0,
-            slack_channels: Vec::new(),
-            slack_channel_selected: Vec::new(),
-            slack_channel_idx: 0,
-            slack_channel_filter: String::new(),
-            slack_preview_visible: true,
-            slack_reply_cursor: 0,
-            bg_task: None,
-            bg_spinner_frame: 0,
             claude_sessions: Vec::new(),
             next_session_id: 0,
             session_selected: 0,
@@ -5076,6 +4323,10 @@ mod tests {
             session_reply_input: String::new(),
             session_viewing_output: false,
             session_output_scroll: 0,
+            session_output_follow: true,
+            session_focused_event: 0,
+            permission_modal_tool: String::new(),
+            permission_modal_input: String::new(),
         }
     }
 
@@ -5708,268 +4959,5 @@ mod tests {
         assert_eq!(char_to_byte_index(s, 0), 0);
         assert_eq!(char_to_byte_index(s, 1), 1); // 'h' is 1 byte
         assert_eq!(char_to_byte_index(s, 2), 3); // 'é' is 2 bytes
-    }
-
-    #[test]
-    fn bg_task_label_returns_correct_strings() {
-        assert_eq!(BgTaskKind::TodoistImport.label(), "Importing from Todoist");
-        assert_eq!(BgTaskKind::SlackSync.label(), "Syncing Slack");
-        assert_eq!(BgTaskKind::SlackChannelFetch.label(), "Loading channels");
-    }
-
-    #[test]
-    fn bg_spinner_frame_advances_on_tick() {
-        let mut app = make_app_with_tasks(vec![make_task(None)]);
-        let (tx, rx) = mpsc::channel::<Result<BgTaskResult, String>>();
-        app.bg_task = Some((BgTaskKind::TodoistImport, rx));
-        app.bg_spinner_frame = 0;
-
-        // Simulate what the event loop does on Empty try_recv
-        assert_eq!(app.bg_spinner_frame, 0);
-        app.bg_spinner_frame = app.bg_spinner_frame.wrapping_add(1);
-        assert_eq!(app.bg_spinner_frame, 1);
-        app.bg_spinner_frame = app.bg_spinner_frame.wrapping_add(1);
-        assert_eq!(app.bg_spinner_frame, 2);
-
-        // Verify spinner char indexing wraps correctly
-        let idx = 9usize % SPINNER_CHARS.len();
-        assert_eq!(SPINNER_CHARS[idx], '⠏');
-        let idx = 10usize % SPINNER_CHARS.len();
-        assert_eq!(SPINNER_CHARS[idx], '⠋');
-
-        drop(tx); // clean up
-    }
-
-    #[test]
-    fn operation_blocked_while_bg_task_active() {
-        let mut app = make_app_with_tasks(vec![make_task(None)]);
-        let (_tx, rx) = mpsc::channel::<Result<BgTaskResult, String>>();
-        app.bg_task = Some((BgTaskKind::SlackSync, rx));
-
-        // Pressing 'i' should show blocked message, not start import
-        let _ = handle_normal(&mut app, KeyCode::Char('i'));
-        assert_eq!(app.status_message, Some("Operation in progress, please wait".to_string()));
-        assert!(app.bg_task.is_some()); // task still running
-
-        // Pressing 'S' should also be blocked
-        app.status_message = None;
-        let _ = handle_normal(&mut app, KeyCode::Char('S'));
-        assert_eq!(app.status_message, Some("Operation in progress, please wait".to_string()));
-    }
-
-    #[test]
-    fn esc_cancels_bg_task() {
-        let mut app = make_app_with_tasks(vec![make_task(None)]);
-        let (_tx, rx) = mpsc::channel::<Result<BgTaskResult, String>>();
-        app.bg_task = Some((BgTaskKind::TodoistImport, rx));
-
-        let _ = handle_normal(&mut app, KeyCode::Esc);
-        assert!(app.bg_task.is_none());
-        assert_eq!(app.bg_spinner_frame, 0);
-    }
-
-    // -- Slack UX tests --
-
-    fn make_slack_app() -> App {
-        let mut app = make_app_with_tasks(vec![make_task(None)]);
-        app.slack_inbox.messages.push(slack::SlackInboxMessage {
-            channel_id: "C123".to_string(),
-            channel_name: "#general".to_string(),
-            user_id: "U456".to_string(),
-            user_name: "Alice".to_string(),
-            text: "Can you review the deploy script? I made changes to the rollback logic and added error handling for the new edge cases we discussed yesterday in the standup meeting.".to_string(),
-            ts: "1709654321.000100".to_string(),
-            status: slack::InboxMessageStatus::Open,
-            link: "https://team.slack.com/archives/C123/p1709654321000100".to_string(),
-        });
-        app.slack_inbox.messages.push(slack::SlackInboxMessage {
-            channel_id: "C789".to_string(),
-            channel_name: "#engineering".to_string(),
-            user_id: "U101".to_string(),
-            user_name: "Bob".to_string(),
-            text: "Deployed v2.3.1 to staging".to_string(),
-            ts: "1709654400.000200".to_string(),
-            status: slack::InboxMessageStatus::Open,
-            link: String::new(),
-        });
-        app.mode = Mode::SlackInbox;
-        app.slack_inbox_selected = 0;
-        app
-    }
-
-    #[test]
-    fn slack_preview_shows_full_message() {
-        let app = make_slack_app();
-        assert!(app.slack_preview_visible);
-        let open_msgs = app.slack_inbox.open_messages();
-        let msg = open_msgs.get(app.slack_inbox_selected).unwrap();
-        // The full text should be available (not truncated to 60 chars)
-        assert!(msg.text.len() > 60);
-        assert!(msg.text.contains("discussed yesterday in the standup meeting"));
-    }
-
-    #[test]
-    fn slack_cursor_insert_at_position() {
-        let mut app = make_slack_app();
-        app.mode = Mode::SlackReplying;
-        app.input_buffer = "hllo".to_string();
-        app.slack_reply_cursor = 1; // between 'h' and 'l'
-
-        // Insert 'e' at cursor position
-        let _ = handle_slack_inbox(&mut app, KeyCode::Char('e'));
-        assert_eq!(app.input_buffer, "hello");
-        assert_eq!(app.slack_reply_cursor, 2); // cursor advances past 'e'
-    }
-
-    #[test]
-    fn slack_cursor_backspace_at_position() {
-        let mut app = make_slack_app();
-        app.mode = Mode::SlackReplying;
-        app.input_buffer = "hello".to_string();
-        app.slack_reply_cursor = 3; // after 'l'
-
-        let _ = handle_slack_inbox(&mut app, KeyCode::Backspace);
-        assert_eq!(app.input_buffer, "helo");
-        assert_eq!(app.slack_reply_cursor, 2);
-    }
-
-    #[test]
-    fn slack_cursor_home_end() {
-        let mut app = make_slack_app();
-        app.mode = Mode::SlackReplying;
-        app.input_buffer = "hello world".to_string();
-        app.slack_reply_cursor = 5;
-
-        let _ = handle_slack_inbox(&mut app, KeyCode::Home);
-        assert_eq!(app.slack_reply_cursor, 0);
-
-        let _ = handle_slack_inbox(&mut app, KeyCode::End);
-        assert_eq!(app.slack_reply_cursor, 11);
-    }
-
-    #[test]
-    fn slack_preview_toggle() {
-        let mut app = make_slack_app();
-        assert!(app.slack_preview_visible);
-
-        let _ = handle_slack_inbox(&mut app, KeyCode::Char('p'));
-        assert!(!app.slack_preview_visible);
-
-        let _ = handle_slack_inbox(&mut app, KeyCode::Char('p'));
-        assert!(app.slack_preview_visible);
-    }
-
-    #[test]
-    fn slack_existing_keybindings_unchanged() {
-        let mut app = make_slack_app();
-
-        // j navigates down
-        let _ = handle_slack_inbox(&mut app, KeyCode::Char('j'));
-        assert_eq!(app.slack_inbox_selected, 1);
-
-        // k navigates up
-        let _ = handle_slack_inbox(&mut app, KeyCode::Char('k'));
-        assert_eq!(app.slack_inbox_selected, 0);
-
-        // Esc exits to Normal
-        let _ = handle_slack_inbox(&mut app, KeyCode::Esc);
-        assert_eq!(app.mode, Mode::Normal);
-    }
-
-    #[test]
-    fn slack_reply_mode_resets_cursor() {
-        let mut app = make_slack_app();
-        app.input_buffer = "leftover".to_string();
-        app.slack_reply_cursor = 5;
-
-        // Press 'r' to enter reply mode
-        let _ = handle_slack_inbox(&mut app, KeyCode::Char('r'));
-        assert_eq!(app.mode, Mode::SlackReplying);
-        assert!(app.input_buffer.is_empty());
-        assert_eq!(app.slack_reply_cursor, 0);
-    }
-
-    #[test]
-    fn slack_preview_persists_across_reply() {
-        let mut app = make_slack_app();
-        assert!(app.slack_preview_visible);
-
-        // Enter reply mode
-        let _ = handle_slack_inbox(&mut app, KeyCode::Char('r'));
-        assert_eq!(app.mode, Mode::SlackReplying);
-        assert!(app.slack_preview_visible); // unchanged
-
-        // Exit reply mode
-        let _ = handle_slack_inbox(&mut app, KeyCode::Esc);
-        assert_eq!(app.mode, Mode::SlackInbox);
-        assert!(app.slack_preview_visible); // still true
-    }
-
-    // -- Slack message-to-task tests --
-
-    #[test]
-    fn slack_t_enters_creating_task_mode() {
-        let mut app = make_slack_app();
-        assert_eq!(app.mode, Mode::SlackInbox);
-
-        let _ = handle_slack_inbox(&mut app, KeyCode::Char('t'));
-
-        assert_eq!(app.mode, Mode::SlackCreatingTask);
-        // Input buffer pre-filled from first message text
-        assert!(!app.input_buffer.is_empty());
-        assert!(app.input_buffer.contains("Can you review the deploy script?"));
-    }
-
-    #[test]
-    fn slack_creating_task_confirm() {
-        let mut app = make_slack_app();
-        // Use a writable temp path so app.save() succeeds
-        let tmp = std::env::temp_dir().join(format!("task_test_{}.md", std::process::id()));
-        app.file_path = tmp.clone();
-        app.mode = Mode::SlackCreatingTask;
-        app.input_buffer = "Review deploy script".to_string();
-        let initial_task_count = app.task_file.tasks.len();
-
-        let _ = handle_slack_creating_task(&mut app, KeyCode::Enter);
-
-        // Task was created
-        assert_eq!(app.task_file.tasks.len(), initial_task_count + 1);
-        assert_eq!(app.task_file.tasks.last().unwrap().title, "Review deploy script");
-        // Mode returned to SlackInbox (or Normal if inbox empty)
-        assert!(app.mode == Mode::SlackInbox || app.mode == Mode::Normal);
-        // Source message marked done
-        let open = app.slack_inbox.open_messages();
-        assert_eq!(open.len(), 1); // was 2, now 1
-        // Status message set
-        assert!(app.status_message.as_deref().unwrap_or("").contains("Task created"));
-    }
-
-    #[test]
-    fn slack_creating_task_cancel() {
-        let mut app = make_slack_app();
-        app.mode = Mode::SlackCreatingTask;
-        app.input_buffer = "Some title".to_string();
-        let initial_task_count = app.task_file.tasks.len();
-        let initial_open = app.slack_inbox.open_messages().len();
-
-        let _ = handle_slack_creating_task(&mut app, KeyCode::Esc);
-
-        assert_eq!(app.mode, Mode::SlackInbox);
-        assert_eq!(app.task_file.tasks.len(), initial_task_count); // no task added
-        assert_eq!(app.slack_inbox.open_messages().len(), initial_open); // inbox unchanged
-        assert!(app.input_buffer.is_empty());
-    }
-
-    #[test]
-    fn slack_creating_task_empty_confirm() {
-        let mut app = make_slack_app();
-        app.mode = Mode::SlackCreatingTask;
-        app.input_buffer = "   ".to_string(); // whitespace only
-        let initial_task_count = app.task_file.tasks.len();
-
-        let _ = handle_slack_creating_task(&mut app, KeyCode::Enter);
-
-        assert_eq!(app.mode, Mode::SlackInbox);
-        assert_eq!(app.task_file.tasks.len(), initial_task_count); // no task added
     }
 }

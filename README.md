@@ -40,9 +40,9 @@ All task management (adding, editing, completing, deleting) is done through the 
 | `task config get <key>` | Get a configuration value |
 | `task auth todoist [--token TOKEN]` | Store Todoist API token |
 | `task auth claude [--key KEY]` | Store Claude API key |
-| `task auth slack [--token TOKEN]` | Store Slack Bot User OAuth Token |
 | `task auth status` | Show authentication status |
 | `task auth revoke` | Revoke stored tokens |
+| `task import todoist [--test]` | Import open tasks from Todoist |
 
 ### Global Flags
 
@@ -124,8 +124,6 @@ In the note editor: `Ctrl+S` to save, `Esc` to exit (prompts if unsaved changes)
 
 | Key | Action |
 | --- | --- |
-| `i` | Import tasks from Todoist |
-| `S` | Slack review (fetch messages and suggest action items) |
 | `:` | Open NLP chat with Claude |
 
 ### Filtering
@@ -158,37 +156,14 @@ Supported actions:
 - **Fetch URLs** (reference a URL and the AI will summarize it)
 - **Query tasks** ("what's overdue?", "what's due this week?")
 
-## Slack Integration
-
-Scan Slack channels for actionable messages and create tasks from AI-suggested action items.
-
-### Setup
-
-1. Create a Slack App at https://api.slack.com/apps
-2. Go to **OAuth & Permissions** and add **User Token Scopes**: `channels:history`, `channels:read`
-3. Install the app to your workspace
-4. Copy the **User OAuth Token** (`xoxp-...`)
-5. Authenticate: `task auth slack --token xoxp-...`
-
-User tokens let the app see any channel you're already in. Bot tokens (`xoxb-`) also work but require adding the bot to each channel.
-
-### Usage
-
-1. Press `S` in the TUI
-2. If no channels are configured, a channel picker appears — select channels with `Space`, confirm with `Enter`
-3. The system fetches new messages and sends them to Claude for analysis
-4. Review suggestions: `Enter` to accept, `e` to edit title before accepting, `s` to skip, `Esc` to exit
-
-Accepted suggestions become tasks with the suggested title, priority, due date, and a description linking back to the source Slack message. A high-water-mark tracks which messages have been reviewed so you only see new messages on subsequent fetches.
-
 ## Todoist Import
 
 Import open tasks from your Todoist account:
 
 1. Authenticate: `task auth todoist --token YOUR_TOKEN`
-2. Press `i` in the TUI
+2. Run `task import todoist`
 
-Imported tasks preserve title, description, priority, labels (as tags), due dates, and project names. Imported tasks are labeled "exported" in Todoist to avoid duplicates.
+Imported tasks preserve title, description, priority, labels (as tags), due dates, and project names. Imported tasks are labeled "exported" in Todoist to avoid duplicates. Use `--test` to import only the first 3 tasks without labeling them in Todoist.
 
 ## Task Features
 
