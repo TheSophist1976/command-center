@@ -244,6 +244,7 @@ else
         else
             printf "# task-manager config\n\ndefault-dir: %s\n" "$task_dir" > "$CONFIG_FILE"
         fi
+        current_dir="$task_dir"
         success "default-dir set to $task_dir"
         STATUS_CONFIG="configured → $task_dir"
     fi
