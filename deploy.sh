@@ -36,6 +36,7 @@ STATUS_CONFIG=""
 STATUS_TODOIST=""
 STATUS_CLAUDE=""
 STATUS_SKILL=""
+STATUS_AGENTS=""
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
@@ -319,9 +320,36 @@ else
 fi
 
 # =========================================================
-# 8. Cowork skill
+# 8. AI instructions (AGENTS.md)
 # =========================================================
-header "8. Installing Cowork skill"
+header "8. Installing AI instructions"
+
+AGENTS_SRC="$SCRIPT_DIR/AGENTS.md"
+
+if [[ -f "$AGENTS_SRC" ]]; then
+    # Determine the task directory
+    task_agents_dir=""
+    if [[ -n "$current_dir" ]]; then
+        task_agents_dir="$current_dir"
+    fi
+
+    if [[ -n "$task_agents_dir" ]] && [[ -d "$task_agents_dir" ]]; then
+        cp "$AGENTS_SRC" "$task_agents_dir/AGENTS.md"
+        success "Installed AGENTS.md to $task_agents_dir/AGENTS.md"
+        STATUS_AGENTS="installed → $task_agents_dir/AGENTS.md"
+    else
+        warn "Task directory not configured — skipping AGENTS.md install"
+        STATUS_AGENTS="skipped (no task directory)"
+    fi
+else
+    warn "AGENTS.md not found in $SCRIPT_DIR — skipping"
+    STATUS_AGENTS="skipped (source not found)"
+fi
+
+# =========================================================
+# 9. Cowork skill
+# =========================================================
+header "9. Installing Cowork skill"
 
 SKILL_SRC="$SCRIPT_DIR/skills/task-manager"
 SKILL_DEST="$HOME/.claude/skills/task-manager"
@@ -337,7 +365,7 @@ else
 fi
 
 # =========================================================
-# 9. Summary
+# 10. Summary
 # =========================================================
 header "Setup Complete"
 echo ""
@@ -347,6 +375,7 @@ printf "  %-16s %s\n" "PATH:" "$STATUS_PATH"
 printf "  %-16s %s\n" "Config:" "$STATUS_CONFIG"
 printf "  %-16s %s\n" "Todoist:" "$STATUS_TODOIST"
 printf "  %-16s %s\n" "Claude API:" "$STATUS_CLAUDE"
+printf "  %-16s %s\n" "AI Instruct:" "$STATUS_AGENTS"
 printf "  %-16s %s\n" "Skill:" "$STATUS_SKILL"
 echo ""
 success "Done! Run 'task' to get started."
