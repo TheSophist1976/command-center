@@ -7,42 +7,57 @@ A fast CLI task manager for developers and AI agents. Tasks are stored in a plai
 Requires [Rust](https://rustup.rs/) (1.75+).
 
 ```sh
+# CLI only
 cargo build --release
+
+# CLI + TUI
+cargo build --release --features tui
 ```
 
-The binary is at `target/release/task`. To install it system-wide:
-
-```sh
-cargo install --path .
-```
+Two binaries are produced:
+- `target/release/task` — CLI (auth, config, notes)
+- `target/release/task-tui` — interactive terminal UI (requires `--features tui`)
 
 ## Quick Start
 
 ```sh
-# Launch the interactive TUI (default command)
-task
-
-# Or explicitly
-task tui
+# Launch the interactive TUI
+task-tui
 
 # Use a specific task file
-task --file ~/projects/tasks.md
-```
+task-tui --file ~/projects/tasks.md
 
-All task management (adding, editing, completing, deleting) is done through the interactive TUI.
+# CLI commands
+task auth todoist --token YOUR_TOKEN
+task config set default-dir ~/tasks
+```
 
 ## Commands
 
+**`task` — CLI binary**
+
 | Command | Description |
 | --- | --- |
-| `task` / `task tui` | Launch the interactive terminal UI (default) |
-| `task config set <key> <value>` | Set a configuration value |
-| `task config get <key>` | Get a configuration value |
 | `task auth todoist [--token TOKEN]` | Store Todoist API token |
 | `task auth claude [--key KEY]` | Store Claude API key |
 | `task auth status` | Show authentication status |
 | `task auth revoke` | Revoke stored tokens |
-| `task import todoist [--test]` | Import open tasks from Todoist |
+| `task config set <key> <value>` | Set a configuration value |
+| `task config get <key>` | Get a configuration value |
+| `task note list` | List notes |
+| `task note add <title>` | Create a note |
+| `task note show <slug>` | Show a note |
+| `task note edit <slug>` | Edit a note |
+| `task note rm <slug>` | Delete a note |
+| `task note link <slug> <task-id>` | Link a note to a task |
+| `task note unlink <task-id>` | Unlink a note from a task |
+
+**`task-tui` — interactive TUI**
+
+| Command | Description |
+| --- | --- |
+| `task-tui` | Launch the interactive terminal UI |
+| `task-tui tui` | Same as above (explicit subcommand) |
 
 ### Global Flags
 
@@ -52,7 +67,7 @@ All task management (adding, editing, completing, deleting) is done through the 
 
 ## Interactive TUI
 
-Launch with `task tui` or just `task`. The TUI provides a full-featured interface for managing tasks, notes, and AI-powered chat.
+Launch with `task-tui`. The TUI provides a full-featured interface for managing tasks, notes, and AI-powered chat.
 
 ### Views
 
@@ -155,15 +170,6 @@ Supported actions:
 - **Edit notes** ("update the deployment note with the new steps")
 - **Fetch URLs** (reference a URL and the AI will summarize it)
 - **Query tasks** ("what's overdue?", "what's due this week?")
-
-## Todoist Import
-
-Import open tasks from your Todoist account:
-
-1. Authenticate: `task auth todoist --token YOUR_TOKEN`
-2. Run `task import todoist`
-
-Imported tasks preserve title, description, priority, labels (as tags), due dates, and project names. Imported tasks are labeled "exported" in Todoist to avoid duplicates. Use `--test` to import only the first 3 tasks without labeling them in Todoist.
 
 ## Task Features
 
