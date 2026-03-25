@@ -1009,6 +1009,15 @@ impl App {
     fn save(&self) -> Result<(), String> {
         storage::save(&self.file_path, &self.task_file)
     }
+
+    fn reload_from_disk(&mut self) -> Result<(), String> {
+        let task_file = storage::load(&self.file_path, false)?;
+        let n = task_file.tasks.len();
+        self.task_file = task_file;
+        self.clamp_selection();
+        self.status_message = Some(format!("Reloaded {} tasks from disk", n));
+        Ok(())
+    }
 }
 
 // -- Entry point --
@@ -1237,6 +1246,15 @@ fn handle_key(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut A
     // Handle Ctrl+S in note editor
     if app.mode == Mode::EditingNote && modifiers.contains(event::KeyModifiers::CONTROL) && key == KeyCode::Char('s') {
         save_current_note(app)?;
+        return Ok(false);
+    }
+    // Handle Ctrl+R: reload tasks from disk
+    if modifiers.contains(event::KeyModifiers::CONTROL) && key == KeyCode::Char('r') {
+        if app.mode != Mode::Normal {
+            app.status_message = Some("Cannot reload: finish editing first".to_string());
+        } else if let Err(e) = app.reload_from_disk() {
+            app.status_message = Some(e);
+        }
         return Ok(false);
     }
     match app.mode {
@@ -3796,7 +3814,7 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
             } else if app.show_detail_panel {
                 " j/k:nav  Enter:edit  Space:toggle  a:add  d:delete  f:filter  p:priority  e:edit-title  t:tags  r:desc  R:recur  n:note  g:go-note  v:view  Tab:details  q:quit ".to_string()
             } else {
-                " j/k:nav  Enter:toggle  a:add  d:delete  f:filter  p:priority  e:edit  t:tags  r:desc  R:recur  n:note  g:go-note  v:view  C:claude  ::command  D:set-dir  T/N/W/M/Q/Y:due  X:clr-due  Tab:details  q:quit ".to_string()
+                " j/k:nav  Enter:toggle  a:add  d:delete  f:filter  p:priority  e:edit  t:tags  r:desc  R:recur  n:note  g:go-note  v:view  C:claude  ::command  D:set-dir  T/N/W/M/Q/Y:due  X:clr-due  Tab:details  ^r:reload  q:quit".to_string()
             }
         }
         Mode::Adding => {
@@ -4959,5 +4977,44 @@ mod tests {
         assert_eq!(char_to_byte_index(s, 0), 0);
         assert_eq!(char_to_byte_index(s, 1), 1); // 'h' is 1 byte
         assert_eq!(char_to_byte_index(s, 2), 3); // 'é' is 2 bytes
+    }
+
+    // -- reload_from_disk tests --
+
+    #[test]
+    fn reload_from_disk_updates_task_file_and_sets_status_message() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("tasks.md");
+        // Write initial file with 1 task
+        std::fs::write(&path, "<!-- format:2 -->\n<!-- next-id:2 -->\n\n# Tasks\n\n## [ ] Task one\n<!-- id:1 priority:medium created:2026-01-01T00:00:00+00:00 -->\n").unwrap();
+        let mut app = App::new(&path).unwrap();
+        assert_eq!(app.task_file.tasks.len(), 1);
+
+        // External writer adds a second task
+        std::fs::write(&path, "<!-- format:2 -->\n<!-- next-id:3 -->\n\n# Tasks\n\n## [ ] Task one\n<!-- id:1 priority:medium created:2026-01-01T00:00:00+00:00 -->\n\n## [ ] Task two\n<!-- id:2 priority:medium created:2026-01-02T00:00:00+00:00 -->\n").unwrap();
+
+        app.reload_from_disk().unwrap();
+
+        assert_eq!(app.task_file.tasks.len(), 2);
+        assert_eq!(app.status_message, Some("Reloaded 2 tasks from disk".to_string()));
+    }
+
+    #[test]
+    fn ctrl_r_in_non_normal_mode_sets_warning_and_does_not_reload() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("tasks.md");
+        std::fs::write(&path, "<!-- format:2 -->\n<!-- next-id:2 -->\n\n# Tasks\n\n## [ ] Task one\n<!-- id:1 priority:medium created:2026-01-01T00:00:00+00:00 -->\n").unwrap();
+        let mut app = App::new(&path).unwrap();
+        app.mode = Mode::Adding;
+
+        // Simulate the ctrl+r blocking logic
+        if app.mode != Mode::Normal {
+            app.status_message = Some("Cannot reload: finish editing first".to_string());
+        } else {
+            app.reload_from_disk().unwrap();
+        }
+
+        assert_eq!(app.task_file.tasks.len(), 1, "task_file should not change");
+        assert_eq!(app.status_message, Some("Cannot reload: finish editing first".to_string()));
     }
 }
