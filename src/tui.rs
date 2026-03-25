@@ -30,22 +30,15 @@ mod theme {
     pub const PRIORITY_MEDIUM: Color = Color::Rgb(255, 215, 0);
     pub const PRIORITY_LOW: Color = Color::Rgb(100, 200, 100);
 
-    // Chat
-    pub const CHAT_USER: Color = Color::Rgb(100, 180, 255);
-    pub const CHAT_TASK_LIST: Color = Color::Rgb(255, 215, 0);
-    pub const CHAT_ERROR: Color = Color::Rgb(255, 85, 85);
-
     // Task states
     pub const DONE_TEXT: Color = Color::Rgb(100, 100, 100);
     pub const OVERDUE: Color = Color::Rgb(255, 85, 85);
 }
 
-use crate::auth;
 use crate::claude_session::{
-    self, ClaudeSession, ClaudeSessionStatus, SessionEvent, SessionOutputEvent,
+    self, ClaudeSession, ClaudeSessionStatus, SessionEvent,
 };
 use crate::config;
-use crate::nlp::{self, ApiMessage, NlpAction};
 use crate::storage;
 use crate::task::{Priority, Status, Task, TaskFile};
 // -- Types --
@@ -62,115 +55,206 @@ enum Mode {
     EditingTags,
     EditingDescription,
     EditingDefaultDir,
-    NlpChat,
-    ConfirmingNlp,
+    Command,
+
     EditingRecurrence,
     EditingDetailPanel,
     ConfirmingDetailSave,
     EditingNote,
     ConfirmingNoteExit,
     NotePicker,
+    EditingAgent,
     SessionDirectoryPicker,
     Sessions,
     SessionReply,
-    PermissionModal,
 }
 
-#[derive(Debug, Clone)]
-enum ChatMessage {
-    User(String),
-    Assistant(String),
-    TaskList {
-        text: String,
-        tasks: Vec<(u32, String, String, String)>, // (id, title, priority, status)
-    },
-    Error(String),
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum DueWindow {
+    Day,
+    Week,
+    Month,
+    Year,
+    All,
+}
+
+impl DueWindow {
+    fn next(&self) -> DueWindow {
+        match self {
+            DueWindow::Day => DueWindow::Week,
+            DueWindow::Week => DueWindow::Month,
+            DueWindow::Month => DueWindow::Year,
+            DueWindow::Year => DueWindow::All,
+            DueWindow::All => DueWindow::Day,
+        }
+    }
+
+    fn prev(&self) -> DueWindow {
+        match self {
+            DueWindow::Day => DueWindow::All,
+            DueWindow::Week => DueWindow::Day,
+            DueWindow::Month => DueWindow::Week,
+            DueWindow::Year => DueWindow::Month,
+            DueWindow::All => DueWindow::Year,
+        }
+    }
+
+    fn label(&self) -> &str {
+        match self {
+            DueWindow::Day => "Today",
+            DueWindow::Week => "This Week",
+            DueWindow::Month => "This Month",
+            DueWindow::Year => "This Year",
+            DueWindow::All => "All Tasks",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum GroupBy {
+    None,
+    Agent,
+    Project,
+    Priority,
+}
+
+impl GroupBy {
+    fn next(&self) -> GroupBy {
+        match self {
+            GroupBy::None => GroupBy::Project,
+            GroupBy::Project => GroupBy::Agent,
+            GroupBy::Agent => GroupBy::Priority,
+            GroupBy::Priority => GroupBy::None,
+        }
+    }
+
+    fn to_config_str(&self) -> &str {
+        match self {
+            GroupBy::None => "none",
+            GroupBy::Agent => "agent",
+            GroupBy::Project => "project",
+            GroupBy::Priority => "priority",
+        }
+    }
+
+    fn from_config(s: &str) -> GroupBy {
+        match s.trim().to_lowercase().as_str() {
+            "agent" => GroupBy::Agent,
+            "project" => GroupBy::Project,
+            "priority" => GroupBy::Priority,
+            _ => GroupBy::None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum ColumnId {
+    Id,
+    Status,
+    Priority,
+    Title,
+    Desc,
+    Due,
+    Project,
+    Agent,
+    Recur,
+    Note,
+    Tags,
+}
+
+impl ColumnId {
+    fn from_str(s: &str) -> Option<ColumnId> {
+        match s.trim().to_lowercase().as_str() {
+            "id" => Some(ColumnId::Id),
+            "status" => Some(ColumnId::Status),
+            "priority" => Some(ColumnId::Priority),
+            "title" => Some(ColumnId::Title),
+            "desc" => Some(ColumnId::Desc),
+            "due" => Some(ColumnId::Due),
+            "project" => Some(ColumnId::Project),
+            "agent" => Some(ColumnId::Agent),
+            "recur" => Some(ColumnId::Recur),
+            "note" => Some(ColumnId::Note),
+            "tags" => Some(ColumnId::Tags),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum View {
-    Today,
-    All,
-    Weekly,
-    Monthly,
-    Yearly,
+    Due,
     NoDueDate,
     Recurring,
     Notes,
 }
 
-impl View {
-    fn matches(&self, task: &Task, today: NaiveDate) -> bool {
-        // Completed tasks only appear in the All view
-        if task.status == Status::Done && *self != View::All {
-            return false;
-        }
-        // Recurring view: filter by recurrence presence only
-        if *self == View::Recurring {
-            return task.recurrence.is_some();
-        }
-        // Notes view doesn't show tasks
-        if *self == View::Notes {
-            return false;
-        }
-        // Overdue open tasks appear in all time-based views
-        if task.status == Status::Open {
-            if let Some(d) = task.due_date {
-                if d < today && *self != View::NoDueDate {
-                    return true;
-                }
+fn due_matches(task: &Task, today: NaiveDate, window: DueWindow) -> bool {
+    // Completed tasks never shown in Due view
+    if task.status == Status::Done {
+        return false;
+    }
+    // Overdue open tasks appear in all windows except Day (handled separately below)
+    if task.status == Status::Open {
+        if let Some(d) = task.due_date {
+            if d < today {
+                return true; // overdue always shown
             }
         }
+    }
+    match window {
+        DueWindow::All => true,
+        DueWindow::Day => match task.due_date {
+            Some(d) => d == today,
+            None => true, // no-due-date tasks shown in Day window
+        },
+        DueWindow::Week => match task.due_date {
+            Some(d) => {
+                let weekday = today.weekday().num_days_from_monday();
+                let monday = today - chrono::Duration::days(weekday as i64);
+                let sunday = monday + chrono::Duration::days(6);
+                d >= monday && d <= sunday
+            }
+            None => false,
+        },
+        DueWindow::Month => match task.due_date {
+            Some(d) => d.year() == today.year() && d.month() == today.month(),
+            None => false,
+        },
+        DueWindow::Year => match task.due_date {
+            Some(d) => d.year() == today.year(),
+            None => false,
+        },
+    }
+}
+
+impl View {
+    fn matches(&self, task: &Task, _today: NaiveDate) -> bool {
+        // Completed tasks hidden from all views (Due handles them separately via due_matches)
+        if task.status == Status::Done && *self != View::Due {
+            return false;
+        }
         match self {
-            View::All => true,
-            View::Today => match task.due_date {
-                Some(d) => d == today,
-                None => true,
-            },
-            View::Weekly => match task.due_date {
-                Some(d) => {
-                    let weekday = today.weekday().num_days_from_monday();
-                    let monday = today - chrono::Duration::days(weekday as i64);
-                    let sunday = monday + chrono::Duration::days(6);
-                    d >= monday && d <= sunday
-                }
-                None => false,
-            },
-            View::Monthly => match task.due_date {
-                Some(d) => d.year() == today.year() && d.month() == today.month(),
-                None => false,
-            },
-            View::Yearly => match task.due_date {
-                Some(d) => d.year() == today.year(),
-                None => false,
-            },
+            View::Due => false, // handled via due_matches in filtered_indices
+            View::Recurring => task.recurrence.is_some() && task.status != Status::Done,
+            View::Notes => false, // notes view doesn't show tasks
             View::NoDueDate => task.due_date.is_none(),
-            View::Recurring => unreachable!(), // handled above
-            View::Notes => unreachable!(), // handled above
         }
     }
 
     fn next(&self) -> View {
         match self {
-            View::Today => View::All,
-            View::All => View::Weekly,
-            View::Weekly => View::Monthly,
-            View::Monthly => View::Yearly,
-            View::Yearly => View::NoDueDate,
+            View::Due => View::NoDueDate,
             View::NoDueDate => View::Recurring,
             View::Recurring => View::Notes,
-            View::Notes => View::Today,
+            View::Notes => View::Due,
         }
     }
 
     fn prev(&self) -> View {
         match self {
-            View::Today => View::Notes,
-            View::All => View::Today,
-            View::Weekly => View::All,
-            View::Monthly => View::Weekly,
-            View::Yearly => View::Monthly,
-            View::NoDueDate => View::Yearly,
+            View::Due => View::Notes,
+            View::NoDueDate => View::Due,
             View::Recurring => View::NoDueDate,
             View::Notes => View::Recurring,
         }
@@ -178,11 +262,7 @@ impl View {
 
     fn display_name(&self) -> &str {
         match self {
-            View::Today => "Today",
-            View::All => "All Tasks",
-            View::Weekly => "This Week",
-            View::Monthly => "This Month",
-            View::Yearly => "This Year",
+            View::Due => "Due",
             View::NoDueDate => "No Due Date",
             View::Recurring => "Recurring",
             View::Notes => "Notes",
@@ -191,15 +271,11 @@ impl View {
 
     fn from_config(s: &str) -> View {
         match s.trim().to_lowercase().as_str() {
-            "today" => View::Today,
-            "all" => View::All,
-            "weekly" => View::Weekly,
-            "monthly" => View::Monthly,
-            "yearly" => View::Yearly,
+            "due" | "today" | "all" | "weekly" | "monthly" | "yearly" | "by-agent" => View::Due,
             "no-due-date" => View::NoDueDate,
             "recurring" => View::Recurring,
             "notes" => View::Notes,
-            _ => View::Today,
+            _ => View::Due,
         }
     }
 }
@@ -858,25 +934,25 @@ struct App {
     selected: usize,
     filter: Filter,
     view: View,
+    due_window: DueWindow,
+    group_by: GroupBy,
+    columns: Vec<ColumnId>,
     mode: Mode,
     input_buffer: String,
     table_state: TableState,
     status_message: Option<String>,
-    pending_nlp_update: Option<(NlpAction, Vec<usize>)>,
-    chat_history: Vec<ChatMessage>,
-    nlp_messages: Vec<ApiMessage>,
     show_detail_panel: bool,
     detail_draft: Option<DetailDraft>,
     detail_field_index: usize,
     pending_navigation: Option<NavDirection>,
-    nlp_pending: Option<mpsc::Receiver<Result<(NlpAction, String), String>>>,
-    nlp_spinner_frame: u8,
     notes_list: Vec<crate::note::Note>,
     notes_selected: usize,
     note_editor: Option<NoteEditor>,
     note_picker_items: Vec<String>,
     note_picker_selected: usize,
     note_picker_task_idx: Option<usize>,
+    agent_picker_items: Vec<String>,
+    agent_picker_selected: usize,
     // Claude sessions
     claude_sessions: Vec<ClaudeSession>,
     next_session_id: usize,
@@ -888,9 +964,6 @@ struct App {
     session_viewing_output: bool,
     session_output_scroll: usize,
     session_output_follow: bool,
-    session_focused_event: usize,
-    permission_modal_tool: String,
-    permission_modal_input: String,
 }
 
 impl App {
@@ -898,32 +971,42 @@ impl App {
         let task_file = storage::load(path, false)?;
         let view = config::read_config_value("default-view")
             .map(|v| View::from_config(&v))
-            .unwrap_or(View::Today);
+            .unwrap_or(View::Due);
+        let group_by = config::read_config_value("group-by")
+            .map(|v| GroupBy::from_config(&v))
+            .unwrap_or(GroupBy::None);
+        let columns: Vec<ColumnId> = config::read_config_value("columns")
+            .map(|v| {
+                v.split(',')
+                    .filter_map(|s| ColumnId::from_str(s))
+                    .collect()
+            })
+            .unwrap_or_default();
         let mut app = Self {
             task_file,
             file_path: path.to_path_buf(),
             selected: 0,
             filter: Filter::default(),
             view,
+            due_window: DueWindow::Day,
+            group_by,
+            columns,
             mode: Mode::Normal,
             input_buffer: String::new(),
             table_state: TableState::default(),
             status_message: None,
-            pending_nlp_update: None,
-            chat_history: Vec::new(),
-            nlp_messages: Vec::new(),
             show_detail_panel: false,
             detail_draft: None,
             detail_field_index: 0,
             pending_navigation: None,
-            nlp_pending: None,
-            nlp_spinner_frame: 0,
             notes_list: Vec::new(),
             notes_selected: 0,
             note_editor: None,
             note_picker_items: Vec::new(),
             note_picker_selected: 0,
             note_picker_task_idx: None,
+            agent_picker_items: Vec::new(),
+            agent_picker_selected: 0,
             claude_sessions: Vec::new(),
             next_session_id: 0,
             session_selected: 0,
@@ -934,9 +1017,6 @@ impl App {
             session_viewing_output: false,
             session_output_scroll: 0,
             session_output_follow: true,
-            session_focused_event: 0,
-            permission_modal_tool: String::new(),
-            permission_modal_input: String::new(),
         };
         app.table_state.select(Some(0));
         // Load persisted sessions
@@ -964,12 +1044,19 @@ impl App {
 
     fn filtered_indices(&self) -> Vec<usize> {
         let today = Local::now().date_naive();
+        let due_window = self.due_window;
         let mut indices: Vec<usize> = self
             .task_file
             .tasks
             .iter()
             .enumerate()
-            .filter(|(_, t)| self.view.matches(t, today))
+            .filter(|(_, t)| {
+                if self.view == View::Due {
+                    due_matches(t, today, due_window)
+                } else {
+                    self.view.matches(t, today)
+                }
+            })
             .filter(|(_, t)| self.filter.matches(t))
             .map(|(i, _)| i)
             .collect();
@@ -1008,6 +1095,15 @@ impl App {
 
     fn save(&self) -> Result<(), String> {
         storage::save(&self.file_path, &self.task_file)
+    }
+
+    fn reload_from_disk(&mut self) -> Result<(), String> {
+        let task_file = storage::load(&self.file_path, false)?;
+        let n = task_file.tasks.len();
+        self.task_file = task_file;
+        self.clamp_selection();
+        self.status_message = Some(format!("Reloaded {} tasks from disk", n));
+        Ok(())
     }
 }
 
@@ -1053,58 +1149,18 @@ pub fn run(path: &Path) -> Result<(), String> {
 fn event_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App) -> Result<(), String> {
     loop {
         // Check for NLP background result
-        if let Some(ref rx) = app.nlp_pending {
-            match rx.try_recv() {
-                Ok(result) => {
-                    app.nlp_pending = None;
-                    app.nlp_spinner_frame = 0;
-                    process_nlp_result(app, result)?;
-                }
-                Err(mpsc::TryRecvError::Empty) => {
-                    // Still waiting — update spinner animation
-                    let dots = match app.nlp_spinner_frame % 4 {
-                        0 => "Thinking",
-                        1 => "Thinking.",
-                        2 => "Thinking..",
-                        _ => "Thinking...",
-                    };
-                    app.status_message = Some(dots.to_string());
-                    app.nlp_spinner_frame = app.nlp_spinner_frame.wrapping_add(1);
-                }
-                Err(mpsc::TryRecvError::Disconnected) => {
-                    // Thread panicked or dropped sender
-                    app.nlp_pending = None;
-                    app.nlp_spinner_frame = 0;
-                    app.status_message = None;
-                    app.chat_history.push(ChatMessage::Error("NLP request failed unexpectedly".to_string()));
-                }
-            }
-        }
-
         // Poll claude sessions for output
         {
             let n = app.claude_sessions.len();
             for i in 0..n {
-                let mut events_to_add: Vec<SessionOutputEvent> = Vec::new();
-                let mut tool_result_batches: Vec<Vec<String>> = Vec::new();
+                let mut lines_to_add: Vec<String> = Vec::new();
                 let mut new_status: Option<ClaudeSessionStatus> = None;
                 let mut clear_rx = false;
-                let mut captured_session_id: Option<String> = None;
-                let mut permission_req: Option<(String, String)> = None;
 
                 if let Some(ref rx) = app.claude_sessions[i].rx {
                     loop {
                         match rx.try_recv() {
-                            Ok(SessionEvent::OutputEvent(e)) => events_to_add.push(e),
-                            Ok(SessionEvent::AppendToolResult { lines }) => {
-                                tool_result_batches.push(lines);
-                            }
-                            Ok(SessionEvent::SessionIdCaptured(sid)) => {
-                                captured_session_id = Some(sid);
-                            }
-                            Ok(SessionEvent::PermissionRequest { tool, input_preview }) => {
-                                permission_req = Some((tool, input_preview));
-                            }
+                            Ok(SessionEvent::Line(s)) => lines_to_add.push(s),
                             Ok(SessionEvent::Done) => {
                                 new_status = Some(ClaudeSessionStatus::WaitingForInput);
                                 clear_rx = true;
@@ -1113,7 +1169,7 @@ fn event_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut A
                             Ok(SessionEvent::Error(e)) => {
                                 new_status = Some(ClaudeSessionStatus::Failed);
                                 clear_rx = true;
-                                events_to_add.push(SessionOutputEvent::Text(format!("Error: {}", e)));
+                                lines_to_add.push(format!("Error: {}", e));
                                 break;
                             }
                             Err(mpsc::TryRecvError::Empty) => break,
@@ -1126,31 +1182,10 @@ fn event_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut A
                     }
                 }
 
-                let had_new = !events_to_add.is_empty() || !tool_result_batches.is_empty();
+                let had_new = !lines_to_add.is_empty();
 
-                for event in events_to_add {
-                    claude_session::push_output_event(&mut app.claude_sessions[i].output, event);
-                }
-                // Append tool results to the last ToolCall in the buffer
-                for lines in tool_result_batches {
-                    let output = &mut app.claude_sessions[i].output;
-                    if let Some(SessionOutputEvent::ToolCall { result_lines, .. }) =
-                        output.iter_mut().rev().find(|e| matches!(e, SessionOutputEvent::ToolCall { .. }))
-                    {
-                        result_lines.extend(lines);
-                    }
-                }
-                if let Some(sid) = captured_session_id {
-                    app.claude_sessions[i].session_id = Some(sid);
-                }
-                if let Some((tool, input_preview)) = permission_req {
-                    app.permission_modal_tool = tool;
-                    app.permission_modal_input = input_preview;
-                    if i == app.session_selected {
-                        app.mode = Mode::PermissionModal;
-                    } else {
-                        app.claude_sessions[i].status = ClaudeSessionStatus::WaitingForInput;
-                    }
+                for line in lines_to_add {
+                    claude_session::push_line(&mut app.claude_sessions[i].output, line);
                 }
                 if had_new
                     && app.session_viewing_output
@@ -1166,7 +1201,6 @@ fn event_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut A
                 if clear_rx {
                     app.claude_sessions[i].rx = None;
                     app.claude_sessions[i].child = None;
-                    app.claude_sessions[i].stdin = None;
                     let task_dir = app.task_dir();
                     let _ = claude_session::save_session(&task_dir, &app.claude_sessions[i]);
                 }
@@ -1224,6 +1258,7 @@ fn toggle_task_status(app: &mut App, task_idx: usize) -> Result<(), String> {
                 project: task.project.clone(),
                 recurrence: Some(recur),
                 note: task.note.clone(),
+                agent: task.agent.clone(),
             };
             app.task_file.tasks.push(new_task);
             app.status_message = Some(format!("Next occurrence: task {}, due {}", new_id, next_due));
@@ -1233,10 +1268,19 @@ fn toggle_task_status(app: &mut App, task_idx: usize) -> Result<(), String> {
     Ok(())
 }
 
-fn handle_key(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App, key: KeyCode, modifiers: event::KeyModifiers) -> Result<bool, String> {
+fn handle_key(_terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App, key: KeyCode, modifiers: event::KeyModifiers) -> Result<bool, String> {
     // Handle Ctrl+S in note editor
     if app.mode == Mode::EditingNote && modifiers.contains(event::KeyModifiers::CONTROL) && key == KeyCode::Char('s') {
         save_current_note(app)?;
+        return Ok(false);
+    }
+    // Handle Ctrl+R: reload tasks from disk
+    if modifiers.contains(event::KeyModifiers::CONTROL) && key == KeyCode::Char('r') {
+        if app.mode != Mode::Normal {
+            app.status_message = Some("Cannot reload: finish editing first".to_string());
+        } else if let Err(e) = app.reload_from_disk() {
+            app.status_message = Some(e);
+        }
         return Ok(false);
     }
     match app.mode {
@@ -1277,12 +1321,8 @@ fn handle_key(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut A
             handle_input(app, key, InputAction::EditDefaultDir)?;
             Ok(false)
         }
-        Mode::NlpChat => {
-            handle_nlp_chat(terminal, app, key)?;
-            Ok(false)
-        }
-        Mode::ConfirmingNlp => {
-            handle_nlp_confirm(app, key)?;
+        Mode::Command => {
+            handle_command_input(app, key)?;
             Ok(false)
         }
         Mode::EditingDetailPanel => {
@@ -1305,6 +1345,10 @@ fn handle_key(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut A
             handle_note_picker(app, key)?;
             Ok(false)
         }
+        Mode::EditingAgent => {
+            handle_agent_picker(app, key)?;
+            Ok(false)
+        }
         Mode::SessionDirectoryPicker => {
             handle_session_dir_picker(app, key)?;
             Ok(false)
@@ -1315,10 +1359,6 @@ fn handle_key(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut A
         }
         Mode::SessionReply => {
             handle_session_reply(app, key)?;
-            Ok(false)
-        }
-        Mode::PermissionModal => {
-            handle_permission_modal(app, key)?;
             Ok(false)
         }
     }
@@ -1480,15 +1520,33 @@ fn handle_normal(app: &mut App, key: KeyCode) -> Result<bool, String> {
                 app.mode = Mode::SessionDirectoryPicker;
             }
         }
-        KeyCode::Char(':') => {
-            app.mode = Mode::NlpChat;
-            app.input_buffer.clear();
-            app.chat_history.clear();
-            app.nlp_messages.clear();
-        }
         KeyCode::Char('D') => {
             app.input_buffer = config::read_config_value("default-dir").unwrap_or_default();
             app.mode = Mode::EditingDefaultDir;
+        }
+        KeyCode::Char(']') => {
+            if app.view == View::Due {
+                app.due_window = app.due_window.next();
+                app.selected = 0;
+                app.table_state.select(Some(0));
+                app.clamp_selection();
+            }
+        }
+        KeyCode::Char('[') => {
+            if app.view == View::Due {
+                app.due_window = app.due_window.prev();
+                app.selected = 0;
+                app.table_state.select(Some(0));
+                app.clamp_selection();
+            }
+        }
+        KeyCode::Char('G') => {
+            app.group_by = app.group_by.next();
+            let _ = config::write_config_value("group-by", app.group_by.to_config_str());
+        }
+        KeyCode::Char(':') => {
+            app.input_buffer.clear();
+            app.mode = Mode::Command;
         }
         KeyCode::Tab => {
             app.show_detail_panel = !app.show_detail_panel;
@@ -1532,6 +1590,18 @@ fn handle_normal(app: &mut App, key: KeyCode) -> Result<bool, String> {
                 app.note_picker_selected = 0;
                 app.note_picker_task_idx = Some(task_idx);
                 app.mode = Mode::NotePicker;
+            }
+        }
+        KeyCode::Char('A') => {
+            if let Some(&task_idx) = filtered.get(app.selected) {
+                let _ = task_idx; // selected task exists
+                let profiles = crate::config::list_agent_profiles();
+                let mut items: Vec<String> = profiles.iter().map(|(name, _)| name.clone()).collect();
+                items.push("human".to_string());
+                items.push("(clear)".to_string());
+                app.agent_picker_items = items;
+                app.agent_picker_selected = 0;
+                app.mode = Mode::EditingAgent;
             }
         }
         KeyCode::Char('g') => {
@@ -1638,12 +1708,6 @@ fn handle_normal_notes(app: &mut App, key: KeyCode) -> Result<bool, String> {
             app.selected = 0;
             app.table_state.select(Some(0));
             app.clamp_selection();
-        }
-        KeyCode::Char(':') => {
-            app.mode = Mode::NlpChat;
-            app.input_buffer.clear();
-            app.chat_history.clear();
-            app.nlp_messages.clear();
         }
         _ => {}
     }
@@ -1800,6 +1864,41 @@ fn handle_note_picker(app: &mut App, key: KeyCode) -> Result<(), String> {
     Ok(())
 }
 
+fn handle_agent_picker(app: &mut App, key: KeyCode) -> Result<(), String> {
+    match key {
+        KeyCode::Char('j') | KeyCode::Down => {
+            if app.agent_picker_selected + 1 < app.agent_picker_items.len() {
+                app.agent_picker_selected += 1;
+            }
+        }
+        KeyCode::Char('k') | KeyCode::Up => {
+            if app.agent_picker_selected > 0 {
+                app.agent_picker_selected -= 1;
+            }
+        }
+        KeyCode::Enter => {
+            let filtered = app.filtered_indices();
+            if let Some(&task_idx) = filtered.get(app.selected) {
+                if let Some(item) = app.agent_picker_items.get(app.agent_picker_selected) {
+                    if item == "(clear)" {
+                        app.task_file.tasks[task_idx].agent = None;
+                    } else {
+                        app.task_file.tasks[task_idx].agent = Some(item.clone());
+                    }
+                    app.task_file.tasks[task_idx].updated = Some(chrono::Utc::now());
+                    app.save()?;
+                }
+            }
+            app.mode = Mode::Normal;
+        }
+        KeyCode::Esc => {
+            app.mode = Mode::Normal;
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
 enum InputAction {
     Add,
     Filter,
@@ -1860,6 +1959,7 @@ fn handle_input(app: &mut App, key: KeyCode, action: InputAction) -> Result<(), 
                                 project: None,
                                 recurrence: None,
                                 note: None,
+                                agent: None,
                             });
                             app.save()?;
                             app.clamp_selection();
@@ -1960,11 +2060,10 @@ fn handle_recurrence_input(app: &mut App, key: KeyCode) -> Result<(), String> {
                     Ok(Some(trimmed.to_lowercase()))
                 }
                 _ => {
-                    // Use NLP to parse the recurrence pattern
-                    match auth::read_claude_key_source() {
-                        Some((_, key)) => nlp::parse_recurrence_nlp(trimmed, &key),
-                        None => Err("No Claude API key. Run `task auth claude` first.".to_string()),
-                    }
+                    // Try rule-based parse; return it as a string for later validation
+                    trimmed.parse::<crate::task::Recurrence>()
+                        .map(|r| Some(r.to_string()))
+                        .map_err(|e| e)
                 }
             };
 
@@ -1995,6 +2094,49 @@ fn handle_recurrence_input(app: &mut App, key: KeyCode) -> Result<(), String> {
                 Err(e) => {
                     app.status_message = Some(e);
                 }
+            }
+        }
+        KeyCode::Backspace => {
+            app.input_buffer.pop();
+        }
+        KeyCode::Char(c) => {
+            app.input_buffer.push(c);
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn handle_command_input(app: &mut App, key: KeyCode) -> Result<(), String> {
+    match key {
+        KeyCode::Esc => {
+            app.mode = Mode::Normal;
+            app.input_buffer.clear();
+        }
+        KeyCode::Enter => {
+            let input = app.input_buffer.clone();
+            app.input_buffer.clear();
+            app.mode = Mode::Normal;
+            let trimmed = input.trim();
+            if trimmed.is_empty() {
+                return Ok(());
+            }
+            if let Some(field) = trimmed.strip_prefix("group ").map(|s| s.trim()) {
+                let new_group = match field {
+                    "agent" => Some(GroupBy::Agent),
+                    "project" => Some(GroupBy::Project),
+                    "priority" => Some(GroupBy::Priority),
+                    "none" => Some(GroupBy::None),
+                    _ => None,
+                };
+                if let Some(g) = new_group {
+                    app.group_by = g;
+                    let _ = config::write_config_value("group-by", g.to_config_str());
+                } else {
+                    app.status_message = Some("Unknown group field. Valid: agent, project, priority, none".to_string());
+                }
+            } else {
+                app.status_message = Some(format!("Unknown command: {}", trimmed));
             }
         }
         KeyCode::Backspace => {
@@ -2070,403 +2212,9 @@ fn handle_priority(app: &mut App, key: KeyCode) -> Result<(), String> {
     Ok(())
 }
 
-fn format_action_summary(action: &NlpAction) -> Option<String> {
-    match action {
-        NlpAction::Filter(criteria) => {
-            let mut parts = Vec::new();
-            if let Some(ref s) = criteria.status { parts.push(format!("status={}", s)); }
-            if let Some(ref p) = criteria.priority { parts.push(format!("priority={}", p)); }
-            if let Some(ref t) = criteria.tag { parts.push(format!("tag={}", t)); }
-            if let Some(ref p) = criteria.project { parts.push(format!("project={}", p)); }
-            if let Some(ref tc) = criteria.title_contains { parts.push(format!("title~{}", tc)); }
-            if parts.is_empty() {
-                Some("Filtering: (all tasks)".to_string())
-            } else {
-                Some(format!("Filtering: {}", parts.join(", ")))
-            }
-        }
-        NlpAction::Update { match_criteria, set_fields, task_ids, .. } => {
-            let match_str = if let Some(ids) = task_ids {
-                format!("tasks [{}]", ids.iter().map(|id| id.to_string()).collect::<Vec<_>>().join(", "))
-            } else {
-                let mut match_parts = Vec::new();
-                if let Some(ref s) = match_criteria.status { match_parts.push(format!("status={}", s)); }
-                if let Some(ref p) = match_criteria.priority { match_parts.push(format!("priority={}", p)); }
-                if let Some(ref t) = match_criteria.tag { match_parts.push(format!("tag={}", t)); }
-                if let Some(ref p) = match_criteria.project { match_parts.push(format!("project={}", p)); }
-                if let Some(ref tc) = match_criteria.title_contains { match_parts.push(format!("title~{}", tc)); }
-                if match_parts.is_empty() { "(all)".to_string() } else { match_parts.join(", ") }
-            };
-            let mut set_parts = Vec::new();
-            if let Some(ref p) = set_fields.priority { set_parts.push(format!("priority={}", p)); }
-            if let Some(ref s) = set_fields.status { set_parts.push(format!("status={}", s)); }
-            if let Some(ref t) = set_fields.tags { set_parts.push(format!("tags=[{}]", t.join(", "))); }
-            if let Some(ref d) = set_fields.due_date { set_parts.push(format!("due_date={}", if d.is_empty() { "none" } else { d })); }
-            let set_str = if set_parts.is_empty() { "(none)".to_string() } else { set_parts.join(", ") };
-            Some(format!("Updating: match {{{}}} → set {{{}}}", match_str, set_str))
-        }
-        NlpAction::SetRecurrence { description, .. } => {
-            Some(description.clone())
-        }
-        NlpAction::CreateNote { title, .. } => {
-            Some(format!("Creating note: {}", title))
-        }
-        NlpAction::EditNote { slug, .. } => {
-            Some(format!("Editing note: {}", slug))
-        }
-        NlpAction::Message(_) | NlpAction::ShowTasks { .. } => None,
-    }
-}
 
-fn format_update_preview(tasks: &[Task], indices: &[usize], set_fields: &nlp::SetFields) -> Vec<String> {
-    let mut lines = Vec::new();
-    let show_count = indices.len().min(10);
-    for &i in &indices[..show_count] {
-        let task = &tasks[i];
-        let mut changes = Vec::new();
-        if let Some(ref new_priority) = set_fields.priority {
-            let old = task.priority.to_string();
-            if !old.eq_ignore_ascii_case(new_priority) {
-                changes.push(format!("priority {} → {}", old, new_priority));
-            }
-        }
-        if let Some(ref new_status) = set_fields.status {
-            let old = task.status.to_string();
-            if !old.eq_ignore_ascii_case(new_status) {
-                changes.push(format!("status {} → {}", old, new_status));
-            }
-        }
-        if let Some(ref new_tags) = set_fields.tags {
-            let old = task.tags.join(", ");
-            let new = new_tags.join(", ");
-            if old != new {
-                changes.push(format!("tags [{}] → [{}]", old, new));
-            }
-        }
-        if let Some(ref new_due) = set_fields.due_date {
-            let old = task.due_date.map(|d| d.format("%Y-%m-%d").to_string()).unwrap_or_else(|| "none".to_string());
-            let new_display = if new_due.is_empty() { "none".to_string() } else { new_due.clone() };
-            if old != new_display {
-                changes.push(format!("due_date {} → {}", old, new_display));
-            }
-        }
-        if changes.is_empty() {
-            continue; // no actual changes for this task
-        }
-        lines.push(format!("  #{} \"{}\": {}", task.id, task.title, changes.join(", ")));
-    }
-    if indices.len() > 10 {
-        lines.push(format!("  ... and {} more tasks", indices.len() - 10));
-    }
-    lines
-}
 
-fn process_nlp_result(app: &mut App, result: Result<(NlpAction, String), String>) -> Result<(), String> {
-    app.status_message = None;
-    match result {
-        Ok((action @ NlpAction::Filter(_), raw_response)) => {
-            let NlpAction::Filter(criteria) = &action else { unreachable!() };
-            app.nlp_messages.push(ApiMessage {
-                role: "assistant".to_string(),
-                content: raw_response,
-            });
-            if let Some(summary) = format_action_summary(&action) {
-                app.chat_history.push(ChatMessage::Assistant(summary));
-            }
-            let mut filter = Filter::default();
-            if let Some(s) = &criteria.status {
-                if let Ok(status) = s.parse::<Status>() {
-                    filter.status = Some(status);
-                }
-            }
-            if let Some(p) = &criteria.priority {
-                if let Ok(priority) = p.parse::<Priority>() {
-                    filter.priority = Some(priority);
-                }
-            }
-            if let Some(t) = &criteria.tag {
-                filter.tag = Some(t.clone());
-            }
-            if let Some(p) = &criteria.project {
-                filter.project = Some(p.clone());
-            }
-            if let Some(tc) = &criteria.title_contains {
-                filter.title_contains = Some(tc.clone());
-            }
-            app.view = View::All;
-            app.filter = filter;
-            app.selected = 0;
-            app.table_state.select(Some(0));
-            app.clamp_selection();
-            app.chat_history.push(ChatMessage::Assistant("Filter applied.".to_string()));
-        }
-        Ok((action @ NlpAction::Update { .. }, raw_response)) => {
-            let NlpAction::Update { ref match_criteria, ref set_fields, ref task_ids, .. } = action else { unreachable!() };
-            app.nlp_messages.push(ApiMessage {
-                role: "assistant".to_string(),
-                content: raw_response,
-            });
-            if let Some(summary) = format_action_summary(&action) {
-                app.chat_history.push(ChatMessage::Assistant(summary));
-            }
-            let matching: Vec<usize> = if let Some(ids) = task_ids {
-                // Match by explicit task IDs
-                app.task_file.tasks.iter().enumerate()
-                    .filter(|(_, t)| ids.contains(&t.id))
-                    .map(|(i, _)| i)
-                    .collect()
-            } else {
-                let has_any_criteria = match_criteria.status.is_some()
-                    || match_criteria.priority.is_some()
-                    || match_criteria.tag.is_some()
-                    || match_criteria.project.is_some()
-                    || match_criteria.title_contains.is_some();
-                if !has_any_criteria {
-                    vec![] // empty criteria matches nothing — prevents accidental bulk updates
-                } else {
-                    app.task_file.tasks.iter().enumerate()
-                        .filter(|(_, t)| {
-                            if let Some(ref s) = match_criteria.status {
-                                if !t.status.to_string().eq_ignore_ascii_case(s) { return false; }
-                            }
-                            if let Some(ref p) = match_criteria.priority {
-                                if !t.priority.to_string().eq_ignore_ascii_case(p) { return false; }
-                            }
-                            if let Some(ref tag) = match_criteria.tag {
-                                if !t.tags.iter().any(|tg| tg.eq_ignore_ascii_case(tag)) { return false; }
-                            }
-                            if let Some(ref proj) = match_criteria.project {
-                                match &t.project {
-                                    Some(p) => if !p.eq_ignore_ascii_case(proj) { return false; },
-                                    None => return false,
-                                }
-                            }
-                            if let Some(ref tc) = match_criteria.title_contains {
-                                if !t.title.to_lowercase().contains(&tc.to_lowercase()) { return false; }
-                            }
-                            true
-                        })
-                        .map(|(i, _)| i)
-                        .collect()
-                }
-            };
 
-            if matching.is_empty() {
-                app.chat_history.push(ChatMessage::Assistant("No tasks match the criteria.".to_string()));
-            } else {
-                let preview_lines = format_update_preview(&app.task_file.tasks, &matching, set_fields);
-                if !preview_lines.is_empty() {
-                    app.chat_history.push(ChatMessage::Assistant(
-                        format!("Changes:\n{}", preview_lines.join("\n"))
-                    ));
-                }
-                app.pending_nlp_update = Some((action, matching));
-                app.mode = Mode::ConfirmingNlp;
-            }
-        }
-        Ok((NlpAction::Message(text), raw_response)) => {
-            app.nlp_messages.push(ApiMessage {
-                role: "assistant".to_string(),
-                content: raw_response,
-            });
-            app.chat_history.push(ChatMessage::Assistant(text));
-        }
-        Ok((NlpAction::ShowTasks { task_ids, text }, raw_response)) => {
-            app.nlp_messages.push(ApiMessage {
-                role: "assistant".to_string(),
-                content: raw_response,
-            });
-            let tasks: Vec<(u32, String, String, String)> = task_ids
-                .iter()
-                .filter_map(|&id| {
-                    app.task_file.tasks.iter().find(|t| t.id == id).map(|t| {
-                        (t.id, t.title.clone(), t.priority.to_string(), t.status.to_string())
-                    })
-                })
-                .collect();
-            app.chat_history.push(ChatMessage::TaskList { text, tasks });
-        }
-        Ok((action @ NlpAction::SetRecurrence { .. }, raw_response)) => {
-            let NlpAction::SetRecurrence { task_id, ref recurrence, .. } = action else { unreachable!() };
-            app.nlp_messages.push(ApiMessage {
-                role: "assistant".to_string(),
-                content: raw_response,
-            });
-            if let Some(summary) = format_action_summary(&action) {
-                app.chat_history.push(ChatMessage::Assistant(summary));
-            }
-            if let Some(task) = app.task_file.find_task_mut(task_id) {
-                match recurrence {
-                    Some(recur_str) => {
-                        match recur_str.parse::<crate::task::Recurrence>() {
-                            Ok(recur) => {
-                                task.recurrence = Some(recur);
-                                task.updated = Some(Utc::now());
-                                app.save()?;
-                                app.chat_history.push(ChatMessage::Assistant(
-                                    format!("Set recurrence on task {} to {}", task_id, format_recurrence_display(&recur))
-                                ));
-                            }
-                            Err(e) => {
-                                app.chat_history.push(ChatMessage::Error(format!("Invalid recurrence: {}", e)));
-                            }
-                        }
-                    }
-                    None => {
-                        task.recurrence = None;
-                        task.updated = Some(Utc::now());
-                        app.save()?;
-                        app.chat_history.push(ChatMessage::Assistant(
-                            format!("Removed recurrence from task {}", task_id)
-                        ));
-                    }
-                }
-            } else {
-                app.chat_history.push(ChatMessage::Error(format!("Task {} not found", task_id)));
-            }
-        }
-        Ok((NlpAction::CreateNote { title, content, task_id }, raw_response)) => {
-            app.nlp_messages.push(ApiMessage {
-                role: "assistant".to_string(),
-                content: raw_response,
-            });
-            let dir = app.task_dir();
-            let base_slug = crate::note::slugify(&title);
-            let slug = crate::note::unique_slug(&dir, &base_slug);
-            let note = crate::note::Note {
-                slug: slug.clone(),
-                title: title.clone(),
-                body: content,
-            };
-            match crate::note::write_note(&dir, &note) {
-                Ok(_) => {
-                    // Link to task if requested
-                    if let Some(tid) = task_id {
-                        if let Some(task) = app.task_file.find_task_mut(tid) {
-                            task.note = Some(slug.clone());
-                            task.updated = Some(Utc::now());
-                            app.save()?;
-                        }
-                    }
-                    app.chat_history.push(ChatMessage::Assistant(
-                        format!("Created note: {} ({})", title, slug)
-                    ));
-                }
-                Err(e) => {
-                    app.chat_history.push(ChatMessage::Error(format!("Failed to create note: {}", e)));
-                }
-            }
-        }
-        Ok((NlpAction::EditNote { slug, content }, raw_response)) => {
-            app.nlp_messages.push(ApiMessage {
-                role: "assistant".to_string(),
-                content: raw_response,
-            });
-            let dir = app.task_dir();
-            let note_path = dir.join(format!("{}.md", slug));
-            match crate::note::read_note(&note_path) {
-                Ok(existing) => {
-                    let updated_note = crate::note::Note {
-                        slug: existing.slug,
-                        title: existing.title,
-                        body: content,
-                    };
-                    match crate::note::write_note(&dir, &updated_note) {
-                        Ok(_) => {
-                            app.chat_history.push(ChatMessage::Assistant(
-                                format!("Updated note: {}", slug)
-                            ));
-                        }
-                        Err(e) => {
-                            app.chat_history.push(ChatMessage::Error(format!("Failed to update note: {}", e)));
-                        }
-                    }
-                }
-                Err(_) => {
-                    app.chat_history.push(ChatMessage::Error(format!("Note not found: {}", slug)));
-                }
-            }
-        }
-        Err(e) => {
-            app.chat_history.push(ChatMessage::Error(e));
-        }
-    }
-    Ok(())
-}
-
-fn handle_nlp_chat<B: Backend>(_terminal: &mut Terminal<B>, app: &mut App, key: KeyCode) -> Result<(), String> {
-    match key {
-        KeyCode::Esc => {
-            app.nlp_pending = None;
-            app.nlp_spinner_frame = 0;
-            app.mode = Mode::Normal;
-            app.input_buffer.clear();
-            app.chat_history.clear();
-            app.nlp_messages.clear();
-            app.status_message = None;
-        }
-        KeyCode::Enter if app.nlp_pending.is_some() => {
-            // Ignore Enter while NLP request is in progress
-        }
-        KeyCode::Enter => {
-            let input = app.input_buffer.clone();
-            app.input_buffer.clear();
-
-            if input.trim().is_empty() {
-                return Ok(());
-            }
-
-            let api_key = match auth::read_claude_key() {
-                Some(k) => k,
-                None => {
-                    app.chat_history.push(ChatMessage::Error(
-                        "No Claude API key. Run `task auth claude` or set ANTHROPIC_API_KEY.".to_string(),
-                    ));
-                    return Ok(());
-                }
-            };
-
-            // Append user message to conversation
-            app.chat_history.push(ChatMessage::User(input.clone()));
-            app.nlp_messages.push(ApiMessage {
-                role: "user".to_string(),
-                content: input,
-            });
-
-            // Cap message history at 20
-            while app.nlp_messages.len() > 20 {
-                app.nlp_messages.remove(0);
-            }
-
-            // Spawn NLP call on background thread for animated loading
-            let tasks_clone = app.task_file.tasks.clone();
-            let messages_clone = app.nlp_messages.clone();
-            let note_slugs: Vec<String> = {
-                let dir = app.task_dir();
-                let filename = app.task_filename();
-                crate::note::discover_notes(&dir, &filename)
-                    .into_iter()
-                    .map(|n| n.slug)
-                    .collect()
-            };
-            let (tx, rx) = mpsc::channel();
-            std::thread::spawn(move || {
-                let result = nlp::interpret_with_notes(&tasks_clone, &messages_clone, &api_key, &note_slugs);
-                let _ = tx.send(result);
-            });
-            app.nlp_pending = Some(rx);
-            app.nlp_spinner_frame = 0;
-        }
-        KeyCode::Backspace => {
-            app.input_buffer.pop();
-        }
-        KeyCode::Char(c) => {
-            app.input_buffer.push(c);
-        }
-        _ => {}
-    }
-    Ok(())
-}
 
 const DETAIL_FIELD_COUNT: usize = 7;
 
@@ -2647,58 +2395,6 @@ fn handle_detail_confirm(app: &mut App, key: KeyCode) -> Result<(), String> {
     Ok(())
 }
 
-fn handle_nlp_confirm(app: &mut App, key: KeyCode) -> Result<(), String> {
-    match key {
-        KeyCode::Char('y') => {
-            if let Some((NlpAction::Update { set_fields, description, .. }, indices)) = app.pending_nlp_update.take() {
-                let count = indices.len();
-                for &idx in &indices {
-                    let task = &mut app.task_file.tasks[idx];
-                    if let Some(ref s) = set_fields.status {
-                        if let Ok(status) = s.parse::<Status>() {
-                            task.status = status;
-                        }
-                    }
-                    if let Some(ref p) = set_fields.priority {
-                        if let Ok(priority) = p.parse::<Priority>() {
-                            task.priority = priority;
-                        }
-                    }
-                    if let Some(ref tags) = set_fields.tags {
-                        task.tags = tags.clone();
-                    }
-                    if let Some(ref due) = set_fields.due_date {
-                        if due.is_empty() {
-                            task.due_date = None;
-                        } else {
-                            match NaiveDate::parse_from_str(due, "%Y-%m-%d") {
-                                Ok(d) => task.due_date = Some(d),
-                                Err(_) => {
-                                    app.status_message = Some(format!("Invalid due date format: {}", due));
-                                    app.mode = Mode::NlpChat;
-                                    return Ok(());
-                                }
-                            }
-                        }
-                    }
-                    task.updated = Some(Utc::now());
-                }
-                app.save()?;
-                app.clamp_selection();
-                app.chat_history.push(ChatMessage::Assistant(
-                    format!("{} ({} tasks)", description, count),
-                ));
-            }
-            app.mode = Mode::NlpChat;
-        }
-        _ => {
-            app.pending_nlp_update = None;
-            app.chat_history.push(ChatMessage::Assistant("Update cancelled.".to_string()));
-            app.mode = Mode::NlpChat;
-        }
-    }
-    Ok(())
-}
 
 // -- Rendering --
 
@@ -2715,6 +2411,21 @@ fn draw(frame: &mut Frame, app: &mut App) {
 
         draw_header(frame, app, chunks[0]);
         draw_note_editor(frame, app, chunks[1]);
+        draw_footer(frame, app, chunks[2]);
+        return;
+    }
+    if app.mode == Mode::EditingAgent {
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(1),
+                Constraint::Min(0),
+                Constraint::Length(1),
+            ])
+            .split(frame.area());
+        draw_header(frame, app, chunks[0]);
+        draw_table(frame, app, chunks[1]);
+        draw_agent_picker(frame, app, chunks[1]);
         draw_footer(frame, app, chunks[2]);
         return;
     }
@@ -2736,7 +2447,6 @@ fn draw(frame: &mut Frame, app: &mut App) {
     if app.mode == Mode::SessionDirectoryPicker
         || app.mode == Mode::Sessions
         || app.mode == Mode::SessionReply
-        || app.mode == Mode::PermissionModal
     {
         let chunks = Layout::default()
             .direction(Direction::Vertical)
@@ -2754,9 +2464,6 @@ fn draw(frame: &mut Frame, app: &mut App) {
             draw_sessions_panel(frame, app, chunks[1]);
         }
         draw_footer(frame, app, chunks[2]);
-        if app.mode == Mode::PermissionModal {
-            draw_permission_modal(frame, app);
-        }
         return;
     }
     if app.view == View::Notes && app.mode == Mode::Normal {
@@ -2774,23 +2481,7 @@ fn draw(frame: &mut Frame, app: &mut App) {
         draw_footer(frame, app, chunks[2]);
         return;
     }
-    if app.mode == Mode::NlpChat || app.mode == Mode::ConfirmingNlp {
-        // 4-region layout for chat mode
-        let chunks = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Length(1),
-                Constraint::Percentage(55),
-                Constraint::Min(3),
-                Constraint::Length(1),
-            ])
-            .split(frame.area());
-
-        draw_header(frame, app, chunks[0]);
-        draw_table(frame, app, chunks[1]);
-        draw_chat_panel(frame, app, chunks[2]);
-        draw_footer(frame, app, chunks[3]);
-    } else if app.show_detail_panel || app.mode == Mode::EditingDetailPanel || app.mode == Mode::ConfirmingDetailSave {
+    if app.show_detail_panel || app.mode == Mode::EditingDetailPanel || app.mode == Mode::ConfirmingDetailSave {
         // Layout with detail panel
         let chunks = Layout::default()
             .direction(Direction::Vertical)
@@ -2824,10 +2515,15 @@ fn draw(frame: &mut Frame, app: &mut App) {
 }
 
 fn draw_header(frame: &mut Frame, app: &App, area: Rect) {
-    let title = if app.filter.is_active() {
-        format!(" task-manager  |  {}  |  filter: {} ", app.view.display_name(), app.filter.summary())
+    let view_label = if app.view == View::Due {
+        format!("Due [{}]", app.due_window.label())
     } else {
-        format!(" task-manager  |  {} ", app.view.display_name())
+        app.view.display_name().to_string()
+    };
+    let title = if app.filter.is_active() {
+        format!(" task-manager  |  {}  |  filter: {} ", view_label, app.filter.summary())
+    } else {
+        format!(" task-manager  |  {} ", view_label)
     };
     let header = Paragraph::new(title).style(
         Style::default()
@@ -2901,6 +2597,97 @@ fn truncate_desc(desc: Option<&str>) -> String {
     }
 }
 
+fn build_task_cells(
+    task: &crate::task::Task,
+    today: NaiveDate,
+    columns: &[ColumnId],
+    show_desc: bool,
+    show_due: bool,
+    show_project: bool,
+    show_agent: bool,
+    show_recur: bool,
+    show_note: bool,
+) -> Vec<Cell<'static>> {
+    let is_overdue = task.status == Status::Open
+        && task.due_date.map_or(false, |d| d < today);
+    let status_str = match task.status {
+        Status::Open => if is_overdue { "[!]" } else { "[ ]" },
+        Status::Done => "[x]",
+    };
+    let priority_style = match task.priority {
+        Priority::Critical => Style::default().fg(theme::PRIORITY_CRITICAL).add_modifier(Modifier::BOLD),
+        Priority::High => Style::default().fg(theme::PRIORITY_HIGH),
+        Priority::Medium => Style::default().fg(theme::PRIORITY_MEDIUM),
+        Priority::Low => Style::default().fg(theme::PRIORITY_LOW),
+    };
+
+    if !columns.is_empty() {
+        // Config-driven columns
+        let mut cells: Vec<Cell<'static>> = Vec::new();
+        for &col in columns {
+            match col {
+                ColumnId::Id => cells.push(Cell::from(task.id.to_string())),
+                ColumnId::Status => cells.push(Cell::from(status_str)),
+                ColumnId::Priority => cells.push(Cell::from(format!("{}", task.priority)).style(priority_style)),
+                ColumnId::Title => cells.push(Cell::from(task.title.clone())),
+                ColumnId::Desc => cells.push(Cell::from(truncate_desc(task.description.as_deref()))),
+                ColumnId::Due => {
+                    let due_str = task.due_date
+                        .map(|d| d.format("%Y-%m-%d").to_string())
+                        .unwrap_or_default();
+                    cells.push(Cell::from(due_str));
+                }
+                ColumnId::Project => cells.push(Cell::from(task.project.clone().unwrap_or_default())),
+                ColumnId::Agent => cells.push(Cell::from(task.agent.clone().unwrap_or_default())),
+                ColumnId::Recur => {
+                    cells.push(Cell::from(if task.recurrence.is_some() { "↻" } else { "" }));
+                    cells.push(Cell::from(
+                        task.recurrence.as_ref().map(|r| format_recurrence_display(r)).unwrap_or_default()
+                    ));
+                }
+                ColumnId::Note => cells.push(Cell::from(task.note.clone().unwrap_or_default())),
+                ColumnId::Tags => cells.push(Cell::from(task.tags.join(", "))),
+            }
+        }
+        cells
+    } else {
+        // Auto-show columns
+        let tags_str = task.tags.join(", ");
+        let mut cells = vec![
+            Cell::from(task.id.to_string()),
+            Cell::from(status_str),
+            Cell::from(format!("{}", task.priority)).style(priority_style),
+            Cell::from(task.title.clone()),
+        ];
+        if show_desc {
+            cells.push(Cell::from(truncate_desc(task.description.as_deref())));
+        }
+        if show_due {
+            let due_str = task.due_date
+                .map(|d| d.format("%Y-%m-%d").to_string())
+                .unwrap_or_default();
+            cells.push(Cell::from(due_str));
+        }
+        if show_project {
+            cells.push(Cell::from(task.project.clone().unwrap_or_default()));
+        }
+        if show_agent {
+            cells.push(Cell::from(task.agent.clone().unwrap_or_default()));
+        }
+        if show_recur {
+            cells.push(Cell::from(if task.recurrence.is_some() { "↻" } else { "" }));
+            cells.push(Cell::from(
+                task.recurrence.as_ref().map(|r| format_recurrence_display(r)).unwrap_or_default()
+            ));
+        }
+        if show_note {
+            cells.push(Cell::from(task.note.clone().unwrap_or_default()));
+        }
+        cells.push(Cell::from(tags_str));
+        cells
+    }
+}
+
 fn draw_table(frame: &mut Frame, app: &mut App, area: Rect) {
     let filtered = app.filtered_indices();
 
@@ -2917,101 +2704,197 @@ fn draw_table(frame: &mut Frame, app: &mut App, area: Rect) {
         return;
     }
 
-    let show_desc = filtered.iter().any(|&i| {
+    // Determine which columns to show (auto-detect or config-driven)
+    let using_config_columns = !app.columns.is_empty();
+    let show_desc = !using_config_columns && filtered.iter().any(|&i| {
         app.task_file.tasks[i].description.as_ref().map_or(false, |d| !d.is_empty())
     });
-    let show_due = filtered.iter().any(|&i| app.task_file.tasks[i].due_date.is_some());
-    let show_project = filtered.iter().any(|&i| app.task_file.tasks[i].project.is_some());
-    let show_recur = filtered.iter().any(|&i| app.task_file.tasks[i].recurrence.is_some());
-    let show_note = filtered.iter().any(|&i| app.task_file.tasks[i].note.is_some());
+    let show_due = !using_config_columns && filtered.iter().any(|&i| app.task_file.tasks[i].due_date.is_some());
+    let show_project = !using_config_columns && filtered.iter().any(|&i| app.task_file.tasks[i].project.is_some());
+    let show_agent = !using_config_columns && filtered.iter().any(|&i| app.task_file.tasks[i].agent.is_some());
+    let show_recur = !using_config_columns && filtered.iter().any(|&i| app.task_file.tasks[i].recurrence.is_some());
+    let show_note = !using_config_columns && filtered.iter().any(|&i| app.task_file.tasks[i].note.is_some());
 
-    let mut header_cells = vec!["ID", "Status", "Priority", "Title"];
-    if show_desc { header_cells.push("Desc"); }
-    if show_due { header_cells.push("Due"); }
-    if show_project { header_cells.push("Project"); }
-    if show_recur { header_cells.push("↻"); header_cells.push("Pattern"); }
-    if show_note { header_cells.push("Note"); }
-    header_cells.push("Tags");
+    // Build header cells
+    let header_cells: Vec<&str> = if using_config_columns {
+        let mut hdr = Vec::new();
+        for &col in &app.columns {
+            match col {
+                ColumnId::Id => hdr.push("ID"),
+                ColumnId::Status => hdr.push("Status"),
+                ColumnId::Priority => hdr.push("Priority"),
+                ColumnId::Title => hdr.push("Title"),
+                ColumnId::Desc => hdr.push("Desc"),
+                ColumnId::Due => hdr.push("Due"),
+                ColumnId::Project => hdr.push("Project"),
+                ColumnId::Agent => hdr.push("Agent"),
+                ColumnId::Recur => { hdr.push("↻"); hdr.push("Pattern"); }
+                ColumnId::Note => hdr.push("Note"),
+                ColumnId::Tags => hdr.push("Tags"),
+            }
+        }
+        hdr
+    } else {
+        let mut hdr = vec!["ID", "Status", "Priority", "Title"];
+        if show_desc { hdr.push("Desc"); }
+        if show_due { hdr.push("Due"); }
+        if show_project { hdr.push("Project"); }
+        if show_agent { hdr.push("Agent"); }
+        if show_recur { hdr.push("↻"); hdr.push("Pattern"); }
+        if show_note { hdr.push("Note"); }
+        hdr.push("Tags");
+        hdr
+    };
 
-    let header = Row::new(header_cells)
+    let header = Row::new(header_cells.clone())
         .style(Style::default().add_modifier(Modifier::BOLD))
         .bottom_margin(0);
 
-    // Compute today once for consistent overdue checks across all rows.
-    // Overdue = strictly before today (tasks due today are NOT overdue).
     let today = Local::now().date_naive();
-    let rows: Vec<Row> = filtered
-        .iter()
-        .map(|&i| {
-            let task = &app.task_file.tasks[i];
-            let is_overdue = task.status == Status::Open
-                && task.due_date.map_or(false, |d| d < today);
-            let status_str = match task.status {
-                Status::Open => if is_overdue { "[!]" } else { "[ ]" },
-                Status::Done => "[x]",
-            };
-            let priority_style = match task.priority {
-                Priority::Critical => Style::default().fg(theme::PRIORITY_CRITICAL).add_modifier(Modifier::BOLD),
-                Priority::High => Style::default().fg(theme::PRIORITY_HIGH),
-                Priority::Medium => Style::default().fg(theme::PRIORITY_MEDIUM),
-                Priority::Low => Style::default().fg(theme::PRIORITY_LOW),
-            };
-            let tags_str = if task.tags.is_empty() {
-                String::new()
-            } else {
-                task.tags.join(", ")
-            };
-            let mut cells = vec![
-                Cell::from(task.id.to_string()),
-                Cell::from(status_str),
-                Cell::from(format!("{}", task.priority)).style(priority_style),
-                Cell::from(task.title.as_str()),
-            ];
-            if show_desc {
-                cells.push(Cell::from(truncate_desc(task.description.as_deref())));
-            }
-            if show_due {
-                let due_str = task.due_date
-                    .map(|d| d.format("%Y-%m-%d").to_string())
-                    .unwrap_or_default();
-                cells.push(Cell::from(due_str));
-            }
-            if show_project {
-                cells.push(Cell::from(task.project.as_deref().unwrap_or("").to_string()));
-            }
-            if show_recur {
-                cells.push(Cell::from(if task.recurrence.is_some() { "↻" } else { "" }));
-                cells.push(Cell::from(
-                    task.recurrence.as_ref().map(|r| format_recurrence_display(r)).unwrap_or_default()
-                ));
-            }
-            if show_note {
-                cells.push(Cell::from(task.note.as_deref().unwrap_or("")));
-            }
-            cells.push(Cell::from(tags_str));
-            let row = Row::new(cells);
-            if task.status == Status::Done {
-                row.style(Style::default().fg(theme::DONE_TEXT))
-            } else if is_overdue {
-                row.style(Style::default().fg(theme::OVERDUE))
-            } else {
-                row
-            }
-        })
-        .collect();
+    let section_header_style = Style::default()
+        .fg(theme::BAR_FG)
+        .bg(Color::Rgb(25, 40, 70))
+        .add_modifier(Modifier::BOLD);
 
-    let mut widths = vec![
-        Constraint::Length(5),
-        Constraint::Length(5),
-        Constraint::Length(9),
-        Constraint::Fill(1),
-    ];
-    if show_desc { widths.push(Constraint::Length(30)); }
-    if show_due { widths.push(Constraint::Length(12)); }
-    if show_project { widths.push(Constraint::Length(15)); }
-    if show_recur { widths.push(Constraint::Length(3)); widths.push(Constraint::Min(8)); }
-    if show_note { widths.push(Constraint::Length(15)); }
-    widths.push(Constraint::Length(20));
+    let columns_ref = app.columns.clone();
+    let group_by = app.group_by;
+
+    // Build rows, injecting group section headers when grouping is active
+    let mut rows: Vec<Row> = Vec::new();
+    let mut render_task_map: Vec<Option<usize>> = Vec::new(); // None = header row, Some(idx) = task row
+
+    if group_by != GroupBy::None {
+        // Build group buckets
+        let mut seen_keys: Vec<Option<String>> = Vec::new();
+        let mut group_map: std::collections::HashMap<Option<String>, Vec<usize>> = std::collections::HashMap::new();
+        for &idx in &filtered {
+            let task = &app.task_file.tasks[idx];
+            let key: Option<String> = match group_by {
+                GroupBy::Agent => task.agent.clone(),
+                GroupBy::Project => task.project.clone(),
+                GroupBy::Priority => Some(format!("{}", task.priority)),
+                GroupBy::None => unreachable!(),
+            };
+            if !seen_keys.contains(&key) {
+                seen_keys.push(key.clone());
+            }
+            group_map.entry(key).or_default().push(idx);
+        }
+        // Sort: named values alphabetically, None last
+        seen_keys.sort_by(|a, b| match (a, b) {
+            (None, None) => std::cmp::Ordering::Equal,
+            (None, _) => std::cmp::Ordering::Greater,
+            (_, None) => std::cmp::Ordering::Less,
+            (Some(a), Some(b)) => a.to_lowercase().cmp(&b.to_lowercase()),
+        });
+
+        let group_field_name = match group_by {
+            GroupBy::Agent => "Agent",
+            GroupBy::Project => "Project",
+            GroupBy::Priority => "Priority",
+            GroupBy::None => unreachable!(),
+        };
+        let num_cols = header_cells.len().max(1);
+        for key in &seen_keys {
+            let label = key.as_deref().unwrap_or("(none)");
+            let header_text = format!(" {} : {} ", group_field_name, label);
+            // Span all columns with a single cell
+            let mut cells = vec![Cell::from(header_text).style(section_header_style)];
+            for _ in 1..num_cols {
+                cells.push(Cell::from("").style(section_header_style));
+            }
+            rows.push(Row::new(cells).style(section_header_style));
+            render_task_map.push(None);
+
+            if let Some(task_indices) = group_map.get(key) {
+                for &idx in task_indices {
+                    let task = &app.task_file.tasks[idx];
+                    let is_overdue = task.status == Status::Open
+                        && task.due_date.map_or(false, |d| d < today);
+                    let cells = build_task_cells(
+                        task, today, &columns_ref,
+                        show_desc, show_due, show_project, show_agent, show_recur, show_note,
+                    );
+                    let row = Row::new(cells);
+                    let row = if task.status == Status::Done {
+                        row.style(Style::default().fg(theme::DONE_TEXT))
+                    } else if is_overdue {
+                        row.style(Style::default().fg(theme::OVERDUE))
+                    } else {
+                        row
+                    };
+                    rows.push(row);
+                    render_task_map.push(Some(idx));
+                }
+            }
+        }
+
+        // Map app.selected (position in filtered) to the rendered row index
+        let selected_task_idx = filtered.get(app.selected).copied();
+        let render_selected = selected_task_idx.and_then(|sel_idx| {
+            render_task_map.iter().position(|entry| *entry == Some(sel_idx))
+        });
+        app.table_state.select(render_selected);
+    } else {
+        // Flat rendering
+        rows = filtered
+            .iter()
+            .map(|&i| {
+                let task = &app.task_file.tasks[i];
+                let is_overdue = task.status == Status::Open
+                    && task.due_date.map_or(false, |d| d < today);
+                let cells = build_task_cells(
+                    task, today, &columns_ref,
+                    show_desc, show_due, show_project, show_agent, show_recur, show_note,
+                );
+                let row = Row::new(cells);
+                if task.status == Status::Done {
+                    row.style(Style::default().fg(theme::DONE_TEXT))
+                } else if is_overdue {
+                    row.style(Style::default().fg(theme::OVERDUE))
+                } else {
+                    row
+                }
+            })
+            .collect();
+        app.table_state.select(if filtered.is_empty() { None } else { Some(app.selected) });
+    }
+
+    // Build widths
+    let widths: Vec<Constraint> = if using_config_columns {
+        let mut w = Vec::new();
+        for &col in &columns_ref {
+            match col {
+                ColumnId::Id => w.push(Constraint::Length(5)),
+                ColumnId::Status => w.push(Constraint::Length(5)),
+                ColumnId::Priority => w.push(Constraint::Length(9)),
+                ColumnId::Title => w.push(Constraint::Fill(1)),
+                ColumnId::Desc => w.push(Constraint::Length(30)),
+                ColumnId::Due => w.push(Constraint::Length(12)),
+                ColumnId::Project => w.push(Constraint::Length(15)),
+                ColumnId::Agent => w.push(Constraint::Length(15)),
+                ColumnId::Recur => { w.push(Constraint::Length(3)); w.push(Constraint::Min(8)); }
+                ColumnId::Note => w.push(Constraint::Length(15)),
+                ColumnId::Tags => w.push(Constraint::Length(20)),
+            }
+        }
+        w
+    } else {
+        let mut w = vec![
+            Constraint::Length(5),
+            Constraint::Length(5),
+            Constraint::Length(9),
+            Constraint::Fill(1),
+        ];
+        if show_desc { w.push(Constraint::Length(30)); }
+        if show_due { w.push(Constraint::Length(12)); }
+        if show_project { w.push(Constraint::Length(15)); }
+        if show_agent { w.push(Constraint::Length(15)); }
+        if show_recur { w.push(Constraint::Length(3)); w.push(Constraint::Min(8)); }
+        if show_note { w.push(Constraint::Length(15)); }
+        w.push(Constraint::Length(20));
+        w
+    };
 
     let table = Table::new(rows, widths)
         .header(header)
@@ -3076,6 +2959,7 @@ fn draw_detail_panel(frame: &mut Frame, app: &App, area: Rect) {
                 None => "-".to_string(),
             };
             let note_str = task.note.as_deref().unwrap_or("(none)");
+            let agent_str = task.agent.as_deref().unwrap_or("(none)");
             let created = task.created.format("%Y-%m-%d %H:%M").to_string();
             let updated = task.updated
                 .map(|u| u.format("%Y-%m-%d %H:%M").to_string())
@@ -3085,12 +2969,12 @@ fn draw_detail_panel(frame: &mut Frame, app: &App, area: Rect) {
                 "ID: {}  |  Status: {}  |  Priority: {}  |  Due: {}  |  Project: {}\n\
                  Title: {}\n\
                  Description: {}\n\
-                 Tags: {}  |  Recurrence: {}  |  Note: {}\n\
+                 Tags: {}  |  Recurrence: {}  |  Note: {}  |  Agent: {}\n\
                  Created: {}  |  Updated: {}",
                 task.id, task.status, task.priority, due, project,
                 task.title,
                 desc,
-                tags, recurrence_str, note_str,
+                tags, recurrence_str, note_str, agent_str,
                 created, updated,
             )
         } else {
@@ -3104,69 +2988,6 @@ fn draw_detail_panel(frame: &mut Frame, app: &App, area: Rect) {
     }
 }
 
-fn draw_chat_panel(frame: &mut Frame, app: &App, area: Rect) {
-    let mut lines: Vec<Line> = Vec::new();
-
-    for msg in &app.chat_history {
-        match msg {
-            ChatMessage::User(text) => {
-                for line in text.lines() {
-                    lines.push(Line::from(Span::styled(
-                        format!("> {}", line),
-                        Style::default().fg(theme::CHAT_USER),
-                    )));
-                }
-            }
-            ChatMessage::Assistant(text) => {
-                for line in text.lines() {
-                    lines.push(Line::from(Span::raw(line.to_string())));
-                }
-            }
-            ChatMessage::TaskList { text, tasks } => {
-                for line in text.lines() {
-                    lines.push(Line::from(Span::raw(line.to_string())));
-                }
-                for (id, title, priority, status) in tasks {
-                    lines.push(Line::from(Span::styled(
-                        format!("  #{} {} [{}] ({})", id, title, priority, status),
-                        Style::default().fg(theme::CHAT_TASK_LIST),
-                    )));
-                }
-            }
-            ChatMessage::Error(text) => {
-                for line in text.lines() {
-                    lines.push(Line::from(Span::styled(
-                        format!("Error: {}", line),
-                        Style::default().fg(theme::CHAT_ERROR),
-                    )));
-                }
-            }
-        }
-        lines.push(Line::from(""));
-    }
-
-    let content_width = area.width.saturating_sub(2) as usize; // account for border
-    let visible_height = area.height.saturating_sub(2) as usize;
-
-    // Estimate wrapped line count for scroll calculation
-    let wrapped_count: usize = lines.iter().map(|line| {
-        let len = line.width();
-        if content_width == 0 || len == 0 { 1 } else { (len + content_width - 1) / content_width }
-    }).sum();
-
-    let scroll = if wrapped_count > visible_height {
-        (wrapped_count - visible_height) as u16
-    } else {
-        0
-    };
-
-    let paragraph = Paragraph::new(lines)
-        .block(Block::default().borders(Borders::TOP).title(" Chat "))
-        .wrap(ratatui::widgets::Wrap { trim: false })
-        .scroll((scroll, 0));
-
-    frame.render_widget(paragraph, area);
-}
 
 fn draw_notes_list(frame: &mut Frame, app: &mut App, area: Rect) {
     if app.notes_list.is_empty() {
@@ -3325,6 +3146,35 @@ fn draw_note_picker(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_stateful_widget(table, area, &mut state);
 }
 
+fn draw_agent_picker(frame: &mut Frame, app: &App, area: Rect) {
+    let title = " Assign Agent ";
+    let items: Vec<ratatui::widgets::ListItem> = app.agent_picker_items
+        .iter()
+        .enumerate()
+        .map(|(i, name)| {
+            let style = if i == app.agent_picker_selected {
+                ratatui::style::Style::default()
+                    .bg(theme::HIGHLIGHT_BG)
+                    .fg(ratatui::style::Color::White)
+            } else {
+                ratatui::style::Style::default()
+            };
+            ratatui::widgets::ListItem::new(name.as_str()).style(style)
+        })
+        .collect();
+
+    let width = 40u16.min(area.width.saturating_sub(4));
+    let height = (app.agent_picker_items.len() as u16 + 2).min(area.height.saturating_sub(2));
+    let x = area.x + area.width.saturating_sub(width) / 2;
+    let y = area.y + area.height.saturating_sub(height) / 2;
+    let picker_area = Rect { x, y, width, height };
+
+    frame.render_widget(ratatui::widgets::Clear, picker_area);
+    let list = ratatui::widgets::List::new(items)
+        .block(Block::default().borders(Borders::ALL).title(title));
+    frame.render_widget(list, picker_area);
+}
+
 // ---------------------------------------------------------------------------
 // Session directory picker (3.1–3.3)
 // ---------------------------------------------------------------------------
@@ -3449,53 +3299,19 @@ fn draw_sessions_panel(frame: &mut Frame, app: &App, area: Rect) {
         if let Some(session) = app.claude_sessions.get(app.session_selected) {
             let visible_height = area.height.saturating_sub(2) as usize;
 
-            // Build a flat list of rendered lines from structured events
+            // Build a flat list of rendered lines from plain string output
             let mut rendered: Vec<Line> = Vec::new();
             let mut in_code_block = false;
-            for (event_idx, event) in session.output.iter().enumerate() {
-                match event {
-                    SessionOutputEvent::TurnSeparator => {
-                        rendered.push(Line::from(Span::styled(
-                            claude_session::TURN_SEPARATOR_LABEL,
-                            Style::default().fg(Color::DarkGray),
-                        )));
-                    }
-                    SessionOutputEvent::Text(s) => {
-                        let (spans, updated) = md_style::style_markdown_line(s, in_code_block);
-                        in_code_block = updated;
-                        rendered.push(Line::from(spans));
-                    }
-                    SessionOutputEvent::ToolCall { name, input_preview, result_lines, collapsed } => {
-                        let focused = event_idx == app.session_focused_event;
-                        let bracket = if *collapsed { "[+]" } else { "[-]" };
-                        let header = if input_preview.is_empty() {
-                            format!("⚙  {} {}{}",
-                                name, bracket,
-                                if focused { " ◀" } else { "" })
-                        } else {
-                            format!("⚙  {}: {} {}{}",
-                                name, input_preview, bracket,
-                                if focused { " ◀" } else { "" })
-                        };
-                        rendered.push(Line::from(Span::styled(
-                            header,
-                            Style::default().fg(Color::Rgb(255, 200, 80)),
-                        )));
-                        if !collapsed {
-                            for rl in result_lines {
-                                rendered.push(Line::from(Span::styled(
-                                    format!("  {}", rl),
-                                    Style::default().fg(Color::Rgb(150, 200, 150)),
-                                )));
-                            }
-                        }
-                    }
-                    SessionOutputEvent::PermissionRequest { tool, input_preview } => {
-                        rendered.push(Line::from(Span::styled(
-                            format!("⚠  Permission: {} — {}", tool, input_preview),
-                            Style::default().fg(Color::Yellow),
-                        )));
-                    }
+            for s in &session.output {
+                if s == claude_session::TURN_SEPARATOR_LABEL {
+                    rendered.push(Line::from(Span::styled(
+                        claude_session::TURN_SEPARATOR_LABEL,
+                        Style::default().fg(Color::DarkGray),
+                    )));
+                } else {
+                    let (spans, updated) = md_style::style_markdown_line(s, in_code_block);
+                    in_code_block = updated;
+                    rendered.push(Line::from(spans));
                 }
             }
 
@@ -3545,13 +3361,10 @@ fn draw_sessions_panel(frame: &mut Frame, app: &App, area: Rect) {
                 .file_name()
                 .and_then(|n| n.to_str())
                 .unwrap_or("?");
-            let last_line = session.output.iter().rev().find_map(|e| match e {
-                SessionOutputEvent::Text(s) if !s.trim().is_empty() => Some(s.as_str()),
-                SessionOutputEvent::ToolCall { input_preview, .. } if !input_preview.is_empty() => {
-                    Some(input_preview.as_str())
-                }
-                _ => None,
-            }).unwrap_or("");
+            let last_line = session.output.iter().rev()
+                .find(|s| !s.trim().is_empty())
+                .map(|s| s.as_str())
+                .unwrap_or("");
             let style = if i == app.session_selected {
                 Style::default().bg(theme::HIGHLIGHT_BG)
             } else {
@@ -3592,14 +3405,10 @@ fn handle_sessions(app: &mut App, key: KeyCode) -> Result<(), String> {
     if app.session_viewing_output {
         match key {
             KeyCode::Char('j') | KeyCode::Down => {
-                // Move focused event down, scroll if needed
                 let n = app.claude_sessions
                     .get(app.session_selected)
                     .map(|s| s.output.len())
                     .unwrap_or(0);
-                if app.session_focused_event + 1 < n {
-                    app.session_focused_event += 1;
-                }
                 let max_scroll = n.saturating_sub(1);
                 if app.session_output_scroll < max_scroll {
                     app.session_output_scroll += 1;
@@ -3607,7 +3416,6 @@ fn handle_sessions(app: &mut App, key: KeyCode) -> Result<(), String> {
                 app.session_output_follow = false;
             }
             KeyCode::Char('k') | KeyCode::Up => {
-                app.session_focused_event = app.session_focused_event.saturating_sub(1);
                 if app.session_output_scroll > 0 {
                     app.session_output_scroll -= 1;
                 }
@@ -3615,7 +3423,6 @@ fn handle_sessions(app: &mut App, key: KeyCode) -> Result<(), String> {
             }
             KeyCode::Home | KeyCode::Char('g') => {
                 app.session_output_scroll = 0;
-                app.session_focused_event = 0;
                 app.session_output_follow = false;
             }
             KeyCode::End | KeyCode::Char('G') => {
@@ -3625,17 +3432,7 @@ fn handle_sessions(app: &mut App, key: KeyCode) -> Result<(), String> {
                     .map(|s| s.output.len())
                     .unwrap_or(0);
                 app.session_output_scroll = total.saturating_sub(1);
-                app.session_focused_event = total.saturating_sub(1);
                 app.session_output_follow = true;
-            }
-            KeyCode::Enter | KeyCode::Char(' ') => {
-                // Toggle collapse on focused ToolCall event
-                let idx = app.session_focused_event;
-                if let Some(session) = app.claude_sessions.get_mut(app.session_selected) {
-                    if let Some(SessionOutputEvent::ToolCall { collapsed, .. }) = session.output.get_mut(idx) {
-                        *collapsed = !*collapsed;
-                    }
-                }
             }
             KeyCode::Esc => {
                 app.session_viewing_output = false;
@@ -3664,7 +3461,6 @@ fn handle_sessions(app: &mut App, key: KeyCode) -> Result<(), String> {
                 app.session_output_follow = true;
                 let total = app.claude_sessions[app.session_selected].output.len();
                 app.session_output_scroll = total.saturating_sub(1);
-                app.session_focused_event = total.saturating_sub(1);
             }
         }
         KeyCode::Char('r') => {
@@ -3694,56 +3490,6 @@ fn handle_sessions(app: &mut App, key: KeyCode) -> Result<(), String> {
 // ---------------------------------------------------------------------------
 // Session reply (7.1–7.3)
 // ---------------------------------------------------------------------------
-
-fn draw_permission_modal(frame: &mut Frame, app: &App) {
-    // Centered modal overlay
-    let area = frame.area();
-    let modal_w = (area.width.saturating_sub(4)).min(60);
-    let modal_h = 7u16;
-    let x = area.x + area.width.saturating_sub(modal_w) / 2;
-    let y = area.y + area.height.saturating_sub(modal_h) / 2;
-    let modal_area = Rect { x, y, width: modal_w, height: modal_h };
-
-    frame.render_widget(ratatui::widgets::Clear, modal_area);
-
-    let content = vec![
-        Line::from(""),
-        Line::from(Span::styled(
-            format!("  Tool: {}", app.permission_modal_tool),
-            Style::default().fg(Color::Yellow),
-        )),
-        Line::from(Span::styled(
-            format!("  Input: {}", app.permission_modal_input),
-            Style::default().fg(Color::White),
-        )),
-        Line::from(""),
-        Line::from(vec![
-            Span::styled("  [y] Allow  ", Style::default().fg(Color::Green)),
-            Span::styled("[n] Deny  ", Style::default().fg(Color::Red)),
-            Span::styled("[a] Allow session", Style::default().fg(Color::Cyan)),
-        ]),
-    ];
-
-    let para = Paragraph::new(content)
-        .block(Block::default().borders(Borders::ALL).title(" ⚠  Permission Request ").border_style(Style::default().fg(Color::Yellow)));
-    frame.render_widget(para, modal_area);
-}
-
-fn handle_permission_modal(app: &mut App, key: KeyCode) -> Result<(), String> {
-    let selected = app.session_selected;
-    match key {
-        KeyCode::Char('y') | KeyCode::Char('a') => {
-            claude_session::respond_to_permission(&mut app.claude_sessions[selected], true);
-            app.mode = Mode::Sessions;
-        }
-        KeyCode::Char('n') => {
-            claude_session::respond_to_permission(&mut app.claude_sessions[selected], false);
-            app.mode = Mode::Sessions;
-        }
-        _ => {}
-    }
-    Ok(())
-}
 
 fn draw_session_reply(frame: &mut Frame, app: &App, area: Rect) {
     let text = format!(" > {}_ ", app.session_reply_input);
@@ -3795,8 +3541,10 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
                 " a:new  Enter:edit  d:delete  v:view  C:claude  q:quit ".to_string()
             } else if app.show_detail_panel {
                 " j/k:nav  Enter:edit  Space:toggle  a:add  d:delete  f:filter  p:priority  e:edit-title  t:tags  r:desc  R:recur  n:note  g:go-note  v:view  Tab:details  q:quit ".to_string()
+            } else if app.view == View::Due {
+                " j/k:nav  Enter:toggle  a:add  d:delete  f:filter  v:view  [/]:window  G:group  ::command  q:quit ".to_string()
             } else {
-                " j/k:nav  Enter:toggle  a:add  d:delete  f:filter  p:priority  e:edit  t:tags  r:desc  R:recur  n:note  g:go-note  v:view  C:claude  ::command  D:set-dir  T/N/W/M/Q/Y:due  X:clr-due  Tab:details  q:quit ".to_string()
+                " j/k:nav  Enter:toggle  a:add  d:delete  f:filter  p:priority  e:edit  t:tags  r:desc  R:recur  n:note  g:go-note  v:view  G:group  C:claude  ::command  D:set-dir  T/N/W/M/Q/Y:due  X:clr-due  Tab:details  ^r:reload  q:quit".to_string()
             }
         }
         Mode::Adding => {
@@ -3840,15 +3588,8 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
         Mode::EditingDefaultDir => {
             format!(" Set default directory: {}_ ", app.input_buffer)
         }
-        Mode::NlpChat => {
-            format!(" > {}_ ", app.input_buffer)
-        }
-        Mode::ConfirmingNlp => {
-            if let Some((NlpAction::Update { ref description, .. }, ref indices)) = app.pending_nlp_update {
-                format!(" {} ({} tasks) — y/n ", description, indices.len())
-            } else {
-                " Apply changes? y/n ".to_string()
-            }
+        Mode::Command => {
+            format!(" :{}_ ", app.input_buffer)
         }
         Mode::EditingDetailPanel => {
             " j/k:field  c/h/m/l:priority  Enter/Space:status  Esc:done ".to_string()
@@ -3865,6 +3606,9 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
         Mode::NotePicker => {
             " j/k:nav  Enter:select  Esc:cancel ".to_string()
         }
+        Mode::EditingAgent => {
+            " j/k:nav  Enter:select  Esc:cancel ".to_string()
+        }
         Mode::SessionDirectoryPicker => {
             " j/k:nav  Enter:select  Esc:cancel ".to_string()
         }
@@ -3877,9 +3621,6 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
         }
         Mode::SessionReply => {
             format!(" Reply: {}_ ", app.session_reply_input)
-        }
-        Mode::PermissionModal => {
-            " y:Allow  n:Deny  a:Allow session ".to_string()
         }
     };
 
@@ -3894,6 +3635,7 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::auth;
     use chrono::NaiveDate;
     use crate::task::{Priority, Status, Task};
 
@@ -3911,72 +3653,73 @@ mod tests {
             project: None,
             recurrence: None,
             note: None,
+            agent: None,
         }
     }
 
-    // -- View::matches tests --
+    // -- due_matches tests (formerly View::matches for time-based views) --
 
     #[test]
-    fn today_view_shows_task_due_today() {
+    fn due_day_window_shows_task_due_today() {
         let today = NaiveDate::from_ymd_opt(2026, 2, 26).unwrap();
         let task = make_task(Some(today));
-        assert!(View::Today.matches(&task, today));
+        assert!(due_matches(&task, today, DueWindow::Day));
     }
 
     #[test]
-    fn today_view_shows_task_with_no_due_date() {
+    fn due_day_window_shows_task_with_no_due_date() {
         let today = NaiveDate::from_ymd_opt(2026, 2, 26).unwrap();
         let task = make_task(None);
-        assert!(View::Today.matches(&task, today));
+        assert!(due_matches(&task, today, DueWindow::Day));
     }
 
     #[test]
-    fn today_view_hides_task_due_tomorrow() {
+    fn due_day_window_hides_task_due_tomorrow() {
         let today = NaiveDate::from_ymd_opt(2026, 2, 26).unwrap();
         let tomorrow = NaiveDate::from_ymd_opt(2026, 2, 27).unwrap();
         let task = make_task(Some(tomorrow));
-        assert!(!View::Today.matches(&task, today));
+        assert!(!due_matches(&task, today, DueWindow::Day));
     }
 
     #[test]
-    fn today_view_shows_overdue_open_task() {
+    fn due_day_window_shows_overdue_open_task() {
         let today = NaiveDate::from_ymd_opt(2026, 2, 26).unwrap();
         let yesterday = NaiveDate::from_ymd_opt(2026, 2, 25).unwrap();
         let task = make_task(Some(yesterday));
-        assert!(View::Today.matches(&task, today));
+        assert!(due_matches(&task, today, DueWindow::Day));
     }
 
     #[test]
-    fn today_view_hides_overdue_completed_task() {
+    fn due_day_window_hides_overdue_completed_task() {
         let today = NaiveDate::from_ymd_opt(2026, 2, 26).unwrap();
         let yesterday = NaiveDate::from_ymd_opt(2026, 2, 25).unwrap();
         let mut task = make_task(Some(yesterday));
         task.status = Status::Done;
-        assert!(!View::Today.matches(&task, today));
+        assert!(!due_matches(&task, today, DueWindow::Day));
     }
 
     #[test]
-    fn weekly_view_shows_overdue_open_task() {
+    fn due_week_window_shows_overdue_open_task() {
         let today = NaiveDate::from_ymd_opt(2026, 2, 26).unwrap();
         let last_week = NaiveDate::from_ymd_opt(2026, 2, 15).unwrap();
         let task = make_task(Some(last_week));
-        assert!(View::Weekly.matches(&task, today));
+        assert!(due_matches(&task, today, DueWindow::Week));
     }
 
     #[test]
-    fn monthly_view_shows_overdue_open_task() {
+    fn due_month_window_shows_overdue_open_task() {
         let today = NaiveDate::from_ymd_opt(2026, 2, 26).unwrap();
         let last_month = NaiveDate::from_ymd_opt(2026, 1, 10).unwrap();
         let task = make_task(Some(last_month));
-        assert!(View::Monthly.matches(&task, today));
+        assert!(due_matches(&task, today, DueWindow::Month));
     }
 
     #[test]
-    fn yearly_view_shows_overdue_open_task() {
+    fn due_year_window_shows_overdue_open_task() {
         let today = NaiveDate::from_ymd_opt(2026, 2, 26).unwrap();
         let last_year = NaiveDate::from_ymd_opt(2025, 6, 15).unwrap();
         let task = make_task(Some(last_year));
-        assert!(View::Yearly.matches(&task, today));
+        assert!(due_matches(&task, today, DueWindow::Year));
     }
 
     #[test]
@@ -3988,66 +3731,66 @@ mod tests {
     }
 
     #[test]
-    fn all_view_shows_everything() {
+    fn due_all_window_shows_everything() {
         let today = NaiveDate::from_ymd_opt(2026, 2, 26).unwrap();
-        assert!(View::All.matches(&make_task(Some(today)), today));
-        assert!(View::All.matches(&make_task(None), today));
+        assert!(due_matches(&make_task(Some(today)), today, DueWindow::All));
+        assert!(due_matches(&make_task(None), today, DueWindow::All));
         let far_future = NaiveDate::from_ymd_opt(2030, 12, 31).unwrap();
-        assert!(View::All.matches(&make_task(Some(far_future)), today));
+        assert!(due_matches(&make_task(Some(far_future)), today, DueWindow::All));
     }
 
     #[test]
-    fn weekly_view_shows_task_due_this_week() {
+    fn due_week_window_shows_task_due_this_week() {
         // 2026-02-26 is a Thursday. Monday = 2026-02-23, Sunday = 2026-03-01
         let today = NaiveDate::from_ymd_opt(2026, 2, 26).unwrap();
         let monday = NaiveDate::from_ymd_opt(2026, 2, 23).unwrap();
         let sunday = NaiveDate::from_ymd_opt(2026, 3, 1).unwrap();
-        assert!(View::Weekly.matches(&make_task(Some(monday)), today));
-        assert!(View::Weekly.matches(&make_task(Some(today)), today));
-        assert!(View::Weekly.matches(&make_task(Some(sunday)), today));
+        assert!(due_matches(&make_task(Some(monday)), today, DueWindow::Week));
+        assert!(due_matches(&make_task(Some(today)), today, DueWindow::Week));
+        assert!(due_matches(&make_task(Some(sunday)), today, DueWindow::Week));
     }
 
     #[test]
-    fn weekly_view_hides_task_due_next_week() {
+    fn due_week_window_hides_task_due_next_week() {
         let today = NaiveDate::from_ymd_opt(2026, 2, 26).unwrap();
         let next_monday = NaiveDate::from_ymd_opt(2026, 3, 2).unwrap();
-        assert!(!View::Weekly.matches(&make_task(Some(next_monday)), today));
+        assert!(!due_matches(&make_task(Some(next_monday)), today, DueWindow::Week));
     }
 
     #[test]
-    fn weekly_view_hides_no_due_date() {
+    fn due_week_window_hides_no_due_date() {
         let today = NaiveDate::from_ymd_opt(2026, 2, 26).unwrap();
-        assert!(!View::Weekly.matches(&make_task(None), today));
+        assert!(!due_matches(&make_task(None), today, DueWindow::Week));
     }
 
     #[test]
-    fn monthly_view_shows_task_due_this_month() {
+    fn due_month_window_shows_task_due_this_month() {
         let today = NaiveDate::from_ymd_opt(2026, 2, 26).unwrap();
         let first = NaiveDate::from_ymd_opt(2026, 2, 1).unwrap();
         let last = NaiveDate::from_ymd_opt(2026, 2, 28).unwrap();
-        assert!(View::Monthly.matches(&make_task(Some(first)), today));
-        assert!(View::Monthly.matches(&make_task(Some(last)), today));
+        assert!(due_matches(&make_task(Some(first)), today, DueWindow::Month));
+        assert!(due_matches(&make_task(Some(last)), today, DueWindow::Month));
     }
 
     #[test]
-    fn monthly_view_hides_task_due_next_month() {
+    fn due_month_window_hides_task_due_next_month() {
         let today = NaiveDate::from_ymd_opt(2026, 2, 26).unwrap();
         let next = NaiveDate::from_ymd_opt(2026, 3, 1).unwrap();
-        assert!(!View::Monthly.matches(&make_task(Some(next)), today));
+        assert!(!due_matches(&make_task(Some(next)), today, DueWindow::Month));
     }
 
     #[test]
-    fn yearly_view_shows_task_due_this_year() {
+    fn due_year_window_shows_task_due_this_year() {
         let today = NaiveDate::from_ymd_opt(2026, 2, 26).unwrap();
         let dec = NaiveDate::from_ymd_opt(2026, 12, 31).unwrap();
-        assert!(View::Yearly.matches(&make_task(Some(dec)), today));
+        assert!(due_matches(&make_task(Some(dec)), today, DueWindow::Year));
     }
 
     #[test]
-    fn yearly_view_hides_task_due_next_year() {
+    fn due_year_window_hides_task_due_next_year() {
         let today = NaiveDate::from_ymd_opt(2026, 2, 26).unwrap();
         let next = NaiveDate::from_ymd_opt(2027, 1, 1).unwrap();
-        assert!(!View::Yearly.matches(&make_task(Some(next)), today));
+        assert!(!due_matches(&make_task(Some(next)), today, DueWindow::Year));
     }
 
     #[test]
@@ -4057,30 +3800,31 @@ mod tests {
         assert!(!View::NoDueDate.matches(&make_task(Some(today)), today));
     }
 
-    // -- Completed tasks hidden from non-All views --
+    // -- Completed tasks hidden from all views --
 
     #[test]
-    fn today_view_hides_completed_task() {
+    fn due_day_window_hides_completed_task() {
         let today = NaiveDate::from_ymd_opt(2026, 2, 26).unwrap();
         let mut task = make_task(Some(today));
         task.status = Status::Done;
-        assert!(!View::Today.matches(&task, today));
+        assert!(!due_matches(&task, today, DueWindow::Day));
     }
 
     #[test]
-    fn all_view_shows_completed_task() {
+    fn due_all_window_hides_completed_task() {
+        // Due view never shows completed tasks (even in All window)
         let today = NaiveDate::from_ymd_opt(2026, 2, 26).unwrap();
         let mut task = make_task(Some(today));
         task.status = Status::Done;
-        assert!(View::All.matches(&task, today));
+        assert!(!due_matches(&task, today, DueWindow::All));
     }
 
     #[test]
-    fn weekly_view_hides_completed_task() {
+    fn due_week_window_hides_completed_task() {
         let today = NaiveDate::from_ymd_opt(2026, 2, 26).unwrap();
         let mut task = make_task(Some(today));
         task.status = Status::Done;
-        assert!(!View::Weekly.matches(&task, today));
+        assert!(!due_matches(&task, today, DueWindow::Week));
     }
 
     #[test]
@@ -4121,53 +3865,47 @@ mod tests {
 
     #[test]
     fn next_cycles_through_all_views() {
-        let mut v = View::Today;
-        v = v.next(); assert_eq!(v, View::All);
-        v = v.next(); assert_eq!(v, View::Weekly);
-        v = v.next(); assert_eq!(v, View::Monthly);
-        v = v.next(); assert_eq!(v, View::Yearly);
+        let mut v = View::Due;
         v = v.next(); assert_eq!(v, View::NoDueDate);
         v = v.next(); assert_eq!(v, View::Recurring);
         v = v.next(); assert_eq!(v, View::Notes);
-        v = v.next(); assert_eq!(v, View::Today); // wrap
+        v = v.next(); assert_eq!(v, View::Due); // wrap
     }
 
     #[test]
     fn prev_cycles_through_all_views() {
-        let mut v = View::Today;
+        let mut v = View::Due;
         v = v.prev(); assert_eq!(v, View::Notes);
         v = v.prev(); assert_eq!(v, View::Recurring);
         v = v.prev(); assert_eq!(v, View::NoDueDate);
-        v = v.prev(); assert_eq!(v, View::Yearly);
-        v = v.prev(); assert_eq!(v, View::Monthly);
-        v = v.prev(); assert_eq!(v, View::Weekly);
-        v = v.prev(); assert_eq!(v, View::All);
-        v = v.prev(); assert_eq!(v, View::Today); // wrap
+        v = v.prev(); assert_eq!(v, View::Due); // wrap
     }
 
     // -- View::from_config tests --
 
     #[test]
     fn from_config_parses_valid_values() {
-        assert_eq!(View::from_config("today"), View::Today);
-        assert_eq!(View::from_config("all"), View::All);
-        assert_eq!(View::from_config("weekly"), View::Weekly);
-        assert_eq!(View::from_config("monthly"), View::Monthly);
-        assert_eq!(View::from_config("yearly"), View::Yearly);
+        assert_eq!(View::from_config("due"), View::Due);
+        assert_eq!(View::from_config("today"), View::Due);   // legacy migration
+        assert_eq!(View::from_config("all"), View::Due);     // legacy migration
+        assert_eq!(View::from_config("weekly"), View::Due);  // legacy migration
+        assert_eq!(View::from_config("monthly"), View::Due); // legacy migration
+        assert_eq!(View::from_config("yearly"), View::Due);  // legacy migration
+        assert_eq!(View::from_config("by-agent"), View::Due); // legacy migration
         assert_eq!(View::from_config("no-due-date"), View::NoDueDate);
         assert_eq!(View::from_config("recurring"), View::Recurring);
     }
 
     #[test]
     fn from_config_is_case_insensitive() {
-        assert_eq!(View::from_config("TODAY"), View::Today);
-        assert_eq!(View::from_config("Weekly"), View::Weekly);
+        assert_eq!(View::from_config("DUE"), View::Due);
+        assert_eq!(View::from_config("Recurring"), View::Recurring);
     }
 
     #[test]
     fn from_config_falls_back_on_invalid() {
-        assert_eq!(View::from_config("bogus"), View::Today);
-        assert_eq!(View::from_config(""), View::Today);
+        assert_eq!(View::from_config("bogus"), View::Due);
+        assert_eq!(View::from_config(""), View::Due);
     }
 
     // -- Status message tests --
@@ -4180,26 +3918,26 @@ mod tests {
             file_path: PathBuf::from("/dev/null"),
             selected: 0,
             filter: Filter::default(),
-            view: View::All,
+            view: View::Due,
+            due_window: DueWindow::All,
+            group_by: GroupBy::None,
+            columns: Vec::new(),
             mode: Mode::Normal,
             input_buffer: String::new(),
             table_state: TableState::default(),
             status_message: None,
-            pending_nlp_update: None,
-            chat_history: Vec::new(),
-            nlp_messages: Vec::new(),
             show_detail_panel: false,
             detail_draft: None,
             detail_field_index: 0,
             pending_navigation: None,
-            nlp_pending: None,
-            nlp_spinner_frame: 0,
             notes_list: Vec::new(),
             notes_selected: 0,
             note_editor: None,
             note_picker_items: Vec::new(),
             note_picker_selected: 0,
             note_picker_task_idx: None,
+            agent_picker_items: Vec::new(),
+            agent_picker_selected: 0,
             claude_sessions: Vec::new(),
             next_session_id: 0,
             session_selected: 0,
@@ -4210,9 +3948,6 @@ mod tests {
             session_viewing_output: false,
             session_output_scroll: 0,
             session_output_follow: true,
-            session_focused_event: 0,
-            permission_modal_tool: String::new(),
-            permission_modal_input: String::new(),
         }
     }
 
@@ -4245,37 +3980,6 @@ mod tests {
         }
     }
 
-    // -- NLP mode tests --
-
-    #[test]
-    fn colon_key_enters_nlp_chat_mode() {
-        let mut app = make_app_with_tasks(vec![make_task(None)]);
-        // Pre-populate to verify clearing
-        app.chat_history.push(ChatMessage::User("old".to_string()));
-        app.nlp_messages.push(ApiMessage { role: "user".to_string(), content: "old".to_string() });
-        let _ = handle_normal(&mut app, KeyCode::Char(':'));
-        assert_eq!(app.mode, Mode::NlpChat);
-        assert!(app.input_buffer.is_empty());
-        assert!(app.chat_history.is_empty());
-        assert!(app.nlp_messages.is_empty());
-    }
-
-    #[test]
-    fn esc_in_nlp_chat_clears_conversation() {
-        let mut app = make_app_with_tasks(vec![make_task(None)]);
-        app.mode = Mode::NlpChat;
-        app.input_buffer = "some query".to_string();
-        app.chat_history.push(ChatMessage::User("test".to_string()));
-        app.nlp_messages.push(ApiMessage { role: "user".to_string(), content: "test".to_string() });
-        let backend = ratatui::backend::TestBackend::new(80, 24);
-        let mut terminal = Terminal::new(backend).unwrap();
-        let _ = handle_nlp_chat(&mut terminal, &mut app, KeyCode::Esc);
-        assert_eq!(app.mode, Mode::Normal);
-        assert!(app.input_buffer.is_empty());
-        assert!(app.chat_history.is_empty());
-        assert!(app.nlp_messages.is_empty());
-    }
-
     // -- Due date keybinding tests --
 
     fn make_app_with_tmpfile(tasks: Vec<Task>) -> App {
@@ -4294,26 +3998,26 @@ mod tests {
             file_path: path,
             selected: 0,
             filter: Filter::default(),
-            view: View::All,
+            view: View::Due,
+            due_window: DueWindow::All,
+            group_by: GroupBy::None,
+            columns: Vec::new(),
             mode: Mode::Normal,
             input_buffer: String::new(),
             table_state: TableState::default(),
             status_message: None,
-            pending_nlp_update: None,
-            chat_history: Vec::new(),
-            nlp_messages: Vec::new(),
             show_detail_panel: false,
             detail_draft: None,
             detail_field_index: 0,
             pending_navigation: None,
-            nlp_pending: None,
-            nlp_spinner_frame: 0,
             notes_list: Vec::new(),
             notes_selected: 0,
             note_editor: None,
             note_picker_items: Vec::new(),
             note_picker_selected: 0,
             note_picker_task_idx: None,
+            agent_picker_items: Vec::new(),
+            agent_picker_selected: 0,
             claude_sessions: Vec::new(),
             next_session_id: 0,
             session_selected: 0,
@@ -4324,9 +4028,6 @@ mod tests {
             session_viewing_output: false,
             session_output_scroll: 0,
             session_output_follow: true,
-            session_focused_event: 0,
-            permission_modal_tool: String::new(),
-            permission_modal_input: String::new(),
         }
     }
 
@@ -4614,10 +4315,10 @@ mod tests {
     fn task_due_today_is_not_overdue_in_view() {
         let today = NaiveDate::from_ymd_opt(2026, 3, 4).unwrap();
         let task = make_task(Some(today));
-        // Task due today should appear in Today view (it's due today, not overdue)
-        assert!(View::Today.matches(&task, today));
-        // The overdue path in View::matches requires d < today, which is false for d == today
-        // So the task is shown because it matches the Today view directly, not as overdue
+        // Task due today should appear in Due view Day window
+        assert!(due_matches(&task, today, DueWindow::Day));
+        // The overdue path requires d < today, which is false for d == today
+        // So the task is shown because it matches the Day window directly, not as overdue
     }
 
     #[test]
@@ -4625,25 +4326,10 @@ mod tests {
         let today = NaiveDate::from_ymd_opt(2026, 3, 4).unwrap();
         let yesterday = NaiveDate::from_ymd_opt(2026, 3, 3).unwrap();
         let task = make_task(Some(yesterday));
-        // Overdue open tasks appear in all time-based views
-        assert!(View::Today.matches(&task, today));
-        assert!(View::Weekly.matches(&task, today));
-        assert!(View::Monthly.matches(&task, today));
-    }
-
-    #[test]
-    fn nlp_spinner_frame_cycles() {
-        let frames = ["Thinking", "Thinking.", "Thinking..", "Thinking..."];
-        for i in 0u8..8 {
-            let expected = frames[(i % 4) as usize];
-            let dots = match i % 4 {
-                0 => "Thinking",
-                1 => "Thinking.",
-                2 => "Thinking..",
-                _ => "Thinking...",
-            };
-            assert_eq!(dots, expected, "Frame {} should be '{}'", i, expected);
-        }
+        // Overdue open tasks appear in all due windows
+        assert!(due_matches(&task, today, DueWindow::Day));
+        assert!(due_matches(&task, today, DueWindow::Week));
+        assert!(due_matches(&task, today, DueWindow::Month));
     }
 
     #[test]

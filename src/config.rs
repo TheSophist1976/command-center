@@ -87,6 +87,58 @@ pub fn write_config_value_to(path: &Path, key: &str, value: &str) -> Result<(), 
     Ok(())
 }
 
+/// Returns all agent profiles from config as `(name, dir)` pairs.
+/// Scans for keys with the `agent-` prefix and strips it to get the name.
+pub fn list_agent_profiles() -> Vec<(String, String)> {
+    let path = match config_path() {
+        Some(p) => p,
+        None => return Vec::new(),
+    };
+    list_agent_profiles_from(&path)
+}
+
+pub fn list_agent_profiles_from(path: &Path) -> Vec<(String, String)> {
+    let content = match fs::read_to_string(path) {
+        Ok(c) => c,
+        Err(_) => return Vec::new(),
+    };
+    let mut profiles = Vec::new();
+    for line in content.lines() {
+        if let Some(rest) = line.strip_prefix("agent-") {
+            if let Some((name, dir)) = rest.split_once(':') {
+                let name = name.trim().to_string();
+                let dir = dir.trim().to_string();
+                if !name.is_empty() && !dir.is_empty() {
+                    profiles.push((name, dir));
+                }
+            }
+        }
+    }
+    profiles
+}
+
+/// Finds the agent profile whose expanded directory is a prefix of `cwd`.
+/// Returns the profile name of the longest (most specific) match, or `None`.
+pub fn find_agent_for_cwd(cwd: &Path) -> Option<String> {
+    let path = config_path()?;
+    find_agent_for_cwd_from(&path, cwd)
+}
+
+pub fn find_agent_for_cwd_from(config: &Path, cwd: &Path) -> Option<String> {
+    let profiles = list_agent_profiles_from(config);
+    let mut best: Option<(usize, String)> = None; // (match_len, name)
+    for (name, dir) in profiles {
+        let expanded = expand_tilde(&dir);
+        if cwd.starts_with(&expanded) {
+            let len = expanded.as_os_str().len();
+            if best.as_ref().map_or(true, |(best_len, _)| len > *best_len) {
+                best = Some((len, name));
+            }
+        }
+    }
+    best.map(|(_, name)| name)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -182,5 +234,77 @@ mod tests {
         let content = fs::read_to_string(&path).unwrap();
         assert!(content.contains("# task-manager config"));
         assert!(content.contains("default-dir: /fresh"));
+    }
+
+    // -- list_agent_profiles_from --
+
+    #[test]
+    fn test_list_agent_profiles_empty() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("config.md");
+        fs::write(&path, "default-dir: /tasks\n").unwrap();
+        let profiles = list_agent_profiles_from(&path);
+        assert!(profiles.is_empty());
+    }
+
+    #[test]
+    fn test_list_agent_profiles_one() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("config.md");
+        fs::write(&path, "agent-command-center: /code/cc\n").unwrap();
+        let profiles = list_agent_profiles_from(&path);
+        assert_eq!(profiles.len(), 1);
+        assert_eq!(profiles[0].0, "command-center");
+        assert_eq!(profiles[0].1, "/code/cc");
+    }
+
+    #[test]
+    fn test_list_agent_profiles_multiple() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("config.md");
+        fs::write(&path, "agent-alpha: /code/alpha\nagent-beta: /code/beta\n").unwrap();
+        let mut profiles = list_agent_profiles_from(&path);
+        profiles.sort_by(|a, b| a.0.cmp(&b.0));
+        assert_eq!(profiles.len(), 2);
+        assert_eq!(profiles[0].0, "alpha");
+        assert_eq!(profiles[1].0, "beta");
+    }
+
+    // -- find_agent_for_cwd_from --
+
+    #[test]
+    fn test_find_agent_exact_match() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("config.md");
+        fs::write(&path, "agent-myapp: /code/myapp\n").unwrap();
+        let result = find_agent_for_cwd_from(&path, std::path::Path::new("/code/myapp"));
+        assert_eq!(result, Some("myapp".to_string()));
+    }
+
+    #[test]
+    fn test_find_agent_subdirectory_match() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("config.md");
+        fs::write(&path, "agent-myapp: /code/myapp\n").unwrap();
+        let result = find_agent_for_cwd_from(&path, std::path::Path::new("/code/myapp/src/bin"));
+        assert_eq!(result, Some("myapp".to_string()));
+    }
+
+    #[test]
+    fn test_find_agent_no_match() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("config.md");
+        fs::write(&path, "agent-myapp: /code/myapp\n").unwrap();
+        let result = find_agent_for_cwd_from(&path, std::path::Path::new("/code/other"));
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_find_agent_longest_match_wins() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("config.md");
+        fs::write(&path, "agent-root: /code\nagent-specific: /code/myapp\n").unwrap();
+        let result = find_agent_for_cwd_from(&path, std::path::Path::new("/code/myapp/src"));
+        assert_eq!(result, Some("specific".to_string()));
     }
 }

@@ -1,7 +1,5 @@
-## ADDED Requirements
-
 ### Requirement: Subcommand structure
-The CLI SHALL provide the following subcommands: `tui`, `auth`, `config`. Running `task` with no subcommand SHALL launch the TUI (equivalent to `task tui`). Each subcommand SHALL support `--help` for usage information.
+The CLI SHALL provide the following subcommands: `tui`, `auth`, `config`, `note`. Running `task` with no subcommand SHALL launch the TUI (equivalent to `task tui`). Each subcommand SHALL support `--help` for usage information.
 
 #### Scenario: Run with no subcommand
 - **WHEN** the user runs `task` with no arguments
@@ -13,7 +11,7 @@ The CLI SHALL provide the following subcommands: `tui`, `auth`, `config`. Runnin
 
 #### Scenario: Help flag
 - **WHEN** the user runs `task --help`
-- **THEN** the system SHALL display a help summary listing `tui`, `auth`, and `config` subcommands
+- **THEN** the system SHALL display a help summary listing `tui`, `auth`, `config`, and `note` subcommands
 
 ### Requirement: File path configuration
 The system SHALL resolve the task file path in this order: (1) `--file <path>` flag, (2) `TASK_FILE` environment variable, (3) `tasks.md` in the configured default directory or current working directory.
@@ -38,7 +36,7 @@ The system SHALL use consistent exit codes: 0 for success, 1 for errors.
 - **THEN** the process SHALL exit with code 1
 
 ### Requirement: Auth subcommand group
-The CLI SHALL provide an `auth` subcommand with sub-subcommands `todoist`, `claude`, `slack`, `status`, and `revoke`.
+The CLI SHALL provide an `auth` subcommand with sub-subcommands `todoist`, `claude`, `status`, and `revoke`. Running `task` with no subcommand SHALL launch the TUI (equivalent to `task tui`). Each subcommand SHALL support `--help` for usage information.
 
 #### Scenario: Auth todoist invocation
 - **WHEN** the user runs `task auth todoist`
@@ -52,18 +50,10 @@ The CLI SHALL provide an `auth` subcommand with sub-subcommands `todoist`, `clau
 - **WHEN** the user runs `task auth claude --key sk-ant-...`
 - **THEN** the system SHALL store the provided key without prompting
 
-#### Scenario: Auth slack invocation
-- **WHEN** the user runs `task auth slack`
-- **THEN** the system SHALL prompt for a Slack Bot User OAuth Token, validate it starts with `xoxb-`, and store it
-
-#### Scenario: Auth slack with token flag
-- **WHEN** the user runs `task auth slack --token xoxb-123-456`
-- **THEN** the system SHALL store the provided token without prompting
-
 #### Scenario: Auth status invocation
 - **WHEN** the user runs `task auth status`
-- **THEN** the system SHALL report whether a Todoist token, Claude API key, and Slack token are stored
+- **THEN** the system SHALL report whether a Todoist token and Claude API key are stored
 
 #### Scenario: Auth revoke invocation
 - **WHEN** the user runs `task auth revoke`
-- **THEN** the system SHALL delete the stored Todoist token, Claude API key, and Slack token
+- **THEN** the system SHALL delete the stored Todoist token and Claude API key

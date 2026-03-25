@@ -1,11 +1,34 @@
 ## ADDED Requirements
 
-### Requirement: Build project in release mode
-The script SHALL run `cargo build --release` and exit with an error if the build fails. The script SHALL verify that `cargo` is available before attempting the build.
+### Requirement: Interactive version bump before build
+Before the pre-flight check, the deploy script SHALL offer an optional interactive version-bump step. The step SHALL read the current version from `Cargo.toml`, prompt the user to bump (patch/minor/major/custom) or skip, and — if confirmed — update `Cargo.toml`, commit, and tag. See `semver-release-workflow` spec for full bump requirements.
+
+#### Scenario: Version bump offered at deploy start
+- **WHEN** the user runs `./deploy.sh`
+- **THEN** the first interactive prompt SHALL ask whether to bump the version
+
+#### Scenario: Skip proceeds to pre-flight
+- **WHEN** the user answers "n" to the version bump prompt
+- **THEN** the script SHALL proceed immediately to the cargo pre-flight check with no file changes
+
+### Requirement: Build and install both binaries
+The deploy script SHALL build both the `task` (CLI) binary and the `task-tui` (TUI) binary in release mode, and SHALL install both to the configured install directory. The CLI binary SHALL be built without the `tui` Cargo feature. The TUI binary SHALL be built with `--features tui`. The script SHALL verify that `cargo` is available before attempting the build.
+
+#### Scenario: Both binaries built
+- **WHEN** the deploy script runs the build step
+- **THEN** both `target/release/task` and `target/release/task-tui` SHALL be produced
+
+#### Scenario: Both binaries installed
+- **WHEN** the deploy script runs the install step
+- **THEN** both `task` and `task-tui` SHALL be copied to `$INSTALL_DIR` and made executable
+
+#### Scenario: Test step covers TUI code
+- **WHEN** the deploy script runs the test step
+- **THEN** tests SHALL be run with `--features tui` so TUI module tests are included
 
 #### Scenario: Successful build
 - **WHEN** the user runs `./deploy.sh` and cargo is installed
-- **THEN** the script runs `cargo build --release` and proceeds to the next step
+- **THEN** the script builds both binaries and proceeds to the next step
 
 #### Scenario: Cargo not installed
 - **WHEN** the user runs `./deploy.sh` and cargo is not found in PATH

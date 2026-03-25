@@ -363,49 +363,6 @@ fn test_auth_revoke_with_unremovable_token() {
     }
 }
 
-// -- Claude auth integration tests --
-
-#[test]
-fn test_auth_claude_stores_key_and_status_reports_it() {
-    let dir = temp_dir();
-    let config_dir = dir.path().join("config");
-
-    // Store a Claude API key
-    let out = task_bin()
-        .args(["auth", "claude", "--key", "sk-ant-test-key-123"])
-        .current_dir(dir.path())
-        .env("XDG_CONFIG_HOME", &config_dir)
-        .env("HOME", dir.path())
-        .output()
-        .unwrap();
-    assert!(out.status.success());
-    let s = stdout(&out);
-    assert!(s.contains("Claude") || s.contains("stored"));
-
-    // Check status reports it as present
-    let out = task_bin()
-        .args(["auth", "status"])
-        .current_dir(dir.path())
-        .env("XDG_CONFIG_HOME", &config_dir)
-        .env("HOME", dir.path())
-        .output()
-        .unwrap();
-    assert!(out.status.success());
-    let s = stdout(&out);
-    assert!(s.contains("Claude API key: present"));
-
-    // Revoke should delete it
-    let out = task_bin()
-        .args(["auth", "revoke"])
-        .current_dir(dir.path())
-        .env("XDG_CONFIG_HOME", &config_dir)
-        .env("HOME", dir.path())
-        .output()
-        .unwrap();
-    assert!(out.status.success());
-    let s = stdout(&out);
-    assert!(s.contains("Claude API key revoked"));
-}
 
 // -- Config subcommand tests --
 

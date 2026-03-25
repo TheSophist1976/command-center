@@ -92,6 +92,7 @@ pub fn parse(content: &str, strict: bool) -> Result<TaskFile, Vec<ParseError>> {
                         project: metadata.project,
                         recurrence: metadata.recurrence,
                         note: metadata.note,
+                        agent: metadata.agent,
                     });
                 } else if strict {
                     errors.push(ParseError {
@@ -166,6 +167,7 @@ struct Metadata {
     project: Option<String>,
     recurrence: Option<Recurrence>,
     note: Option<String>,
+    agent: Option<String>,
 }
 
 fn parse_metadata_comment(line: &str) -> Option<Metadata> {
@@ -181,6 +183,7 @@ fn parse_metadata_comment(line: &str) -> Option<Metadata> {
     let mut project: Option<String> = None;
     let mut recurrence: Option<Recurrence> = None;
     let mut note: Option<String> = None;
+    let mut agent: Option<String> = None;
 
     for pair in inner.split_whitespace() {
         if let Some((key, rest)) = pair.split_once(':') {
@@ -209,6 +212,11 @@ fn parse_metadata_comment(line: &str) -> Option<Metadata> {
                         note = Some(rest.to_string());
                     }
                 }
+                "agent" => {
+                    if !rest.is_empty() {
+                        agent = Some(rest.to_string());
+                    }
+                }
                 _ => {}
             }
         }
@@ -224,6 +232,7 @@ fn parse_metadata_comment(line: &str) -> Option<Metadata> {
         project,
         recurrence,
         note,
+        agent,
     })
 }
 
@@ -263,6 +272,9 @@ pub fn serialize(task_file: &TaskFile) -> String {
         }
         if let Some(ref note_slug) = task.note {
             meta_parts.push(format!("note:{}", note_slug));
+        }
+        if let Some(ref agent) = task.agent {
+            meta_parts.push(format!("agent:{}", agent));
         }
         meta_parts.push(format!("created:{}", task.created.to_rfc3339()));
         if let Some(updated) = task.updated {
@@ -535,6 +547,7 @@ Some description here.
             project: None,
             recurrence: None,
             note: None,
+            agent: None,
         });
         let out = serialize(&tf);
         assert!(out.contains("## [ ] Open task"));
@@ -558,6 +571,7 @@ Some description here.
             project: None,
             recurrence: None,
             note: None,
+            agent: None,
         });
         let out = serialize(&tf);
         assert!(out.contains("## [x] Done task"));
@@ -581,6 +595,7 @@ Some description here.
             project: Some("My Project".to_string()),
             recurrence: None,
             note: None,
+            agent: None,
         });
         let out = serialize(&tf);
         assert!(out.contains("tags:alpha,beta"));
@@ -609,6 +624,7 @@ Some description here.
             project: Some("Work:Project".to_string()),
             recurrence: None,
             note: None,
+            agent: None,
         });
         let out = serialize(&tf);
         assert!(out.contains("project:Work%3AProject"));
@@ -632,6 +648,7 @@ Some description here.
             project: Some("My Project".to_string()),
             recurrence: None,
             note: None,
+            agent: None,
         });
         let serialized = serialize(&tf);
         let parsed = parse(&serialized, false).unwrap();
@@ -879,10 +896,82 @@ Some description here.
             project: None,
             recurrence: None,
             note: Some("my-note".to_string()),
+            agent: None,
         });
         let serialized = serialize(&tf);
         assert!(serialized.contains("note:my-note"));
         let parsed = parse(&serialized, false).unwrap();
         assert_eq!(parsed.tasks[0].note, Some("my-note".to_string()));
+    }
+
+    #[test]
+    fn test_parse_agent_field() {
+        let content = "<!-- format:2 -->\n<!-- next-id:2 -->\n\n## [ ] Task with agent\n<!-- id:1 priority:medium created:2025-01-15T10:00:00+00:00 agent:command-center -->\n";
+        let tf = parse(content, false).unwrap();
+        assert_eq!(tf.tasks[0].agent, Some("command-center".to_string()));
+    }
+
+    #[test]
+    fn test_parse_human_agent() {
+        let content = "<!-- format:2 -->\n<!-- next-id:2 -->\n\n## [ ] Human task\n<!-- id:1 priority:medium created:2025-01-15T10:00:00+00:00 agent:human -->\n";
+        let tf = parse(content, false).unwrap();
+        assert_eq!(tf.tasks[0].agent, Some("human".to_string()));
+    }
+
+    #[test]
+    fn test_parse_missing_agent_defaults_none() {
+        let content = "<!-- format:2 -->\n<!-- next-id:2 -->\n\n## [ ] Unassigned task\n<!-- id:1 priority:medium created:2025-01-15T10:00:00+00:00 -->\n";
+        let tf = parse(content, false).unwrap();
+        assert!(tf.tasks[0].agent.is_none());
+    }
+
+    #[test]
+    fn test_agent_round_trip() {
+        use chrono::{TimeZone, Utc};
+        use crate::task::{Priority, Status, Task};
+        let mut tf = TaskFile::new();
+        tf.tasks.push(Task {
+            id: 1,
+            title: "AI task".to_string(),
+            status: Status::Open,
+            priority: Priority::High,
+            tags: Vec::new(),
+            created: Utc.with_ymd_and_hms(2025, 1, 1, 0, 0, 0).unwrap(),
+            updated: None,
+            description: None,
+            due_date: None,
+            project: None,
+            recurrence: None,
+            note: None,
+            agent: Some("command-center".to_string()),
+        });
+        let serialized = serialize(&tf);
+        assert!(serialized.contains("agent:command-center"));
+        let parsed = parse(&serialized, false).unwrap();
+        assert_eq!(parsed.tasks[0].agent, Some("command-center".to_string()));
+    }
+
+    #[test]
+    fn test_agent_none_not_serialized() {
+        use chrono::{TimeZone, Utc};
+        use crate::task::{Priority, Status, Task};
+        let mut tf = TaskFile::new();
+        tf.tasks.push(Task {
+            id: 1,
+            title: "No agent".to_string(),
+            status: Status::Open,
+            priority: Priority::Medium,
+            tags: Vec::new(),
+            created: Utc.with_ymd_and_hms(2025, 1, 1, 0, 0, 0).unwrap(),
+            updated: None,
+            description: None,
+            due_date: None,
+            project: None,
+            recurrence: None,
+            note: None,
+            agent: None,
+        });
+        let serialized = serialize(&tf);
+        assert!(!serialized.contains("agent:"));
     }
 }

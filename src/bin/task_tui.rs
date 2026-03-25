@@ -35,34 +35,20 @@ fn run(cli: Cli) -> Result<(), (i32, String)> {
                 Ok(())
             }
 
-            AuthCommand::Claude { key } => {
-                let key = task::auth::prompt_for_claude_key(key).map_err(|e| (1, e))?;
-                task::auth::write_claude_key(&key).map_err(|e| (1, e))?;
-                println!("Claude API key stored.");
-                Ok(())
-            }
-
             AuthCommand::Status => {
                 let todoist_status = if task::auth::read_token().is_some() {
                     "Todoist token: present"
                 } else {
                     "Todoist token: not set"
                 };
-                let claude_status = match task::auth::read_claude_key_source() {
-                    Some(("env", _)) => "Claude API key: present (env)".to_string(),
-                    Some((_, _)) => "Claude API key: present".to_string(),
-                    None => "Claude API key: not set".to_string(),
-                };
-                println!("{}\n{}", todoist_status, claude_status);
+                println!("{}", todoist_status);
                 Ok(())
             }
 
             AuthCommand::Revoke => {
                 let todoist_deleted = task::auth::delete_token().map_err(|e| (1, e))?;
-                let claude_deleted = task::auth::delete_claude_key().map_err(|e| (1, e))?;
                 let mut msgs = Vec::new();
                 if todoist_deleted { msgs.push("Todoist token revoked."); }
-                if claude_deleted { msgs.push("Claude API key revoked."); }
                 if msgs.is_empty() { msgs.push("No tokens found."); }
                 println!("{}", msgs.join(" "));
                 Ok(())

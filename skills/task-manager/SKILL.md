@@ -11,6 +11,18 @@ The user's tasks are stored in a markdown file at:
 
 Read and edit this file directly for task operations. For note operations, use the `task note` CLI subcommands documented below.
 
+## Finding Your Tasks
+
+Tasks can be assigned to specific AI agents via the `agent` field in task metadata. To find tasks assigned to you:
+
+1. Read the config file at `~/Library/Application Support/task-manager/config.md` (macOS) or `~/.config/task-manager/config.md` (Linux)
+2. Find all lines starting with `agent-` — these define named agent profiles and their working directories, e.g. `agent-command-center: ~/code/command-center`
+3. Expand tildes in directory paths (replace `~` with your home directory)
+4. Find the profile whose directory is a prefix of your current working directory — use the longest match if multiple profiles match
+5. Filter tasks to those where `agent:<your-profile-name>` appears in the metadata comment
+
+Only work on tasks assigned to your agent profile. Tasks with `agent:human` are for the human. Tasks with no `agent` field are unassigned — do not work on these unless explicitly told to.
+
 ## File Format
 
 Each task is a single line with a GitHub-style checkbox:

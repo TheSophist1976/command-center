@@ -44,13 +44,6 @@ pub enum AuthCommand {
         token: Option<String>,
     },
 
-    /// Authenticate with Claude using an API key
-    Claude {
-        /// Claude API key (skips interactive prompt)
-        #[arg(long)]
-        key: Option<String>,
-    },
-
     /// Show authentication status
     Status,
 

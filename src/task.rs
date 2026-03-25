@@ -272,6 +272,8 @@ pub struct Task {
     pub recurrence: Option<Recurrence>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -415,6 +417,7 @@ mod tests {
             project: None,
             recurrence: None,
             note: None,
+            agent: None,
         }
     }
 

@@ -34,7 +34,6 @@ STATUS_BINARY=""
 STATUS_PATH=""
 STATUS_CONFIG=""
 STATUS_TODOIST=""
-STATUS_CLAUDE=""
 STATUS_SKILL=""
 STATUS_AGENTS=""
 
@@ -287,41 +286,6 @@ else
     fi
 fi
 
-# --- Claude API key ---
-
-CLAUDE_KEY_FILE="$CONFIG_DIR/claude_api_key"
-
-if [[ -n "${ANTHROPIC_API_KEY:-}" ]]; then
-    success "Claude API: configured (env var)"
-    STATUS_CLAUDE="configured (env var)"
-elif [[ -f "$CLAUDE_KEY_FILE" ]] && [[ -s "$CLAUDE_KEY_FILE" ]]; then
-    success "Claude API: configured (file)"
-    STATUS_CLAUDE="configured (file)"
-else
-    if ask_yn "Set up Claude API key for NLP features?"; then
-        echo ""
-        info "Get your API key at:"
-        echo "  https://console.anthropic.com/settings/keys"
-        echo ""
-        printf "${BLUE}▸${NC} Paste your Claude API key: "
-        read -r claude_key < /dev/tty
-
-        if [[ -n "$claude_key" ]]; then
-            mkdir -p "$CONFIG_DIR"
-            printf "%s" "$claude_key" > "$CLAUDE_KEY_FILE"
-            chmod 600 "$CLAUDE_KEY_FILE"
-            success "Claude API key saved"
-            STATUS_CLAUDE="configured (file)"
-        else
-            warn "Empty key, skipped"
-            STATUS_CLAUDE="skipped"
-        fi
-    else
-        info "Skipped Claude API setup"
-        STATUS_CLAUDE="skipped"
-    fi
-fi
-
 # =========================================================
 # 8. AI instructions (AGENTS.md)
 # =========================================================
@@ -377,7 +341,6 @@ printf "  %-16s %s\n" "Binaries:" "$STATUS_BINARY"
 printf "  %-16s %s\n" "PATH:" "$STATUS_PATH"
 printf "  %-16s %s\n" "Config:" "$STATUS_CONFIG"
 printf "  %-16s %s\n" "Todoist:" "$STATUS_TODOIST"
-printf "  %-16s %s\n" "Claude API:" "$STATUS_CLAUDE"
 printf "  %-16s %s\n" "AI Instruct:" "$STATUS_AGENTS"
 printf "  %-16s %s\n" "Skill:" "$STATUS_SKILL"
 echo ""

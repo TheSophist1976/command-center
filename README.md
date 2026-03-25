@@ -213,11 +213,31 @@ Config is stored at `~/.config/task-manager/config.md`.
 | --- | --- |
 | `default-dir` | Default directory for task/note files |
 | `default-view` | Starting view (`today`, `all`, `weekly`, `monthly`, `yearly`, `no-due-date`, `recurring`, `notes`) |
+| `agent-<name>` | Agent profile mapping a name to a project directory |
 
 ```sh
 task config set default-dir ~/projects
 task config set default-view all
 ```
+
+### Agent Profiles
+
+Agent profiles let you associate a name with a project directory. When the TUI or NLP chat is launched from within that directory (or a subdirectory), it automatically uses the corresponding named context.
+
+Add an agent by editing `~/.config/task-manager/config.md` directly:
+
+```
+agent-myapp: ~/code/myapp
+agent-work: ~/code/work-project
+```
+
+Or use `task config set`:
+
+```sh
+task config set agent-myapp ~/code/myapp
+```
+
+The most specific (longest) matching directory wins when multiple profiles overlap. For example, if both `agent-root: ~/code` and `agent-app: ~/code/myapp` are configured and you are inside `~/code/myapp/src`, the `app` profile is selected.
 
 ## File Path Resolution
 

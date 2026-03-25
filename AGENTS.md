@@ -2,7 +2,31 @@
 
 **Before modifying `tasks.md`, read this file in full.**
 
-This document describes the exact format of `tasks.md` and the rules for safely reading and modifying it.
+This document describes the exact format of `tasks.md`, the rules for safely reading and modifying it, and how to find the tasks assigned to you.
+
+---
+
+## Finding Your Tasks
+
+Tasks can be assigned to specific AI agents using the `agent` field in the task metadata. To find tasks assigned to you:
+
+1. **Read the config file** at `~/Library/Application Support/task-manager/config.md` (macOS) or `~/.config/task-manager/config.md` (Linux)
+2. **Find all `agent-*` entries** — each defines a named agent profile and its working directory:
+   ```
+   agent-command-center: ~/code/command-center
+   agent-itential: ~/code/itential
+   ```
+3. **Expand tildes** in directory paths (replace `~` with your home directory)
+4. **Find the profile whose directory is a prefix of your current working directory** — use the longest match if multiple profiles match
+5. **Filter `tasks.md`** to tasks where `agent:<your-profile-name>` appears in the metadata comment
+
+**Example**: If your CWD is `/Users/mark/code/command-center/src` and a profile exists with dir `/Users/mark/code/command-center`, your agent name is `command-center`. Work only on tasks with `agent:command-center` in their metadata.
+
+**Tasks with `agent:human`** are for the human and should not be worked on by AI agents.
+
+**Tasks with no `agent` field** are unassigned — do not work on these unless explicitly instructed.
+
+---
 
 ---
 
@@ -65,6 +89,7 @@ Optional description paragraph(s) here.
 | `project` | no | URL-encoded string | `project:Work` |
 | `recur` | no | see below | `recur:weekly` |
 | `note` | no | note slug | `note:my-note` |
+| `agent` | no | profile name or `human` | `agent:command-center` |
 | `created` | yes | ISO 8601 | `created:2026-01-15T10:00:00+00:00` |
 | `updated` | no | ISO 8601 | `updated:2026-01-20T12:00:00+00:00` |
 
