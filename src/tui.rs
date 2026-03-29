@@ -33,6 +33,7 @@ mod theme {
     // Task states
     pub const DONE_TEXT: Color = Color::Rgb(100, 100, 100);
     pub const OVERDUE: Color = Color::Rgb(255, 85, 85);
+    pub const INCOMPLETE: Color = Color::Rgb(150, 130, 80); // muted amber for tasks needing attention
 }
 
 use crate::claude_session::{
@@ -189,6 +190,11 @@ enum View {
     Notes,
 }
 
+/// An open task is "incomplete" (needs attention) if it is missing a due date or an agent.
+fn is_incomplete(task: &Task) -> bool {
+    task.status == Status::Open && (task.due_date.is_none() || task.agent.is_none())
+}
+
 fn due_matches(task: &Task, today: NaiveDate, window: DueWindow) -> bool {
     // Completed tasks never shown in Due view
     if task.status == Status::Done {
@@ -204,10 +210,15 @@ fn due_matches(task: &Task, today: NaiveDate, window: DueWindow) -> bool {
     }
     match window {
         DueWindow::All => true,
-        DueWindow::Day => match task.due_date {
-            Some(d) => d == today,
-            None => true, // no-due-date tasks shown in Day window
-        },
+        DueWindow::Day => {
+            if is_incomplete(task) {
+                return true; // incomplete tasks always surface in Day window
+            }
+            match task.due_date {
+                Some(d) => d == today,
+                None => true, // no-due-date tasks shown in Day window
+            }
+        }
         DueWindow::Week => match task.due_date {
             Some(d) => {
                 let weekday = today.weekday().num_days_from_monday();
@@ -1079,6 +1090,46 @@ impl App {
         indices
     }
 
+    /// Returns task indices in the order they appear visually.
+    /// When grouping is active this differs from `filtered_indices()` — tasks are
+    /// ordered by group key first, then by due-date/priority within each group.
+    /// Navigation must use this so j/k move in the same order as the rendered table.
+    fn visual_task_order(&self) -> Vec<usize> {
+        let filtered = self.filtered_indices();
+        if self.group_by == GroupBy::None {
+            return filtered;
+        }
+        let tasks = &self.task_file.tasks;
+        // Group preserving the within-group sort order from filtered
+        let mut seen_keys: Vec<Option<String>> = Vec::new();
+        let mut group_map: std::collections::HashMap<Option<String>, Vec<usize>> = std::collections::HashMap::new();
+        for &idx in &filtered {
+            let key: Option<String> = match self.group_by {
+                GroupBy::Agent => tasks[idx].agent.clone(),
+                GroupBy::Project => tasks[idx].project.clone(),
+                GroupBy::Priority => Some(format!("{}", tasks[idx].priority)),
+                GroupBy::None => unreachable!(),
+            };
+            if !seen_keys.contains(&key) {
+                seen_keys.push(key.clone());
+            }
+            group_map.entry(key).or_default().push(idx);
+        }
+        seen_keys.sort_by(|a, b| match (a, b) {
+            (None, None) => std::cmp::Ordering::Equal,
+            (None, _) => std::cmp::Ordering::Greater,
+            (_, None) => std::cmp::Ordering::Less,
+            (Some(a), Some(b)) => a.to_lowercase().cmp(&b.to_lowercase()),
+        });
+        let mut result = Vec::with_capacity(filtered.len());
+        for key in &seen_keys {
+            if let Some(indices) = group_map.get(key) {
+                result.extend_from_slice(indices);
+            }
+        }
+        result
+    }
+
     fn clamp_selection(&mut self) {
         let count = self.filtered_indices().len();
         if count == 0 {
@@ -1373,7 +1424,7 @@ fn handle_normal(app: &mut App, key: KeyCode) -> Result<bool, String> {
         return handle_normal_notes(app, key);
     }
 
-    let filtered = app.filtered_indices();
+    let filtered = app.visual_task_order();
     match key {
         KeyCode::Char('q') => return Ok(true),
         KeyCode::Char('j') | KeyCode::Down => {
@@ -1506,7 +1557,7 @@ fn handle_normal(app: &mut App, key: KeyCode) -> Result<bool, String> {
                 app.mode = Mode::Sessions;
             } else {
                 // No sessions yet — build context from selected task and open dir picker
-                let filtered = app.filtered_indices();
+                let filtered = app.visual_task_order();
                 let context = if let Some(&idx) = filtered.get(app.selected) {
                     let task = &app.task_file.tasks[idx];
                     let body = task.description.as_deref().unwrap_or("");
@@ -1877,7 +1928,7 @@ fn handle_agent_picker(app: &mut App, key: KeyCode) -> Result<(), String> {
             }
         }
         KeyCode::Enter => {
-            let filtered = app.filtered_indices();
+            let filtered = app.visual_task_order();
             if let Some(&task_idx) = filtered.get(app.selected) {
                 if let Some(item) = app.agent_picker_items.get(app.agent_picker_selected) {
                     if item == "(clear)" {
@@ -1977,7 +2028,7 @@ fn handle_input(app: &mut App, key: KeyCode, action: InputAction) -> Result<(), 
                     if trimmed.is_empty() {
                         app.mode = Mode::EditingTitle;
                     } else {
-                        let filtered = app.filtered_indices();
+                        let filtered = app.visual_task_order();
                         if let Some(&task_idx) = filtered.get(app.selected) {
                             let task = &mut app.task_file.tasks[task_idx];
                             task.title = trimmed;
@@ -1987,7 +2038,7 @@ fn handle_input(app: &mut App, key: KeyCode, action: InputAction) -> Result<(), 
                     }
                 }
                 InputAction::EditTags => {
-                    let filtered = app.filtered_indices();
+                    let filtered = app.visual_task_order();
                     if let Some(&task_idx) = filtered.get(app.selected) {
                         let task = &mut app.task_file.tasks[task_idx];
                         task.tags = input.split_whitespace().map(|s| s.to_string()).collect();
@@ -1996,7 +2047,7 @@ fn handle_input(app: &mut App, key: KeyCode, action: InputAction) -> Result<(), 
                     }
                 }
                 InputAction::EditDescription => {
-                    let filtered = app.filtered_indices();
+                    let filtered = app.visual_task_order();
                     if let Some(&task_idx) = filtered.get(app.selected) {
                         let task = &mut app.task_file.tasks[task_idx];
                         let trimmed = input.trim().to_string();
@@ -2047,7 +2098,7 @@ fn handle_recurrence_input(app: &mut App, key: KeyCode) -> Result<(), String> {
                 return Ok(());
             }
 
-            let filtered = app.filtered_indices();
+            let filtered = app.visual_task_order();
             let task_idx = match filtered.get(app.selected) {
                 Some(&idx) => idx,
                 None => return Ok(()),
@@ -2172,7 +2223,7 @@ fn handle_confirm(app: &mut App, key: KeyCode) -> Result<(), String> {
                     }
                 }
             } else {
-                let filtered = app.filtered_indices();
+                let filtered = app.visual_task_order();
                 if let Some(&task_idx) = filtered.get(app.selected) {
                     app.task_file.tasks.remove(task_idx);
                     app.save()?;
@@ -2189,7 +2240,7 @@ fn handle_confirm(app: &mut App, key: KeyCode) -> Result<(), String> {
 }
 
 fn handle_priority(app: &mut App, key: KeyCode) -> Result<(), String> {
-    let filtered = app.filtered_indices();
+    let filtered = app.visual_task_order();
     match key {
         KeyCode::Char('c') | KeyCode::Char('h') | KeyCode::Char('m') | KeyCode::Char('l') => {
             if let Some(&task_idx) = filtered.get(app.selected) {
@@ -2263,7 +2314,7 @@ fn handle_detail_edit(app: &mut App, key: KeyCode) -> Result<(), String> {
         KeyCode::Esc => {
             commit_buffer_to_draft(app);
             let dirty = if let Some(ref draft) = app.detail_draft {
-                let filtered = app.filtered_indices();
+                let filtered = app.visual_task_order();
                 filtered.get(app.selected)
                     .map(|&idx| draft.is_dirty(&app.task_file.tasks[idx]))
                     .unwrap_or(false)
@@ -2323,7 +2374,7 @@ fn handle_detail_edit(app: &mut App, key: KeyCode) -> Result<(), String> {
 
 fn apply_navigation(app: &mut App) {
     if let Some(dir) = app.pending_navigation.take() {
-        let filtered = app.filtered_indices();
+        let filtered = app.visual_task_order();
         match dir {
             NavDirection::Down => {
                 if !filtered.is_empty() && app.selected < filtered.len() - 1 {
@@ -2358,7 +2409,7 @@ fn handle_detail_confirm(app: &mut App, key: KeyCode) -> Result<(), String> {
             }
             // Apply draft to task
             if let Some(draft) = app.detail_draft.take() {
-                let filtered = app.filtered_indices();
+                let filtered = app.visual_task_order();
                 if let Some(&task_idx) = filtered.get(app.selected) {
                     let task = &mut app.task_file.tasks[task_idx];
                     task.title = draft.title;
@@ -2611,7 +2662,11 @@ fn build_task_cells(
     let is_overdue = task.status == Status::Open
         && task.due_date.map_or(false, |d| d < today);
     let status_str = match task.status {
-        Status::Open => if is_overdue { "[!]" } else { "[ ]" },
+        Status::Open => {
+            if is_overdue { "[!]" }
+            else if is_incomplete(task) { "[?]" }
+            else { "[ ]" }
+        }
         Status::Done => "[x]",
     };
     let priority_style = match task.priority {
@@ -2689,7 +2744,7 @@ fn build_task_cells(
 }
 
 fn draw_table(frame: &mut Frame, app: &mut App, area: Rect) {
-    let filtered = app.filtered_indices();
+    let filtered = app.visual_task_order();
 
     if filtered.is_empty() {
         let msg = if app.filter.is_active() {
@@ -2794,14 +2849,37 @@ fn draw_table(frame: &mut Frame, app: &mut App, area: Rect) {
             GroupBy::Priority => "Priority",
             GroupBy::None => unreachable!(),
         };
+        // Find the Fill(1) column index so the header text lands in the widest cell
+        let fill_col_idx = {
+            let mut idx = 0usize;
+            if using_config_columns {
+                for (i, &col) in columns_ref.iter().enumerate() {
+                    if col == ColumnId::Title {
+                        idx = i;
+                        break;
+                    }
+                }
+            } else {
+                idx = 3; // default layout: ID, Status, Priority, Title(Fill)
+            }
+            idx
+        };
         let num_cols = header_cells.len().max(1);
         for key in &seen_keys {
             let label = key.as_deref().unwrap_or("(none)");
             let header_text = format!(" {} : {} ", group_field_name, label);
-            // Span all columns with a single cell
-            let mut cells = vec![Cell::from(header_text).style(section_header_style)];
-            for _ in 1..num_cols {
-                cells.push(Cell::from("").style(section_header_style));
+            // Put text in the Fill(1) column so it isn't clipped to a narrow fixed-width cell
+            let mut cells: Vec<Cell> = (0..num_cols)
+                .map(|i| {
+                    if i == fill_col_idx {
+                        Cell::from(header_text.clone()).style(section_header_style)
+                    } else {
+                        Cell::from(String::new()).style(section_header_style)
+                    }
+                })
+                .collect();
+            if cells.is_empty() {
+                cells.push(Cell::from(header_text.clone()).style(section_header_style));
             }
             rows.push(Row::new(cells).style(section_header_style));
             render_task_map.push(None);
@@ -2820,6 +2898,8 @@ fn draw_table(frame: &mut Frame, app: &mut App, area: Rect) {
                         row.style(Style::default().fg(theme::DONE_TEXT))
                     } else if is_overdue {
                         row.style(Style::default().fg(theme::OVERDUE))
+                    } else if is_incomplete(task) {
+                        row.style(Style::default().fg(theme::INCOMPLETE))
                     } else {
                         row
                     };
@@ -2852,6 +2932,8 @@ fn draw_table(frame: &mut Frame, app: &mut App, area: Rect) {
                     row.style(Style::default().fg(theme::DONE_TEXT))
                 } else if is_overdue {
                     row.style(Style::default().fg(theme::OVERDUE))
+                } else if is_incomplete(task) {
+                    row.style(Style::default().fg(theme::INCOMPLETE))
                 } else {
                     row
                 }
@@ -2941,7 +3023,7 @@ fn draw_detail_panel(frame: &mut Frame, app: &App, area: Rect) {
         frame.render_widget(paragraph, area);
     } else {
         // Read-only rendering
-        let filtered = app.filtered_indices();
+        let filtered = app.visual_task_order();
         let content = if let Some(&task_idx) = filtered.get(app.selected) {
             let task = &app.task_file.tasks[task_idx];
             let desc = task.description.as_deref().unwrap_or("(none)");
@@ -3561,7 +3643,7 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
             if app.view == View::Notes {
                 format!(" Delete note '{}'? y/n ", app.input_buffer)
             } else {
-                let filtered = app.filtered_indices();
+                let filtered = app.visual_task_order();
                 if let Some(&idx) = filtered.get(app.selected) {
                     let task = &app.task_file.tasks[idx];
                     format!(" Delete task {}? y/n ", task.id)
@@ -3677,7 +3759,9 @@ mod tests {
     fn due_day_window_hides_task_due_tomorrow() {
         let today = NaiveDate::from_ymd_opt(2026, 2, 26).unwrap();
         let tomorrow = NaiveDate::from_ymd_opt(2026, 2, 27).unwrap();
-        let task = make_task(Some(tomorrow));
+        // Task has a date AND an agent — not incomplete, so future tasks are hidden in Day
+        let mut task = make_task(Some(tomorrow));
+        task.agent = Some("test-agent".to_string());
         assert!(!due_matches(&task, today, DueWindow::Day));
     }
 
