@@ -1,2 +1,8 @@
 /target
 .vscode/
+*.env
+*.env.*
+!.env.example
+*.key
+*.pem
+.DS_Store
