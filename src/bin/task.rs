@@ -72,7 +72,7 @@ fn run(cli: Cli) -> Result<(), (i32, String)> {
         },
 
         Some(Command::Note { subcommand }) => {
-            let dir = path.parent().unwrap_or(std::path::Path::new(".")).to_path_buf();
+            let dir = path.parent().unwrap_or(std::path::Path::new(".")).to_path_buf().join("Notes");
             let task_filename = path
                 .file_name()
                 .and_then(|n| n.to_str())

@@ -1043,6 +1043,10 @@ impl App {
         self.file_path.parent().unwrap_or(Path::new(".")).to_path_buf()
     }
 
+    fn notes_dir(&self) -> PathBuf {
+        self.task_dir().join("Notes")
+    }
+
     fn task_filename(&self) -> String {
         self.file_path.file_name()
             .and_then(|n| n.to_str())
@@ -1051,7 +1055,7 @@ impl App {
     }
 
     fn refresh_notes(&mut self) {
-        self.notes_list = crate::note::discover_notes(&self.task_dir(), &self.task_filename());
+        self.notes_list = crate::note::discover_notes(&self.notes_dir(), &self.task_filename());
     }
 
     fn filtered_indices(&self) -> Vec<usize> {
@@ -1668,7 +1672,7 @@ fn handle_normal(app: &mut App, key: KeyCode) -> Result<bool, String> {
             if let Some(&task_idx) = filtered.get(app.selected) {
                 let task = &app.task_file.tasks[task_idx];
                 if let Some(ref slug) = task.note {
-                    let note_path = app.task_dir().join(format!("{}.md", slug));
+                    let note_path = app.notes_dir().join(format!("{}.md", slug));
                     match crate::note::read_note(&note_path) {
                         Ok(note) => {
                             app.note_editor = Some(NoteEditor::new(&note.slug, &note.title, &note.body));
@@ -1714,7 +1718,7 @@ fn handle_normal_notes(app: &mut App, key: KeyCode) -> Result<bool, String> {
         }
         KeyCode::Enter => {
             if let Some(note) = app.notes_list.get(app.notes_selected) {
-                let note_path = app.task_dir().join(format!("{}.md", note.slug));
+                let note_path = app.notes_dir().join(format!("{}.md", note.slug));
                 match crate::note::read_note(&note_path) {
                     Ok(n) => {
                         app.note_editor = Some(NoteEditor::new(&n.slug, &n.title, &n.body));
@@ -1734,7 +1738,7 @@ fn handle_normal_notes(app: &mut App, key: KeyCode) -> Result<bool, String> {
         }
         KeyCode::Char('C') => {
             let context = if let Some(note) = app.notes_list.get(app.notes_selected) {
-                let note_path = app.task_dir().join(format!("{}.md", note.slug));
+                let note_path = app.notes_dir().join(format!("{}.md", note.slug));
                 let body = crate::note::read_note(&note_path)
                     .map(|n| n.body)
                     .unwrap_or_default();
@@ -1834,7 +1838,7 @@ fn save_current_note(app: &mut App) -> Result<(), String> {
             title: editor.title.clone(),
             body: editor.body_text(),
         };
-        crate::note::write_note(&app.task_dir(), &note)?;
+        crate::note::write_note(&app.notes_dir(), &note)?;
         if let Some(ref mut e) = app.note_editor {
             e.dirty = false;
         }
@@ -1987,13 +1991,13 @@ fn handle_input(app: &mut App, key: KeyCode, action: InputAction) -> Result<(), 
                             // Create a note
                             let title = input.trim().to_string();
                             let base_slug = crate::note::slugify(&title);
-                            let slug = crate::note::unique_slug(&app.task_dir(), &base_slug);
+                            let slug = crate::note::unique_slug(&app.notes_dir(), &base_slug);
                             let note = crate::note::Note {
                                 slug: slug.clone(),
                                 title: title.clone(),
                                 body: String::new(),
                             };
-                            crate::note::write_note(&app.task_dir(), &note)?;
+                            crate::note::write_note(&app.notes_dir(), &note)?;
                             // If creating from note picker, link to task
                             if let Some(task_idx) = app.note_picker_task_idx.take() {
                                 app.task_file.tasks[task_idx].note = Some(slug.clone());
@@ -2247,7 +2251,7 @@ fn handle_confirm(app: &mut App, key: KeyCode) -> Result<(), String> {
             // Delete a note (task deletion moved to CLI: task delete <id>)
             let slug = app.input_buffer.clone();
             if !slug.is_empty() {
-                crate::note::delete_note(&app.task_dir(), &slug)?;
+                crate::note::delete_note(&app.notes_dir(), &slug)?;
                 // Clear any task links to this note
                 for task in &mut app.task_file.tasks {
                     if task.note.as_deref() == Some(&slug) {

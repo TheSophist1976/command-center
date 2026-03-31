@@ -80,6 +80,8 @@ pub fn read_note(path: &Path) -> Result<Note, String> {
 }
 
 pub fn write_note(dir: &Path, note: &Note) -> Result<PathBuf, String> {
+    fs::create_dir_all(dir)
+        .map_err(|e| format!("Failed to create notes directory: {}", e))?;
     let file_path = dir.join(format!("{}.md", note.slug));
     let tmp_path = dir.join(format!(".note-tmp-{}", std::process::id()));
 
@@ -297,5 +299,29 @@ mod tests {
     fn test_delete_nonexistent_note() {
         let dir = tempdir().unwrap();
         assert!(delete_note(dir.path(), "nope").is_err());
+    }
+
+    #[test]
+    fn test_write_note_creates_directory_if_absent() {
+        let base = tempdir().unwrap();
+        let notes_dir = base.path().join("Notes");
+        assert!(!notes_dir.exists());
+        let note = Note {
+            slug: "auto-dir".to_string(),
+            title: "Auto Dir".to_string(),
+            body: "Created dir automatically.".to_string(),
+        };
+        write_note(&notes_dir, &note).unwrap();
+        assert!(notes_dir.exists());
+        assert!(notes_dir.join("auto-dir.md").exists());
+    }
+
+    #[test]
+    fn test_discover_notes_returns_empty_when_dir_absent() {
+        let base = tempdir().unwrap();
+        let notes_dir = base.path().join("Notes");
+        // Notes dir does not exist — should return empty without error
+        let notes = discover_notes(&notes_dir, "tasks.md");
+        assert!(notes.is_empty());
     }
 }
