@@ -56,6 +56,7 @@ enum Mode {
     EditingTags,
     EditingDescription,
     EditingDefaultDir,
+    EditingDue,
     Command,
 
     EditingRecurrence,
@@ -1372,6 +1373,10 @@ fn handle_key(_terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut 
             handle_input(app, key, InputAction::EditDefaultDir)?;
             Ok(false)
         }
+        Mode::EditingDue => {
+            handle_input(app, key, InputAction::EditDue)?;
+            Ok(false)
+        }
         Mode::Command => {
             handle_command_input(app, key)?;
             Ok(false)
@@ -1491,7 +1496,11 @@ fn handle_normal(app: &mut App, key: KeyCode) -> Result<bool, String> {
         }
         KeyCode::Char('d') => {
             if !filtered.is_empty() {
-                app.mode = Mode::Confirming;
+                let task = &app.task_file.tasks[filtered[app.selected]];
+                app.input_buffer = task.due_date
+                    .map(|d| d.format("%Y-%m-%d").to_string())
+                    .unwrap_or_default();
+                app.mode = Mode::EditingDue;
             }
         }
         KeyCode::Char('f') | KeyCode::Char('/') => {
@@ -1957,6 +1966,7 @@ enum InputAction {
     EditTags,
     EditDescription,
     EditDefaultDir,
+    EditDue,
 }
 
 fn handle_input(app: &mut App, key: KeyCode, action: InputAction) -> Result<(), String> {
@@ -2067,6 +2077,36 @@ fn handle_input(app: &mut App, key: KeyCode, action: InputAction) -> Result<(), 
                         app.file_path = new_path;
                         app.selected = 0;
                         app.table_state.select(Some(0));
+                    }
+                }
+                InputAction::EditDue => {
+                    let trimmed = input.trim().to_string();
+                    if trimmed.is_empty() {
+                        // Clear due date
+                        let filtered = app.visual_task_order();
+                        if let Some(&task_idx) = filtered.get(app.selected) {
+                            let task = &mut app.task_file.tasks[task_idx];
+                            task.due_date = None;
+                            task.updated = Some(Utc::now());
+                            app.save()?;
+                        }
+                    } else {
+                        match chrono::NaiveDate::parse_from_str(&trimmed, "%Y-%m-%d") {
+                            Ok(date) => {
+                                let filtered = app.visual_task_order();
+                                if let Some(&task_idx) = filtered.get(app.selected) {
+                                    let task = &mut app.task_file.tasks[task_idx];
+                                    task.due_date = Some(date);
+                                    task.updated = Some(Utc::now());
+                                    app.save()?;
+                                }
+                            }
+                            Err(_) => {
+                                app.status_message = Some("Invalid date — use YYYY-MM-DD".to_string());
+                                app.mode = Mode::EditingDue;
+                                return Ok(());
+                            }
+                        }
                     }
                 }
             }
@@ -2204,30 +2244,21 @@ fn handle_command_input(app: &mut App, key: KeyCode) -> Result<(), String> {
 fn handle_confirm(app: &mut App, key: KeyCode) -> Result<(), String> {
     match key {
         KeyCode::Char('y') => {
-            if app.view == View::Notes {
-                // Delete a note
-                let slug = app.input_buffer.clone();
-                if !slug.is_empty() {
-                    crate::note::delete_note(&app.task_dir(), &slug)?;
-                    // Clear any task links to this note
-                    for task in &mut app.task_file.tasks {
-                        if task.note.as_deref() == Some(&slug) {
-                            task.note = None;
-                            task.updated = Some(Utc::now());
-                        }
-                    }
-                    app.save()?;
-                    app.refresh_notes();
-                    if app.notes_selected >= app.notes_list.len() && app.notes_selected > 0 {
-                        app.notes_selected -= 1;
+            // Delete a note (task deletion moved to CLI: task delete <id>)
+            let slug = app.input_buffer.clone();
+            if !slug.is_empty() {
+                crate::note::delete_note(&app.task_dir(), &slug)?;
+                // Clear any task links to this note
+                for task in &mut app.task_file.tasks {
+                    if task.note.as_deref() == Some(&slug) {
+                        task.note = None;
+                        task.updated = Some(Utc::now());
                     }
                 }
-            } else {
-                let filtered = app.visual_task_order();
-                if let Some(&task_idx) = filtered.get(app.selected) {
-                    app.task_file.tasks.remove(task_idx);
-                    app.save()?;
-                    app.clamp_selection();
+                app.save()?;
+                app.refresh_notes();
+                if app.notes_selected >= app.notes_list.len() && app.notes_selected > 0 {
+                    app.notes_selected -= 1;
                 }
             }
             app.mode = Mode::Normal;
@@ -3620,13 +3651,13 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
             if let Some(ref msg) = app.status_message {
                 format!(" {} ", msg)
             } else if app.view == View::Notes {
-                " a:new  Enter:edit  d:delete  v:view  C:claude  q:quit ".to_string()
+                " a:new  Enter:edit  v:view  C:claude  q:quit".to_string()
             } else if app.show_detail_panel {
-                " j/k:nav  Enter:edit  Space:toggle  a:add  d:delete  f:filter  p:priority  e:edit-title  t:tags  r:desc  R:recur  n:note  g:go-note  v:view  Tab:details  q:quit ".to_string()
+                " j/k:nav  Enter:edit  Space:toggle  a:add  d:due  f:filter  p:priority  e:edit-title  t:tags  r:desc  R:recur  n:note  g:go-note  v:view  Tab:details  q:quit".to_string()
             } else if app.view == View::Due {
-                " j/k:nav  Enter:toggle  a:add  d:delete  f:filter  v:view  [/]:window  G:group  ::command  q:quit ".to_string()
+                " j/k:nav  Enter:toggle  a:add  d:due  f:filter  v:view  [/]:window  G:group  ::command  q:quit".to_string()
             } else {
-                " j/k:nav  Enter:toggle  a:add  d:delete  f:filter  p:priority  e:edit  t:tags  r:desc  R:recur  n:note  g:go-note  v:view  G:group  C:claude  ::command  D:set-dir  T/N/W/M/Q/Y:due  X:clr-due  Tab:details  ^r:reload  q:quit".to_string()
+                " j/k:nav  Enter:toggle  a:add  d:due  f:filter  p:priority  e:edit  t:tags  r:desc  R:recur  n:note  g:go-note  v:view  G:group  C:claude  ::command  D:set-dir  X:clr-due  Tab:details  ^r:reload  q:quit".to_string()
             }
         }
         Mode::Adding => {
@@ -3638,6 +3669,9 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
         }
         Mode::Filtering => {
             format!(" Filter (status:open priority:high tag:name): {}_ ", app.input_buffer)
+        }
+        Mode::EditingDue => {
+            format!(" Due date (YYYY-MM-DD, empty to clear): {}_ ", app.input_buffer)
         }
         Mode::Confirming => {
             if app.view == View::Notes {
@@ -4729,5 +4763,89 @@ mod tests {
         assert_eq!(char_to_byte_index(s, 0), 0);
         assert_eq!(char_to_byte_index(s, 1), 1); // 'h' is 1 byte
         assert_eq!(char_to_byte_index(s, 2), 3); // 'é' is 2 bytes
+    }
+
+    // -- due date editing tests --
+
+    fn make_app_with_due(due: Option<chrono::NaiveDate>) -> App {
+        use crate::task::{Task, Status, Priority};
+        use chrono::Utc;
+        let task = Task {
+            id: 1,
+            title: "test task".to_string(),
+            status: Status::Open,
+            priority: Priority::Medium,
+            tags: vec![],
+            created: Utc::now(),
+            updated: None,
+            description: None,
+            due_date: due,
+            project: None,
+            recurrence: None,
+            note: None,
+            agent: Some("test".to_string()),
+        };
+        make_app_with_tmpfile(vec![task])
+    }
+
+    #[test]
+    fn d_key_prefills_existing_due_date_and_enters_editing_due() {
+        let due = chrono::NaiveDate::from_ymd_opt(2026, 4, 15).unwrap();
+        let mut app = make_app_with_due(Some(due));
+        let _ = handle_normal(&mut app, KeyCode::Char('d'));
+        assert_eq!(app.mode, Mode::EditingDue);
+        assert_eq!(app.input_buffer, "2026-04-15");
+    }
+
+    #[test]
+    fn d_key_empty_buffer_when_no_due_date() {
+        let mut app = make_app_with_due(None);
+        let _ = handle_normal(&mut app, KeyCode::Char('d'));
+        assert_eq!(app.mode, Mode::EditingDue);
+        assert_eq!(app.input_buffer, "");
+    }
+
+    #[test]
+    fn editing_due_confirm_valid_date_saves() {
+        let mut app = make_app_with_due(None);
+        app.mode = Mode::EditingDue;
+        app.input_buffer = "2026-05-01".to_string();
+        let _ = handle_input(&mut app, KeyCode::Enter, InputAction::EditDue);
+        assert_eq!(app.mode, Mode::Normal);
+        let expected = chrono::NaiveDate::from_ymd_opt(2026, 5, 1).unwrap();
+        assert_eq!(app.task_file.tasks[0].due_date, Some(expected));
+    }
+
+    #[test]
+    fn editing_due_confirm_empty_clears_due_date() {
+        let due = chrono::NaiveDate::from_ymd_opt(2026, 4, 15).unwrap();
+        let mut app = make_app_with_due(Some(due));
+        app.mode = Mode::EditingDue;
+        app.input_buffer = "".to_string();
+        let _ = handle_input(&mut app, KeyCode::Enter, InputAction::EditDue);
+        assert_eq!(app.mode, Mode::Normal);
+        assert_eq!(app.task_file.tasks[0].due_date, None);
+    }
+
+    #[test]
+    fn editing_due_invalid_date_stays_in_editing_mode() {
+        let mut app = make_app_with_due(None);
+        app.mode = Mode::EditingDue;
+        app.input_buffer = "notadate".to_string();
+        let _ = handle_input(&mut app, KeyCode::Enter, InputAction::EditDue);
+        assert_eq!(app.mode, Mode::EditingDue);
+        assert!(app.status_message.as_deref() == Some("Invalid date — use YYYY-MM-DD"));
+    }
+
+    #[test]
+    fn editing_due_esc_cancels_without_saving() {
+        let due = chrono::NaiveDate::from_ymd_opt(2026, 4, 15).unwrap();
+        let mut app = make_app_with_due(Some(due));
+        app.mode = Mode::EditingDue;
+        app.input_buffer = "2026-01-01".to_string();
+        let _ = handle_input(&mut app, KeyCode::Esc, InputAction::EditDue);
+        assert_eq!(app.mode, Mode::Normal);
+        // Due date unchanged
+        assert_eq!(app.task_file.tasks[0].due_date, Some(due));
     }
 }
