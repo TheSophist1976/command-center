@@ -1,4 +1,4 @@
-use chrono::{DateTime, NaiveDate, Utc};
+use chrono::{Datelike, DateTime, Duration, NaiveDate, Utc, Weekday};
 use std::str::FromStr;
 
 use crate::task::{Priority, Recurrence, Status, Task, TaskFile};
@@ -278,6 +278,45 @@ pub fn serialize(task_file: &TaskFile) -> String {
     }
 
     out
+}
+
+/// Parse a due date input string.
+///
+/// Accepts:
+/// - ISO dates: `"2026-04-15"` → returns that date
+/// - Full weekday names: `"monday"` … `"sunday"` (case-insensitive)
+/// - Three-letter abbreviations: `"mon"` … `"sun"` (case-insensitive)
+///
+/// Weekday names resolve to the **next future occurrence** after `today` — never
+/// today itself (same-day input advances by 7 days to the following week).
+///
+/// Returns `None` for empty or unrecognized input.
+pub fn parse_due_date_input(s: &str, today: NaiveDate) -> Option<NaiveDate> {
+    if s.is_empty() {
+        return None;
+    }
+
+    if let Ok(d) = NaiveDate::parse_from_str(s, "%Y-%m-%d") {
+        return Some(d);
+    }
+
+    let weekday: Weekday = match s.to_lowercase().as_str() {
+        "monday" | "mon" => Weekday::Mon,
+        "tuesday" | "tue" => Weekday::Tue,
+        "wednesday" | "wed" => Weekday::Wed,
+        "thursday" | "thu" => Weekday::Thu,
+        "friday" | "fri" => Weekday::Fri,
+        "saturday" | "sat" => Weekday::Sat,
+        "sunday" | "sun" => Weekday::Sun,
+        _ => return None,
+    };
+
+    let today_num = today.weekday().number_from_monday() as i64;
+    let target_num = weekday.number_from_monday() as i64;
+    let diff = (target_num - today_num + 7) % 7;
+    let days_ahead = if diff == 0 { 7 } else { diff };
+
+    today.checked_add_signed(Duration::days(days_ahead))
 }
 
 #[cfg(test)]
@@ -884,5 +923,58 @@ Some description here.
         assert!(serialized.contains("note:my-note"));
         let parsed = parse(&serialized, false).unwrap();
         assert_eq!(parsed.tasks[0].note, Some("my-note".to_string()));
+    }
+
+    // -- parse_due_date_input tests --
+    // today = 2026-03-31 (Tuesday) used throughout
+
+    fn tue() -> NaiveDate { NaiveDate::from_ymd_opt(2026, 3, 31).unwrap() }
+
+    #[test]
+    fn test_parse_due_iso_passthrough() {
+        let d = parse_due_date_input("2026-04-15", tue()).unwrap();
+        assert_eq!(d, NaiveDate::from_ymd_opt(2026, 4, 15).unwrap());
+    }
+
+    #[test]
+    fn test_parse_due_full_weekday_monday() {
+        // Today is Tuesday; next Monday is 2026-04-06 (6 days away)
+        let d = parse_due_date_input("Monday", tue()).unwrap();
+        assert_eq!(d, NaiveDate::from_ymd_opt(2026, 4, 6).unwrap());
+    }
+
+    #[test]
+    fn test_parse_due_abbrev_fri() {
+        // Today is Tuesday; next Friday is 2026-04-03 (3 days away)
+        let d = parse_due_date_input("fri", tue()).unwrap();
+        assert_eq!(d, NaiveDate::from_ymd_opt(2026, 4, 3).unwrap());
+    }
+
+    #[test]
+    fn test_parse_due_case_insensitive() {
+        let lower = parse_due_date_input("wednesday", tue()).unwrap();
+        let upper = parse_due_date_input("WEDNESDAY", tue()).unwrap();
+        let mixed = parse_due_date_input("Wednesday", tue()).unwrap();
+        assert_eq!(lower, upper);
+        assert_eq!(lower, mixed);
+    }
+
+    #[test]
+    fn test_parse_due_same_weekday_advances_one_week() {
+        // Today is Tuesday; "tuesday" should give next Tuesday (7 days)
+        let d = parse_due_date_input("tuesday", tue()).unwrap();
+        assert_eq!(d, NaiveDate::from_ymd_opt(2026, 4, 7).unwrap());
+    }
+
+    #[test]
+    fn test_parse_due_unrecognized_returns_none() {
+        assert!(parse_due_date_input("soon", tue()).is_none());
+        assert!(parse_due_date_input("asap", tue()).is_none());
+        assert!(parse_due_date_input("2026/04/01", tue()).is_none());
+    }
+
+    #[test]
+    fn test_parse_due_empty_returns_none() {
+        assert!(parse_due_date_input("", tue()).is_none());
     }
 }

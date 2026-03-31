@@ -4,6 +4,7 @@ use std::sync::mpsc;
 use std::time::Duration;
 
 use chrono::{Datelike, Days, Local, Months, NaiveDate, Utc};
+use crate::parser::parse_due_date_input;
 use crossterm::{
     event::{self, Event, KeyCode, KeyEventKind},
     execute,
@@ -2617,8 +2618,9 @@ fn handle_detail_confirm(app: &mut App, key: KeyCode) -> Result<(), String> {
             // Validate due date before saving
             if let Some(ref draft) = app.detail_draft {
                 if !draft.due_date.trim().is_empty() {
-                    if NaiveDate::parse_from_str(draft.due_date.trim(), "%Y-%m-%d").is_err() {
-                        app.status_message = Some("Invalid date format (use YYYY-MM-DD)".to_string());
+                    let today = Local::now().date_naive();
+                    if parse_due_date_input(draft.due_date.trim(), today).is_none() {
+                        app.status_message = Some("Invalid date (use YYYY-MM-DD or a weekday name)".to_string());
                         app.detail_field_index = 4;
                         load_field_to_buffer(app);
                         app.mode = Mode::EditingDetailPanel;
@@ -2638,7 +2640,8 @@ fn handle_detail_confirm(app: &mut App, key: KeyCode) -> Result<(), String> {
                     task.due_date = if draft.due_date.trim().is_empty() {
                         None
                     } else {
-                        NaiveDate::parse_from_str(draft.due_date.trim(), "%Y-%m-%d").ok()
+                        let today = Local::now().date_naive();
+                        parse_due_date_input(draft.due_date.trim(), today)
                     };
                     task.project = if draft.project.trim().is_empty() { None } else { Some(draft.project) };
                     task.tags = draft.tags.split_whitespace().map(|s| s.to_string()).collect();
