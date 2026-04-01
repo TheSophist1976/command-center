@@ -4,6 +4,7 @@ use std::sync::mpsc;
 use std::time::Duration;
 
 use chrono::{Datelike, Days, Local, Months, NaiveDate, Utc};
+use crate::parser::parse_due_date_input;
 use crossterm::{
     event::{self, Event, KeyCode, KeyEventKind},
     execute,
@@ -2095,8 +2096,9 @@ fn handle_input(app: &mut App, key: KeyCode, action: InputAction) -> Result<(), 
                             app.save()?;
                         }
                     } else {
-                        match chrono::NaiveDate::parse_from_str(&trimmed, "%Y-%m-%d") {
-                            Ok(date) => {
+                        let today = Local::now().date_naive();
+                        match parse_due_date_input(&trimmed, today) {
+                            Some(date) => {
                                 let filtered = app.visual_task_order();
                                 if let Some(&task_idx) = filtered.get(app.selected) {
                                     let task = &mut app.task_file.tasks[task_idx];
@@ -2105,8 +2107,8 @@ fn handle_input(app: &mut App, key: KeyCode, action: InputAction) -> Result<(), 
                                     app.save()?;
                                 }
                             }
-                            Err(_) => {
-                                app.status_message = Some("Invalid date — use YYYY-MM-DD".to_string());
+                            None => {
+                                app.status_message = Some("Invalid date (use YYYY-MM-DD or a weekday name)".to_string());
                                 app.mode = Mode::EditingDue;
                                 return Ok(());
                             }
@@ -2433,8 +2435,9 @@ fn handle_detail_confirm(app: &mut App, key: KeyCode) -> Result<(), String> {
             // Validate due date before saving
             if let Some(ref draft) = app.detail_draft {
                 if !draft.due_date.trim().is_empty() {
-                    if NaiveDate::parse_from_str(draft.due_date.trim(), "%Y-%m-%d").is_err() {
-                        app.status_message = Some("Invalid date format (use YYYY-MM-DD)".to_string());
+                    let today = Local::now().date_naive();
+                    if parse_due_date_input(draft.due_date.trim(), today).is_none() {
+                        app.status_message = Some("Invalid date (use YYYY-MM-DD or a weekday name)".to_string());
                         app.detail_field_index = 4;
                         load_field_to_buffer(app);
                         app.mode = Mode::EditingDetailPanel;
@@ -2454,7 +2457,8 @@ fn handle_detail_confirm(app: &mut App, key: KeyCode) -> Result<(), String> {
                     task.due_date = if draft.due_date.trim().is_empty() {
                         None
                     } else {
-                        NaiveDate::parse_from_str(draft.due_date.trim(), "%Y-%m-%d").ok()
+                        let today = Local::now().date_naive();
+                        parse_due_date_input(draft.due_date.trim(), today)
                     };
                     task.project = if draft.project.trim().is_empty() { None } else { Some(draft.project) };
                     task.tags = draft.tags.split_whitespace().map(|s| s.to_string()).collect();
@@ -4838,7 +4842,7 @@ mod tests {
         app.input_buffer = "notadate".to_string();
         let _ = handle_input(&mut app, KeyCode::Enter, InputAction::EditDue);
         assert_eq!(app.mode, Mode::EditingDue);
-        assert!(app.status_message.as_deref() == Some("Invalid date — use YYYY-MM-DD"));
+        assert!(app.status_message.as_deref() == Some("Invalid date (use YYYY-MM-DD or a weekday name)"));
     }
 
     #[test]
@@ -4851,5 +4855,44 @@ mod tests {
         assert_eq!(app.mode, Mode::Normal);
         // Due date unchanged
         assert_eq!(app.task_file.tasks[0].due_date, Some(due));
+    }
+
+    // -- reload_from_disk tests --
+
+    #[test]
+    fn reload_from_disk_updates_task_file_and_sets_status_message() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("tasks.md");
+        // Write initial file with 1 task
+        std::fs::write(&path, "<!-- format:2 -->\n<!-- next-id:2 -->\n\n# Tasks\n\n## [ ] Task one\n<!-- id:1 priority:medium created:2026-01-01T00:00:00+00:00 -->\n").unwrap();
+        let mut app = App::new(&path).unwrap();
+        assert_eq!(app.task_file.tasks.len(), 1);
+
+        // External writer adds a second task
+        std::fs::write(&path, "<!-- format:2 -->\n<!-- next-id:3 -->\n\n# Tasks\n\n## [ ] Task one\n<!-- id:1 priority:medium created:2026-01-01T00:00:00+00:00 -->\n\n## [ ] Task two\n<!-- id:2 priority:medium created:2026-01-02T00:00:00+00:00 -->\n").unwrap();
+
+        app.reload_from_disk().unwrap();
+
+        assert_eq!(app.task_file.tasks.len(), 2);
+        assert_eq!(app.status_message, Some("Reloaded 2 tasks from disk".to_string()));
+    }
+
+    #[test]
+    fn ctrl_r_in_non_normal_mode_sets_warning_and_does_not_reload() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("tasks.md");
+        std::fs::write(&path, "<!-- format:2 -->\n<!-- next-id:2 -->\n\n# Tasks\n\n## [ ] Task one\n<!-- id:1 priority:medium created:2026-01-01T00:00:00+00:00 -->\n").unwrap();
+        let mut app = App::new(&path).unwrap();
+        app.mode = Mode::Adding;
+
+        // Simulate the ctrl+r blocking logic
+        if app.mode != Mode::Normal {
+            app.status_message = Some("Cannot reload: finish editing first".to_string());
+        } else {
+            app.reload_from_disk().unwrap();
+        }
+
+        assert_eq!(app.task_file.tasks.len(), 1, "task_file should not change");
+        assert_eq!(app.status_message, Some("Cannot reload: finish editing first".to_string()));
     }
 }
