@@ -1,108 +1,54 @@
-### Requirement: Config file location
-The system SHALL store application configuration at `{config_dir}/task-manager/config.md`, where `{config_dir}` is the platform config directory returned by `dirs::config_dir()`. If `config_dir()` returns `None`, the system SHALL behave as if no config file exists.
-
-#### Scenario: Config path on macOS
-- **WHEN** the system resolves the config file path on macOS
-- **THEN** the path SHALL be `~/Library/Application Support/task-manager/config.md`
-
-#### Scenario: No config dir available
-- **WHEN** `dirs::config_dir()` returns `None`
-- **THEN** the system SHALL treat the config as unset and fall through to the next file path resolution tier
-
-### Requirement: Config file format
-The config file SHALL be a plain markdown file. Each configuration key SHALL appear on its own line in the format `key: value`. Lines that do not match this format SHALL be ignored. The file is human-readable and editable by hand.
-
-#### Scenario: Read a valid config file
-- **WHEN** the config file contains `default-dir: /Users/alice/notes`
-- **THEN** the system SHALL return `/Users/alice/notes` as the value for `default-dir`
-
-#### Scenario: Ignore unrecognised lines
-- **WHEN** the config file contains comment lines (e.g., `# task-manager config`) or blank lines
-- **THEN** the system SHALL ignore those lines without error
-
-#### Scenario: Key not present
-- **WHEN** the config file exists but does not contain a line for the requested key
-- **THEN** the system SHALL return no value for that key
-
-### Requirement: default-dir config key
-The `default-dir` key SHALL store the directory path from which `tasks.md` is loaded when no explicit path is provided. The value SHALL be used as the directory; `tasks.md` is appended to form the full file path.
-
-#### Scenario: default-dir is set
-- **WHEN** `default-dir` is set to `/home/user/notes` and no `--file` flag or `TASK_FILE` env var is given
-- **THEN** the system SHALL resolve the task file path as `/home/user/notes/tasks.md`
-
-#### Scenario: default-dir is not set
-- **WHEN** `default-dir` is not set in the config file
-- **THEN** the task file path SHALL fall through to `"tasks.md"` (current directory)
-
-### Requirement: Config CLI subcommand
-The system SHALL provide a `task config` subcommand with `set` and `get` operations for managing configuration values.
-
-#### Scenario: Set a config value
-- **WHEN** the user runs `task config set default-dir /home/user/notes`
-- **THEN** the system SHALL write `default-dir: /home/user/notes` to the config file and print a confirmation message
-
-#### Scenario: Get a config value that is set
-- **WHEN** the user runs `task config get default-dir` and the key exists
-- **THEN** the system SHALL print the stored value
-
-#### Scenario: Get a config value that is not set
-- **WHEN** the user runs `task config get default-dir` and the key is not present in the config file
-- **THEN** the system SHALL print a message indicating the value is not set and exit with code 0
-
-#### Scenario: Set creates config directory if absent
-- **WHEN** the config directory does not exist and the user runs `task config set default-dir <path>`
-- **THEN** the system SHALL create the config directory before writing the config file
-
-### Requirement: File path resolution order
-The system SHALL resolve the task file path using the following priority order: (1) `--file` CLI flag, (2) `TASK_FILE` environment variable, (3) `default-dir` from config file, (4) `"tasks.md"` in the current directory.
-
-#### Scenario: CLI flag takes highest priority
-- **WHEN** `--file custom.md` is provided and `default-dir` is also set
-- **THEN** the system SHALL use `custom.md` and ignore the config value
-
-#### Scenario: Env var takes priority over config
-- **WHEN** `TASK_FILE=/tmp/tasks.md` is set and `default-dir` is also configured
-- **THEN** the system SHALL use `/tmp/tasks.md` and ignore the config value
-
-#### Scenario: Config value used when no flag or env var
-- **WHEN** no `--file` flag and no `TASK_FILE` env var are set, and `default-dir` is configured
-- **THEN** the system SHALL use `<default-dir>/tasks.md`
-
-#### Scenario: Hardcoded fallback when nothing is configured
-- **WHEN** no flag, no env var, and no config value are present
-- **THEN** the system SHALL use `"tasks.md"` in the current directory
 ## ADDED Requirements
 
-### Requirement: claude-code-dir config key
-The `claude-code-dir` key SHALL store the root directory whose immediate subdirectories are listed in the Claude session directory picker. If not set, the system SHALL default to `~/code` (tilde expanded using the platform home directory). The value SHALL be read at picker-open time, not at TUI startup, so changes take effect without restarting.
+### Requirement: columns config key
+The `columns:` config key SHALL define which task table columns are shown and their display order, as a comma-separated list of column identifiers. Valid identifiers are: `id`, `status`, `priority`, `title`, `desc`, `due`, `project`, `agent`, `recur`, `note`, `tags`. If the key is absent or empty, the TUI SHALL fall back to the current auto-show logic (show a column only if at least one visible task has a non-empty value for it). The `id`, `status`, `priority`, and `title` columns are always shown regardless of this setting.
 
-#### Scenario: claude-code-dir is set
-- **WHEN** `claude-code-dir` is set to `/home/user/projects` in the config file
-- **THEN** the directory picker SHALL list immediate subdirectories of `/home/user/projects`
+#### Scenario: Columns key controls visible columns
+- **WHEN** config contains `columns: id,status,priority,title,due,agent`
+- **THEN** the task table SHALL display exactly those columns in that order
 
-#### Scenario: claude-code-dir is not set
-- **WHEN** `claude-code-dir` is absent from the config file
-- **THEN** the directory picker SHALL default to `~/code` (expanded to the user's home directory)
+#### Scenario: Unknown column identifiers ignored
+- **WHEN** config contains `columns: id,status,priority,title,unknown-col`
+- **THEN** the unknown identifier SHALL be silently ignored
 
-#### Scenario: Set via config subcommand
-- **WHEN** the user runs `task config set claude-code-dir /workspace`
-- **THEN** the system SHALL write `claude-code-dir: /workspace` to the config file and the picker SHALL use `/workspace` on next open
+#### Scenario: Absent key uses auto-show logic
+- **WHEN** the config file does not contain a `columns:` key
+- **THEN** the TUI SHALL show columns dynamically based on data presence (existing behavior)
 
-### Requirement: agent-* config key family
-The config system SHALL support keys with the prefix `agent-` (e.g., `agent-command-center`) for storing agent profile working directories. These keys SHALL follow the same `key: value` format as all other config entries and SHALL be readable and writable via the existing `read_config_value` / `write_config_value` interface.
+### Requirement: group-by config key
+The `group-by:` config key SHALL define the field by which the task table is grouped on startup. Valid values are: `none`, `agent`, `project`, `priority`. If absent or set to `none`, no grouping is applied. The TUI SHALL write this key whenever the user changes the active grouping via `:group` or `G`.
 
-#### Scenario: Write and read an agent profile
-- **WHEN** `write_config_value("agent-command-center", "~/code/command-center")` is called
-- **THEN** the config file SHALL contain `agent-command-center: ~/code/command-center` and `read_config_value("agent-command-center")` SHALL return `~/code/command-center`
+#### Scenario: group-by restored on startup
+- **WHEN** config contains `group-by: agent`
+- **THEN** the TUI SHALL start with agent grouping active
 
-### Requirement: Enumerate all agent profiles from config
-The config module SHALL expose a function `list_agent_profiles()` that reads the config file and returns all entries whose key starts with `agent-`, as a `Vec<(String, String)>` of `(profile_name, dir)` pairs where `profile_name` is the key with the `agent-` prefix stripped.
+#### Scenario: group-by none disables grouping
+- **WHEN** config contains `group-by: none`
+- **THEN** the TUI SHALL start with no grouping
 
-#### Scenario: Two profiles in config
-- **WHEN** config contains `agent-alpha: /code/alpha` and `agent-beta: /code/beta`
-- **THEN** `list_agent_profiles()` SHALL return `[("alpha", "/code/alpha"), ("beta", "/code/beta")]` (order may vary)
+#### Scenario: Absent group-by defaults to none
+- **WHEN** the config file does not contain a `group-by:` key
+- **THEN** the TUI SHALL start with no grouping applied
 
-#### Scenario: No agent profiles in config
-- **WHEN** no `agent-*` keys exist in config
-- **THEN** `list_agent_profiles()` SHALL return an empty vec
+### Requirement: TUI grouping commands
+The user SHALL type `:group <field>` in normal mode to set the active grouping. Valid fields are `agent`, `project`, `priority`, and `none`. The new grouping SHALL take effect immediately, re-rendering the task table with section headers. The active grouping SHALL be saved to config. Pressing `G` in normal mode SHALL cycle through groupings in the order: none → project → agent → priority → none.
+
+#### Scenario: Set grouping via command
+- **WHEN** the user types `:group agent` and presses Enter
+- **THEN** the task table SHALL render tasks grouped under agent section headers and `group-by: agent` SHALL be written to config
+
+#### Scenario: Clear grouping via command
+- **WHEN** the user types `:group none` and presses Enter
+- **THEN** the task table SHALL render as a flat sorted list and `group-by: none` SHALL be written to config
+
+#### Scenario: G cycles grouping
+- **WHEN** the active grouping is `none` and the user presses `G`
+- **THEN** the grouping SHALL change to `project`
+
+#### Scenario: G wraps back to none
+- **WHEN** the active grouping is `priority` and the user presses `G`
+- **THEN** the grouping SHALL change to `none`
+
+#### Scenario: Invalid group field shows error
+- **WHEN** the user types `:group unknown`
+- **THEN** the TUI SHALL display a status message "Unknown group field. Valid: agent, project, priority, none"
