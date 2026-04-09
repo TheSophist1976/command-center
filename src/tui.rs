@@ -58,7 +58,6 @@ enum Mode {
     EditingDescription,
     EditingDefaultDir,
     EditingDue,
-    Command,
 
     EditingRecurrence,
     EditingDetailPanel,
@@ -1382,10 +1381,6 @@ fn handle_key(_terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut 
             handle_input(app, key, InputAction::EditDue)?;
             Ok(false)
         }
-        Mode::Command => {
-            handle_command_input(app, key)?;
-            Ok(false)
-        }
         Mode::EditingDetailPanel => {
             handle_detail_edit(app, key)?;
             Ok(false)
@@ -1608,10 +1603,6 @@ fn handle_normal(app: &mut App, key: KeyCode) -> Result<bool, String> {
         KeyCode::Char('G') => {
             app.group_by = app.group_by.next();
             let _ = config::write_config_value("group-by", app.group_by.to_config_str());
-        }
-        KeyCode::Char(':') => {
-            app.input_buffer.clear();
-            app.mode = Mode::Command;
         }
         KeyCode::Tab => {
             app.show_detail_panel = !app.show_detail_panel;
@@ -2191,49 +2182,6 @@ fn handle_recurrence_input(app: &mut App, key: KeyCode) -> Result<(), String> {
                 Err(e) => {
                     app.status_message = Some(e);
                 }
-            }
-        }
-        KeyCode::Backspace => {
-            app.input_buffer.pop();
-        }
-        KeyCode::Char(c) => {
-            app.input_buffer.push(c);
-        }
-        _ => {}
-    }
-    Ok(())
-}
-
-fn handle_command_input(app: &mut App, key: KeyCode) -> Result<(), String> {
-    match key {
-        KeyCode::Esc => {
-            app.mode = Mode::Normal;
-            app.input_buffer.clear();
-        }
-        KeyCode::Enter => {
-            let input = app.input_buffer.clone();
-            app.input_buffer.clear();
-            app.mode = Mode::Normal;
-            let trimmed = input.trim();
-            if trimmed.is_empty() {
-                return Ok(());
-            }
-            if let Some(field) = trimmed.strip_prefix("group ").map(|s| s.trim()) {
-                let new_group = match field {
-                    "agent" => Some(GroupBy::Agent),
-                    "project" => Some(GroupBy::Project),
-                    "priority" => Some(GroupBy::Priority),
-                    "none" => Some(GroupBy::None),
-                    _ => None,
-                };
-                if let Some(g) = new_group {
-                    app.group_by = g;
-                    let _ = config::write_config_value("group-by", g.to_config_str());
-                } else {
-                    app.status_message = Some("Unknown group field. Valid: agent, project, priority, none".to_string());
-                }
-            } else {
-                app.status_message = Some(format!("Unknown command: {}", trimmed));
             }
         }
         KeyCode::Backspace => {
@@ -3663,9 +3611,9 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
             } else if app.show_detail_panel {
                 " j/k:nav  Enter:edit  Space:toggle  a:add  d:due  f:filter  p:priority  e:title  t:tags  r:desc  R:recur  A:agent  n:note  g:go-note  v:view  Tab:close  q:quit".to_string()
             } else if app.view == View::Due {
-                " j/k:nav  Enter:toggle  a:add  d:due  T/N/W/M/Q/Y:due-quick  X:clr-due  f:filter  v:view  [/]:window  G:group  ::command  q:quit".to_string()
+                " j/k:nav  Enter:toggle  a:add  d:due  T/N/W/M/Q/Y:due-quick  X:clr-due  f:filter  v:view  [/]:window  G:group  q:quit".to_string()
             } else {
-                " j/k:nav  Enter:toggle  a:add  d:due  T/N/W/M/Q/Y:due-quick  X:clr-due  f:filter  p:priority  e:title  t:tags  r:desc  R:recur  A:agent  n:note  g:go-note  v:view  G:group  C:sessions  ::command  D:set-dir  Tab:details  ^r:reload  q:quit".to_string()
+                " j/k:nav  Enter:toggle  a:add  d:due  T/N/W/M/Q/Y:due-quick  X:clr-due  f:filter  p:priority  e:title  t:tags  r:desc  R:recur  A:agent  n:note  g:go-note  v:view  G:group  C:sessions  D:set-dir  Tab:details  ^r:reload  q:quit".to_string()
             }
         }
         Mode::Adding => {
@@ -3711,9 +3659,6 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
         }
         Mode::EditingDefaultDir => {
             format!(" Set default directory: {}_ ", app.input_buffer)
-        }
-        Mode::Command => {
-            format!(" :{}_ ", app.input_buffer)
         }
         Mode::EditingDetailPanel => {
             " j/k:field  c/h/m/l:priority  Enter/Space:status  Esc:done ".to_string()
