@@ -28,6 +28,42 @@ Tasks can be assigned to specific AI agents using the `agent` field in the task 
 
 ---
 
+## Reading Your Instructions
+
+Each agent may have a set of operating instructions written by the human. **Read these at the start of every session before doing any work.**
+
+Instructions are stored as a markdown note at:
+```
+<task-dir>/Notes/Instructions/<your-agent-name>.md
+```
+
+Where `<task-dir>` is the directory containing `tasks.md` (resolved via `default-dir` in config or the file's parent directory).
+
+**To read your instructions:**
+```bash
+task agent instructions <your-agent-name> show
+```
+
+Example (if your agent name is `command-center`):
+```bash
+task agent instructions command-center show
+```
+
+If no instructions file exists, the command prints "No instructions found." and you should proceed without them.
+
+**The human can create or update your instructions with:**
+```bash
+task agent instructions <name> edit --title "My Agent Instructions" --body "Focus on..."
+```
+
+---
+
+## TUI Auto-Filter
+
+When `task-tui` is launched from your project directory, it automatically applies a filter showing only tasks assigned to your agent. You will see `filter: agent:<name>` in the header. Press `Esc` to clear the filter and see all tasks.
+
+---
+
 ---
 
 ## Step 1: Always Read First

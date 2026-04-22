@@ -110,6 +110,16 @@ impl DueWindow {
             DueWindow::All => "All Tasks",
         }
     }
+
+    fn to_config_str(&self) -> &str {
+        match self {
+            DueWindow::Day => "day",
+            DueWindow::Week => "week",
+            DueWindow::Month => "month",
+            DueWindow::Year => "year",
+            DueWindow::All => "all",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -118,6 +128,7 @@ enum GroupBy {
     Agent,
     Project,
     Priority,
+    DueDate,
 }
 
 impl GroupBy {
@@ -126,7 +137,8 @@ impl GroupBy {
             GroupBy::None => GroupBy::Project,
             GroupBy::Project => GroupBy::Agent,
             GroupBy::Agent => GroupBy::Priority,
-            GroupBy::Priority => GroupBy::None,
+            GroupBy::Priority => GroupBy::DueDate,
+            GroupBy::DueDate => GroupBy::None,
         }
     }
 
@@ -136,6 +148,7 @@ impl GroupBy {
             GroupBy::Agent => "agent",
             GroupBy::Project => "project",
             GroupBy::Priority => "priority",
+            GroupBy::DueDate => "due-date",
         }
     }
 
@@ -144,6 +157,7 @@ impl GroupBy {
             "agent" => GroupBy::Agent,
             "project" => GroupBy::Project,
             "priority" => GroupBy::Priority,
+            "due-date" => GroupBy::DueDate,
             _ => GroupBy::None,
         }
     }
@@ -183,7 +197,7 @@ impl ColumnId {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum View {
     Due,
     NoDueDate,
@@ -192,6 +206,20 @@ enum View {
 }
 
 /// An open task is "incomplete" (needs attention) if it is missing a due date or an agent.
+fn ordinal_day(day: u32) -> String {
+    let suffix = match day {
+        1 | 21 | 31 => "st",
+        2 | 22 => "nd",
+        3 | 23 => "rd",
+        _ => "th",
+    };
+    format!("{}{}", day, suffix)
+}
+
+fn format_due_group_label(date: chrono::NaiveDate) -> String {
+    format!("{} {} {}", date.format("%A"), date.format("%b"), ordinal_day(date.day()))
+}
+
 fn is_incomplete(task: &Task) -> bool {
     task.status == Status::Open && (task.due_date.is_none() || task.agent.is_none())
 }
@@ -278,6 +306,15 @@ impl View {
             View::NoDueDate => "No Due Date",
             View::Recurring => "Recurring",
             View::Notes => "Notes",
+        }
+    }
+
+    fn to_config_str(&self) -> &str {
+        match self {
+            View::Due => "due",
+            View::NoDueDate => "no-due-date",
+            View::Recurring => "recurring",
+            View::Notes => "notes",
         }
     }
 
@@ -947,7 +984,7 @@ struct App {
     filter: Filter,
     view: View,
     due_window: DueWindow,
-    group_by: GroupBy,
+    view_groupings: std::collections::HashMap<String, GroupBy>,
     columns: Vec<ColumnId>,
     mode: Mode,
     input_buffer: String,
@@ -984,9 +1021,25 @@ impl App {
         let view = config::read_config_value("default-view")
             .map(|v| View::from_config(&v))
             .unwrap_or(View::Due);
-        let group_by = config::read_config_value("group-by")
-            .map(|v| GroupBy::from_config(&v))
-            .unwrap_or(GroupBy::None);
+        let mut view_groupings = std::collections::HashMap::new();
+        // Per-window groupings for Due view
+        for &w in &[DueWindow::Day, DueWindow::Week, DueWindow::Month, DueWindow::Year, DueWindow::All] {
+            let slot = format!("due.{}", w.to_config_str());
+            let config_key = format!("group-by.{}", slot);
+            let g = config::read_config_value(&config_key)
+                .map(|s| GroupBy::from_config(&s))
+                .unwrap_or(GroupBy::None);
+            view_groupings.insert(slot, g);
+        }
+        // Per-view groupings for non-Due views
+        for &v in &[View::NoDueDate, View::Recurring, View::Notes] {
+            let slot = v.to_config_str().to_string();
+            let config_key = format!("group-by.{}", slot);
+            let g = config::read_config_value(&config_key)
+                .map(|s| GroupBy::from_config(&s))
+                .unwrap_or(GroupBy::None);
+            view_groupings.insert(slot, g);
+        }
         let columns: Vec<ColumnId> = config::read_config_value("columns")
             .map(|v| {
                 v.split(',')
@@ -1001,7 +1054,7 @@ impl App {
             filter: Filter::default(),
             view,
             due_window: DueWindow::Day,
-            group_by,
+            view_groupings,
             columns,
             mode: Mode::Normal,
             input_buffer: String::new(),
@@ -1036,6 +1089,13 @@ impl App {
         let loaded = claude_session::load_sessions(&task_dir);
         app.next_session_id = loaded.iter().map(|s| s.id).max().map_or(0, |m| m + 1);
         app.claude_sessions = loaded;
+        // Auto-filter by agent when CWD matches an agent profile
+        if let Ok(cwd) = std::env::current_dir() {
+            if let Some(agent_name) = config::find_agent_for_cwd(&cwd) {
+                app.filter = Filter::parse(&format!("agent:{}", agent_name));
+                app.clamp_selection();
+            }
+        }
         Ok(app)
     }
 
@@ -1045,6 +1105,18 @@ impl App {
 
     fn notes_dir(&self) -> PathBuf {
         self.task_dir().join("Notes")
+    }
+
+    fn grouping_slot(&self) -> String {
+        if self.view == View::Due {
+            format!("due.{}", self.due_window.to_config_str())
+        } else {
+            self.view.to_config_str().to_string()
+        }
+    }
+
+    fn active_group_by(&self) -> GroupBy {
+        *self.view_groupings.get(&self.grouping_slot()).unwrap_or(&GroupBy::None)
     }
 
     fn task_filename(&self) -> String {
@@ -1101,7 +1173,8 @@ impl App {
     /// Navigation must use this so j/k move in the same order as the rendered table.
     fn visual_task_order(&self) -> Vec<usize> {
         let filtered = self.filtered_indices();
-        if self.group_by == GroupBy::None {
+        let group_by = self.active_group_by();
+        if group_by == GroupBy::None {
             return filtered;
         }
         let tasks = &self.task_file.tasks;
@@ -1109,10 +1182,11 @@ impl App {
         let mut seen_keys: Vec<Option<String>> = Vec::new();
         let mut group_map: std::collections::HashMap<Option<String>, Vec<usize>> = std::collections::HashMap::new();
         for &idx in &filtered {
-            let key: Option<String> = match self.group_by {
+            let key: Option<String> = match group_by {
                 GroupBy::Agent => tasks[idx].agent.clone(),
                 GroupBy::Project => tasks[idx].project.clone(),
                 GroupBy::Priority => Some(format!("{}", tasks[idx].priority)),
+                GroupBy::DueDate => tasks[idx].due_date.map(|d| format_due_group_label(d)),
                 GroupBy::None => unreachable!(),
             };
             if !seen_keys.contains(&key) {
@@ -1120,12 +1194,26 @@ impl App {
             }
             group_map.entry(key).or_default().push(idx);
         }
-        seen_keys.sort_by(|a, b| match (a, b) {
-            (None, None) => std::cmp::Ordering::Equal,
-            (None, _) => std::cmp::Ordering::Greater,
-            (_, None) => std::cmp::Ordering::Less,
-            (Some(a), Some(b)) => a.to_lowercase().cmp(&b.to_lowercase()),
-        });
+        if group_by == GroupBy::DueDate {
+            // Sort date groups chronologically using the first task's due date in each group
+            seen_keys.sort_by(|a, b| {
+                let date_a = group_map.get(a).and_then(|idxs| idxs.first()).and_then(|&i| tasks[i].due_date);
+                let date_b = group_map.get(b).and_then(|idxs| idxs.first()).and_then(|&i| tasks[i].due_date);
+                match (date_a, date_b) {
+                    (Some(a), Some(b)) => a.cmp(&b),
+                    (Some(_), None) => std::cmp::Ordering::Less,
+                    (None, Some(_)) => std::cmp::Ordering::Greater,
+                    (None, None) => std::cmp::Ordering::Equal,
+                }
+            });
+        } else {
+            seen_keys.sort_by(|a, b| match (a, b) {
+                (None, None) => std::cmp::Ordering::Equal,
+                (None, _) => std::cmp::Ordering::Greater,
+                (_, None) => std::cmp::Ordering::Less,
+                (Some(a), Some(b)) => a.to_lowercase().cmp(&b.to_lowercase()),
+            });
+        }
         let mut result = Vec::with_capacity(filtered.len());
         for key in &seen_keys {
             if let Some(indices) = group_map.get(key) {
@@ -1601,8 +1689,11 @@ fn handle_normal(app: &mut App, key: KeyCode) -> Result<bool, String> {
             }
         }
         KeyCode::Char('G') => {
-            app.group_by = app.group_by.next();
-            let _ = config::write_config_value("group-by", app.group_by.to_config_str());
+            let next = app.active_group_by().next();
+            let slot = app.grouping_slot();
+            app.view_groupings.insert(slot.clone(), next);
+            let config_key = format!("group-by.{}", slot);
+            let _ = config::write_config_value(&config_key, next.to_config_str());
         }
         KeyCode::Tab => {
             app.show_detail_panel = !app.show_detail_panel;
@@ -2799,7 +2890,7 @@ fn draw_table(frame: &mut Frame, app: &mut App, area: Rect) {
         .add_modifier(Modifier::BOLD);
 
     let columns_ref = app.columns.clone();
-    let group_by = app.group_by;
+    let group_by = app.active_group_by();
 
     // Build rows, injecting group section headers when grouping is active
     let mut rows: Vec<Row> = Vec::new();
@@ -2815,6 +2906,7 @@ fn draw_table(frame: &mut Frame, app: &mut App, area: Rect) {
                 GroupBy::Agent => task.agent.clone(),
                 GroupBy::Project => task.project.clone(),
                 GroupBy::Priority => Some(format!("{}", task.priority)),
+                GroupBy::DueDate => task.due_date.map(|d| format_due_group_label(d)),
                 GroupBy::None => unreachable!(),
             };
             if !seen_keys.contains(&key) {
@@ -2822,20 +2914,37 @@ fn draw_table(frame: &mut Frame, app: &mut App, area: Rect) {
             }
             group_map.entry(key).or_default().push(idx);
         }
-        // Sort: named values alphabetically, None last
-        seen_keys.sort_by(|a, b| match (a, b) {
-            (None, None) => std::cmp::Ordering::Equal,
-            (None, _) => std::cmp::Ordering::Greater,
-            (_, None) => std::cmp::Ordering::Less,
-            (Some(a), Some(b)) => a.to_lowercase().cmp(&b.to_lowercase()),
-        });
+        // Sort groups: DueDate sorts chronologically; others alphabetically; None always last
+        let tasks_ref = &app.task_file.tasks;
+        if group_by == GroupBy::DueDate {
+            seen_keys.sort_by(|a, b| {
+                let date_a = group_map.get(a).and_then(|idxs| idxs.first()).and_then(|&i| tasks_ref[i].due_date);
+                let date_b = group_map.get(b).and_then(|idxs| idxs.first()).and_then(|&i| tasks_ref[i].due_date);
+                match (date_a, date_b) {
+                    (Some(a), Some(b)) => a.cmp(&b),
+                    (Some(_), None) => std::cmp::Ordering::Less,
+                    (None, Some(_)) => std::cmp::Ordering::Greater,
+                    (None, None) => std::cmp::Ordering::Equal,
+                }
+            });
+        } else {
+            seen_keys.sort_by(|a, b| match (a, b) {
+                (None, None) => std::cmp::Ordering::Equal,
+                (None, _) => std::cmp::Ordering::Greater,
+                (_, None) => std::cmp::Ordering::Less,
+                (Some(a), Some(b)) => a.to_lowercase().cmp(&b.to_lowercase()),
+            });
+        }
 
         let group_field_name = match group_by {
             GroupBy::Agent => "Agent",
             GroupBy::Project => "Project",
             GroupBy::Priority => "Priority",
+            GroupBy::DueDate => "Due Date",
             GroupBy::None => unreachable!(),
         };
+        // For DueDate grouping, None key label is "No Due Date" instead of "(none)"
+        let none_label = if group_by == GroupBy::DueDate { "No Due Date" } else { "(none)" };
         // Find the Fill(1) column index so the header text lands in the widest cell
         let fill_col_idx = {
             let mut idx = 0usize;
@@ -2853,7 +2962,7 @@ fn draw_table(frame: &mut Frame, app: &mut App, area: Rect) {
         };
         let num_cols = header_cells.len().max(1);
         for key in &seen_keys {
-            let label = key.as_deref().unwrap_or("(none)");
+            let label = key.as_deref().unwrap_or(none_label);
             let header_text = format!(" {} : {} ", group_field_name, label);
             // Put text in the Fill(1) column so it isn't clipped to a narrow fixed-width cell
             let mut cells: Vec<Cell> = (0..num_cols)
@@ -3991,7 +4100,7 @@ mod tests {
             filter: Filter::default(),
             view: View::Due,
             due_window: DueWindow::All,
-            group_by: GroupBy::None,
+            view_groupings: std::collections::HashMap::new(),
             columns: Vec::new(),
             mode: Mode::Normal,
             input_buffer: String::new(),
@@ -4071,7 +4180,7 @@ mod tests {
             filter: Filter::default(),
             view: View::Due,
             due_window: DueWindow::All,
-            group_by: GroupBy::None,
+            view_groupings: std::collections::HashMap::new(),
             columns: Vec::new(),
             mode: Mode::Normal,
             input_buffer: String::new(),
@@ -4839,5 +4948,61 @@ mod tests {
 
         assert_eq!(app.task_file.tasks.len(), 1, "task_file should not change");
         assert_eq!(app.status_message, Some("Cannot reload: finish editing first".to_string()));
+    }
+
+    // -- per-view-grouping tests --
+
+    #[test]
+    fn group_by_priority_next_is_due_date() {
+        assert_eq!(GroupBy::Priority.next(), GroupBy::DueDate);
+    }
+
+    #[test]
+    fn group_by_due_date_next_is_none() {
+        assert_eq!(GroupBy::DueDate.next(), GroupBy::None);
+    }
+
+    #[test]
+    fn g_key_saves_per_view_grouping() {
+        use chrono::Utc;
+        let task = crate::task::Task {
+            id: 1,
+            title: "t".to_string(),
+            status: crate::task::Status::Open,
+            priority: crate::task::Priority::Medium,
+            tags: vec![],
+            created: Utc::now(),
+            updated: None,
+            description: None,
+            due_date: None,
+            project: None,
+            recurrence: None,
+            note: None,
+            agent: Some("a".to_string()),
+        };
+        let mut app = make_app_with_tasks(vec![task]);
+        // Due view starts with None
+        assert_eq!(app.active_group_by(), GroupBy::None);
+        // Press G — should advance to Project
+        let _ = handle_normal(&mut app, KeyCode::Char('G'));
+        assert_eq!(app.active_group_by(), GroupBy::Project);
+        // Switch to NoDueDate view — should still be None there
+        app.view = View::NoDueDate;
+        assert_eq!(app.active_group_by(), GroupBy::None);
+        // Switch back — Due view still has Project
+        app.view = View::Due;
+        assert_eq!(app.active_group_by(), GroupBy::Project);
+    }
+
+    #[test]
+    fn due_date_grouping_key_extraction() {
+        use chrono::NaiveDate;
+        let due = NaiveDate::from_ymd_opt(2026, 4, 10).unwrap();
+        // Task with due date produces date string key
+        let key: Option<String> = Some(due).map(|d| d.format("%Y-%m-%d").to_string());
+        assert_eq!(key, Some("2026-04-10".to_string()));
+        // Task with no due date produces None key
+        let no_key: Option<String> = None::<NaiveDate>.map(|d| d.format("%Y-%m-%d").to_string());
+        assert_eq!(no_key, None);
     }
 }

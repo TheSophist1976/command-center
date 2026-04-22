@@ -412,3 +412,57 @@ fn test_config_set_overwrites() {
     assert!(stdout(&out).contains("/second"));
     assert!(!stdout(&out).contains("/first"));
 }
+
+#[test]
+fn test_agent_instructions_edit_creates_file() {
+    let dir = temp_dir();
+    let config_file = dir.path().join("config.md");
+    let tasks_file = dir.path().join("tasks.md");
+
+    let out = run_with_config(dir.path(), &config_file, &[
+        "--file", tasks_file.to_str().unwrap(),
+        "agent", "instructions", "mybot", "edit",
+        "--title", "MyBot Instructions",
+        "--body", "Focus on correctness."
+    ]);
+    assert!(out.status.success(), "edit failed: {}", stderr(&out));
+
+    let note_path = dir.path().join("Notes").join("Instructions").join("mybot.md");
+    assert!(note_path.exists(), "instruction file was not created");
+    let content = std::fs::read_to_string(&note_path).unwrap();
+    assert!(content.contains("Focus on correctness."));
+}
+
+#[test]
+fn test_agent_instructions_show_after_edit() {
+    let dir = temp_dir();
+    let config_file = dir.path().join("config.md");
+    let tasks_file = dir.path().join("tasks.md");
+
+    run_with_config(dir.path(), &config_file, &[
+        "--file", tasks_file.to_str().unwrap(),
+        "agent", "instructions", "mybot", "edit",
+        "--body", "Do the thing."
+    ]);
+
+    let out = run_with_config(dir.path(), &config_file, &[
+        "--file", tasks_file.to_str().unwrap(),
+        "agent", "instructions", "mybot", "show"
+    ]);
+    assert!(out.status.success(), "show failed: {}", stderr(&out));
+    assert!(stdout(&out).contains("Do the thing."));
+}
+
+#[test]
+fn test_agent_instructions_show_no_file() {
+    let dir = temp_dir();
+    let config_file = dir.path().join("config.md");
+    let tasks_file = dir.path().join("tasks.md");
+
+    let out = run_with_config(dir.path(), &config_file, &[
+        "--file", tasks_file.to_str().unwrap(),
+        "agent", "instructions", "nobody", "show"
+    ]);
+    assert!(out.status.success());
+    assert!(stdout(&out).contains("No instructions found"));
+}

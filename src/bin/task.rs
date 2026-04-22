@@ -2,7 +2,7 @@ use std::process;
 
 use clap::Parser;
 
-use task::cli::{AuthCommand, Cli, Command, ConfigCommand, NoteCommand};
+use task::cli::{AgentCommand, AgentInstructionsCommand, AuthCommand, Cli, Command, ConfigCommand, NoteCommand};
 
 fn main() {
     let cli = Cli::parse();
@@ -174,6 +174,64 @@ fn run(cli: Cli) -> Result<(), (i32, String)> {
                             Ok(())
                         }
                         None => Err((1, format!("task {} not found", task_id))),
+                    }
+                }
+            }
+        }
+
+        Some(Command::Agent { subcommand }) => {
+            let task_dir = path.parent().unwrap_or(std::path::Path::new(".")).to_path_buf();
+            let instructions_dir = task_dir.join("Notes").join("Instructions");
+
+            match subcommand {
+                AgentCommand::Instructions { name, action } => {
+                    // Resolve slug: check config key first, then fall back to slugified name
+                    let slug = task::config::read_config_value(
+                        &format!("agent-{}-instructions", name)
+                    )
+                    .unwrap_or_else(|| task::note::slugify(&name));
+
+                    let note_path = instructions_dir.join(format!("{}.md", slug));
+
+                    match action {
+                        AgentInstructionsCommand::Show => {
+                            if note_path.exists() {
+                                match task::note::read_note(&note_path) {
+                                    Ok(note) => {
+                                        println!("# {}\n\n{}", note.title, note.body);
+                                        Ok(())
+                                    }
+                                    Err(e) => Err((1, e)),
+                                }
+                            } else {
+                                println!("No instructions found for agent '{}'.", name);
+                                Ok(())
+                            }
+                        }
+
+                        AgentInstructionsCommand::Edit { title, body } => {
+                            if title.is_none() && body.is_none() {
+                                return Err((1, "Provide at least --title or --body.".to_string()));
+                            }
+                            // Read existing note to preserve fields not being replaced
+                            let existing = if note_path.exists() {
+                                task::note::read_note(&note_path).ok()
+                            } else {
+                                None
+                            };
+                            let new_title = title
+                                .unwrap_or_else(|| existing.as_ref().map(|n| n.title.clone()).unwrap_or_else(|| format!("{} Instructions", name)));
+                            let new_body = body
+                                .unwrap_or_else(|| existing.as_ref().map(|n| n.body.clone()).unwrap_or_default());
+                            let note = task::note::Note {
+                                slug: slug.clone(),
+                                title: new_title,
+                                body: new_body,
+                            };
+                            task::note::write_note(&instructions_dir, &note)
+                                .map(|p| println!("{}", p.display()))
+                                .map_err(|e| (1, e))
+                        }
                     }
                 }
             }

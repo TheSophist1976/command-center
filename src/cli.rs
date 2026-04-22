@@ -33,6 +33,41 @@ pub enum Command {
         #[command(subcommand)]
         subcommand: NoteCommand,
     },
+
+    /// Manage agent profiles and instructions
+    Agent {
+        #[command(subcommand)]
+        subcommand: AgentCommand,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum AgentCommand {
+    /// Manage agent instruction notes
+    Instructions {
+        /// Agent name (must match an agent-<name> profile in config)
+        name: String,
+
+        #[command(subcommand)]
+        action: AgentInstructionsCommand,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum AgentInstructionsCommand {
+    /// Show the agent's instruction note
+    Show,
+
+    /// Create or update the agent's instruction note
+    Edit {
+        /// New title for the instruction note
+        #[arg(long)]
+        title: Option<String>,
+
+        /// New body (replaces entire body)
+        #[arg(long)]
+        body: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
