@@ -126,10 +126,13 @@ Optional description paragraph(s) here.
 | `recur` | no | see below | `recur:weekly` |
 | `note` | no | note slug | `note:my-note` |
 | `agent` | no | profile name or `human` | `agent:command-center` |
+| `effort` | no | `high`, `medium`, or `low` | `effort:medium` |
 | `created` | yes | ISO 8601 | `created:2026-01-15T10:00:00+00:00` |
 | `updated` | no | ISO 8601 | `updated:2026-01-20T12:00:00+00:00` |
 
 **Priority values:** `critical`, `high`, `medium`, `low`
+
+**Effort values:** `high` (dedicated time + full concentration), `medium` (dedicated time, low energy), `low` (quick, can multitask)
 
 **Recurrence values:**
 

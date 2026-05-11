@@ -197,6 +197,7 @@ pub fn map_task(t: &TodoistTask, project_map: &HashMap<String, String>) -> Task 
         recurrence: None,
         note: None,
         agent: None,
+        effort: None,
     }
 }
 

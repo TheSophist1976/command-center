@@ -287,6 +287,7 @@ mod tests {
             recurrence: None,
             note: None,
             agent: None,
+            effort: None,
         });
         tf.next_id = 2;
         save(&path, &tf).unwrap();
@@ -321,6 +322,7 @@ mod tests {
             recurrence: None,
             note: None,
             agent: None,
+            effort: None,
         });
         save(&path, &tf).unwrap();
 

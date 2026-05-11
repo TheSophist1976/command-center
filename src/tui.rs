@@ -42,7 +42,7 @@ use crate::claude_session::{
 };
 use crate::config;
 use crate::storage;
-use crate::task::{Priority, Status, Task, TaskFile};
+use crate::task::{Effort, Priority, Status, Task, TaskFile};
 // -- Types --
 
 
@@ -66,6 +66,7 @@ enum Mode {
     ConfirmingNoteExit,
     NotePicker,
     EditingAgent,
+    EditingEffort,
     SessionDirectoryPicker,
     Sessions,
     SessionReply,
@@ -126,6 +127,7 @@ impl DueWindow {
 enum GroupBy {
     None,
     Agent,
+    Effort,
     Project,
     Priority,
     DueDate,
@@ -137,7 +139,8 @@ impl GroupBy {
             GroupBy::None => GroupBy::Project,
             GroupBy::Project => GroupBy::Agent,
             GroupBy::Agent => GroupBy::Priority,
-            GroupBy::Priority => GroupBy::DueDate,
+            GroupBy::Priority => GroupBy::Effort,
+            GroupBy::Effort => GroupBy::DueDate,
             GroupBy::DueDate => GroupBy::None,
         }
     }
@@ -148,6 +151,7 @@ impl GroupBy {
             GroupBy::Agent => "agent",
             GroupBy::Project => "project",
             GroupBy::Priority => "priority",
+            GroupBy::Effort => "effort",
             GroupBy::DueDate => "due-date",
         }
     }
@@ -157,6 +161,7 @@ impl GroupBy {
             "agent" => GroupBy::Agent,
             "project" => GroupBy::Project,
             "priority" => GroupBy::Priority,
+            "effort" => GroupBy::Effort,
             "due-date" => GroupBy::DueDate,
             _ => GroupBy::None,
         }
@@ -1002,6 +1007,7 @@ struct App {
     note_picker_task_idx: Option<usize>,
     agent_picker_items: Vec<String>,
     agent_picker_selected: usize,
+    effort_picker_selected: usize,
     // Claude sessions
     claude_sessions: Vec<ClaudeSession>,
     next_session_id: usize,
@@ -1072,6 +1078,7 @@ impl App {
             note_picker_task_idx: None,
             agent_picker_items: Vec::new(),
             agent_picker_selected: 0,
+            effort_picker_selected: 0,
             claude_sessions: Vec::new(),
             next_session_id: 0,
             session_selected: 0,
@@ -1162,7 +1169,16 @@ impl App {
                 (None, None) => std::cmp::Ordering::Equal,
             };
             // Priority descending (Critical first — Critical < High < Medium < Low by Ord)
-            date_cmp.then(ta.priority.cmp(&tb.priority))
+            let effort_ord = |e: &Option<Effort>| match e {
+                Some(Effort::High) => 0u8,
+                Some(Effort::Medium) => 1,
+                Some(Effort::Low) => 2,
+                None => 3,
+            };
+            // Effort: High first, None last
+            date_cmp
+                .then(ta.priority.cmp(&tb.priority))
+                .then(effort_ord(&ta.effort).cmp(&effort_ord(&tb.effort)))
         });
         indices
     }
@@ -1186,6 +1202,13 @@ impl App {
                 GroupBy::Agent => tasks[idx].agent.clone(),
                 GroupBy::Project => tasks[idx].project.clone(),
                 GroupBy::Priority => Some(format!("{}", tasks[idx].priority)),
+                GroupBy::Effort => tasks[idx].effort.as_ref().map(|e| {
+                    match e {
+                        Effort::High => "High".to_string(),
+                        Effort::Medium => "Medium".to_string(),
+                        Effort::Low => "Low".to_string(),
+                    }
+                }),
                 GroupBy::DueDate => tasks[idx].due_date.map(|d| format_due_group_label(d)),
                 GroupBy::None => unreachable!(),
             };
@@ -1403,6 +1426,7 @@ fn toggle_task_status(app: &mut App, task_idx: usize) -> Result<(), String> {
                 recurrence: Some(recur),
                 note: task.note.clone(),
                 agent: task.agent.clone(),
+                effort: task.effort,
             };
             app.task_file.tasks.push(new_task);
             app.status_message = Some(format!("Next occurrence: task {}, due {}", new_id, next_due));
@@ -1491,6 +1515,10 @@ fn handle_key(_terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut 
         }
         Mode::EditingAgent => {
             handle_agent_picker(app, key)?;
+            Ok(false)
+        }
+        Mode::EditingEffort => {
+            handle_effort_picker(app, key)?;
             Ok(false)
         }
         Mode::SessionDirectoryPicker => {
@@ -1749,6 +1777,12 @@ fn handle_normal(app: &mut App, key: KeyCode) -> Result<bool, String> {
                 app.agent_picker_items = items;
                 app.agent_picker_selected = 0;
                 app.mode = Mode::EditingAgent;
+            }
+        }
+        KeyCode::Char('E') => {
+            if filtered.get(app.selected).is_some() {
+                app.effort_picker_selected = 0;
+                app.mode = Mode::EditingEffort;
             }
         }
         KeyCode::Char('g') => {
@@ -2046,6 +2080,45 @@ fn handle_agent_picker(app: &mut App, key: KeyCode) -> Result<(), String> {
     Ok(())
 }
 
+// Effort picker options (indices 0-3)
+const EFFORT_OPTIONS: [&str; 4] = ["High", "Medium", "Low", "(clear)"];
+
+fn handle_effort_picker(app: &mut App, key: KeyCode) -> Result<(), String> {
+    match key {
+        KeyCode::Char('j') | KeyCode::Down => {
+            if app.effort_picker_selected + 1 < EFFORT_OPTIONS.len() {
+                app.effort_picker_selected += 1;
+            }
+        }
+        KeyCode::Char('k') | KeyCode::Up => {
+            if app.effort_picker_selected > 0 {
+                app.effort_picker_selected -= 1;
+            }
+        }
+        KeyCode::Enter => {
+            let filtered = app.visual_task_order();
+            if let Some(&task_idx) = filtered.get(app.selected) {
+                let task = &mut app.task_file.tasks[task_idx];
+                match EFFORT_OPTIONS[app.effort_picker_selected] {
+                    "(clear)" => task.effort = None,
+                    "High" => task.effort = Some(Effort::High),
+                    "Medium" => task.effort = Some(Effort::Medium),
+                    "Low" => task.effort = Some(Effort::Low),
+                    _ => {}
+                }
+                task.updated = Some(chrono::Utc::now());
+                app.save()?;
+            }
+            app.mode = Mode::Normal;
+        }
+        KeyCode::Esc => {
+            app.mode = Mode::Normal;
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
 enum InputAction {
     Add,
     Filter,
@@ -2108,6 +2181,7 @@ fn handle_input(app: &mut App, key: KeyCode, action: InputAction) -> Result<(), 
                                 recurrence: None,
                                 note: None,
                                 agent: None,
+                                effort: None,
                             });
                             app.save()?;
                             app.clamp_selection();
@@ -2558,6 +2632,21 @@ fn draw(frame: &mut Frame, app: &mut App) {
         draw_footer(frame, app, chunks[2]);
         return;
     }
+    if app.mode == Mode::EditingEffort {
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(1),
+                Constraint::Min(0),
+                Constraint::Length(1),
+            ])
+            .split(frame.area());
+        draw_header(frame, app, chunks[0]);
+        draw_table(frame, app, chunks[1]);
+        draw_effort_picker(frame, app, chunks[1]);
+        draw_footer(frame, app, chunks[2]);
+        return;
+    }
     if app.mode == Mode::NotePicker {
         let chunks = Layout::default()
             .direction(Direction::Vertical)
@@ -2734,6 +2823,7 @@ fn build_task_cells(
     show_due: bool,
     show_project: bool,
     show_agent: bool,
+    show_effort: bool,
     show_recur: bool,
     show_note: bool,
 ) -> Vec<Cell<'static>> {
@@ -2807,6 +2897,15 @@ fn build_task_cells(
         if show_agent {
             cells.push(Cell::from(task.agent.clone().unwrap_or_default()));
         }
+        if show_effort {
+            let (effort_label, effort_style) = match &task.effort {
+                Some(Effort::High) => ("H", Style::default().fg(theme::PRIORITY_HIGH)),
+                Some(Effort::Medium) => ("M", Style::default().fg(theme::PRIORITY_MEDIUM)),
+                Some(Effort::Low) => ("L", Style::default().fg(theme::PRIORITY_LOW)),
+                None => ("", Style::default()),
+            };
+            cells.push(Cell::from(effort_label).style(effort_style));
+        }
         if show_recur {
             cells.push(Cell::from(if task.recurrence.is_some() { "↻" } else { "" }));
             cells.push(Cell::from(
@@ -2845,6 +2944,7 @@ fn draw_table(frame: &mut Frame, app: &mut App, area: Rect) {
     let show_due = !using_config_columns && filtered.iter().any(|&i| app.task_file.tasks[i].due_date.is_some());
     let show_project = !using_config_columns && filtered.iter().any(|&i| app.task_file.tasks[i].project.is_some());
     let show_agent = !using_config_columns && filtered.iter().any(|&i| app.task_file.tasks[i].agent.is_some());
+    let show_effort = !using_config_columns && filtered.iter().any(|&i| app.task_file.tasks[i].effort.is_some());
     let show_recur = !using_config_columns && filtered.iter().any(|&i| app.task_file.tasks[i].recurrence.is_some());
     let show_note = !using_config_columns && filtered.iter().any(|&i| app.task_file.tasks[i].note.is_some());
 
@@ -2873,6 +2973,7 @@ fn draw_table(frame: &mut Frame, app: &mut App, area: Rect) {
         if show_due { hdr.push("Due"); }
         if show_project { hdr.push("Project"); }
         if show_agent { hdr.push("Agent"); }
+        if show_effort { hdr.push("Eff"); }
         if show_recur { hdr.push("↻"); hdr.push("Pattern"); }
         if show_note { hdr.push("Note"); }
         hdr.push("Tags");
@@ -2906,6 +3007,13 @@ fn draw_table(frame: &mut Frame, app: &mut App, area: Rect) {
                 GroupBy::Agent => task.agent.clone(),
                 GroupBy::Project => task.project.clone(),
                 GroupBy::Priority => Some(format!("{}", task.priority)),
+                GroupBy::Effort => task.effort.as_ref().map(|e| {
+                    match e {
+                        Effort::High => "High".to_string(),
+                        Effort::Medium => "Medium".to_string(),
+                        Effort::Low => "Low".to_string(),
+                    }
+                }),
                 GroupBy::DueDate => task.due_date.map(|d| format_due_group_label(d)),
                 GroupBy::None => unreachable!(),
             };
@@ -2940,6 +3048,7 @@ fn draw_table(frame: &mut Frame, app: &mut App, area: Rect) {
             GroupBy::Agent => "Agent",
             GroupBy::Project => "Project",
             GroupBy::Priority => "Priority",
+            GroupBy::Effort => "Effort",
             GroupBy::DueDate => "Due Date",
             GroupBy::None => unreachable!(),
         };
@@ -2987,7 +3096,7 @@ fn draw_table(frame: &mut Frame, app: &mut App, area: Rect) {
                         && task.due_date.map_or(false, |d| d < today);
                     let cells = build_task_cells(
                         task, today, &columns_ref,
-                        show_desc, show_due, show_project, show_agent, show_recur, show_note,
+                        show_desc, show_due, show_project, show_agent, show_effort, show_recur, show_note,
                     );
                     let row = Row::new(cells);
                     let row = if task.status == Status::Done {
@@ -3021,7 +3130,7 @@ fn draw_table(frame: &mut Frame, app: &mut App, area: Rect) {
                     && task.due_date.map_or(false, |d| d < today);
                 let cells = build_task_cells(
                     task, today, &columns_ref,
-                    show_desc, show_due, show_project, show_agent, show_recur, show_note,
+                    show_desc, show_due, show_project, show_agent, show_effort, show_recur, show_note,
                 );
                 let row = Row::new(cells);
                 if task.status == Status::Done {
@@ -3068,6 +3177,7 @@ fn draw_table(frame: &mut Frame, app: &mut App, area: Rect) {
         if show_due { w.push(Constraint::Length(12)); }
         if show_project { w.push(Constraint::Length(15)); }
         if show_agent { w.push(Constraint::Length(15)); }
+        if show_effort { w.push(Constraint::Length(4)); }
         if show_recur { w.push(Constraint::Length(3)); w.push(Constraint::Min(8)); }
         if show_note { w.push(Constraint::Length(15)); }
         w.push(Constraint::Length(20));
@@ -3138,18 +3248,24 @@ fn draw_detail_panel(frame: &mut Frame, app: &App, area: Rect) {
             };
             let note_str = task.note.as_deref().unwrap_or("(none)");
             let agent_str = task.agent.as_deref().unwrap_or("(none)");
+            let effort_str = match &task.effort {
+                Some(Effort::High) => "High",
+                Some(Effort::Medium) => "Medium",
+                Some(Effort::Low) => "Low",
+                None => "—",
+            };
             let created = task.created.format("%Y-%m-%d %H:%M").to_string();
             let updated = task.updated
                 .map(|u| u.format("%Y-%m-%d %H:%M").to_string())
                 .unwrap_or_else(|| "(never)".to_string());
 
             format!(
-                "ID: {}  |  Status: {}  |  Priority: {}  |  Due: {}  |  Project: {}\n\
+                "ID: {}  |  Status: {}  |  Priority: {}  |  Effort: {}  |  Due: {}  |  Project: {}\n\
                  Title: {}\n\
                  Description: {}\n\
                  Tags: {}  |  Recurrence: {}  |  Note: {}  |  Agent: {}\n\
                  Created: {}  |  Updated: {}",
-                task.id, task.status, task.priority, due, project,
+                task.id, task.status, task.priority, effort_str, due, project,
                 task.title,
                 desc,
                 tags, recurrence_str, note_str, agent_str,
@@ -3350,6 +3466,34 @@ fn draw_agent_picker(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(ratatui::widgets::Clear, picker_area);
     let list = ratatui::widgets::List::new(items)
         .block(Block::default().borders(Borders::ALL).title(title));
+    frame.render_widget(list, picker_area);
+}
+
+fn draw_effort_picker(frame: &mut Frame, app: &App, area: Rect) {
+    let items: Vec<ratatui::widgets::ListItem> = EFFORT_OPTIONS
+        .iter()
+        .enumerate()
+        .map(|(i, name)| {
+            let style = if i == app.effort_picker_selected {
+                ratatui::style::Style::default()
+                    .bg(theme::HIGHLIGHT_BG)
+                    .fg(ratatui::style::Color::White)
+            } else {
+                ratatui::style::Style::default()
+            };
+            ratatui::widgets::ListItem::new(*name).style(style)
+        })
+        .collect();
+
+    let width = 20u16.min(area.width.saturating_sub(4));
+    let height = (EFFORT_OPTIONS.len() as u16 + 2).min(area.height.saturating_sub(2));
+    let x = area.x + area.width.saturating_sub(width) / 2;
+    let y = area.y + area.height.saturating_sub(height) / 2;
+    let picker_area = Rect { x, y, width, height };
+
+    frame.render_widget(ratatui::widgets::Clear, picker_area);
+    let list = ratatui::widgets::List::new(items)
+        .block(Block::default().borders(Borders::ALL).title(" Set Effort "));
     frame.render_widget(list, picker_area);
 }
 
@@ -3718,11 +3862,11 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
             } else if app.view == View::Notes {
                 " a:new  Enter:edit  d:delete  v:view  C:sessions  q:quit".to_string()
             } else if app.show_detail_panel {
-                " j/k:nav  Enter:edit  Space:toggle  a:add  d:due  f:filter  p:priority  e:title  t:tags  r:desc  R:recur  A:agent  n:note  g:go-note  v:view  Tab:close  q:quit".to_string()
+                " j/k:nav  Enter:edit  Space:toggle  a:add  d:due  f:filter  p:priority  e:title  t:tags  r:desc  R:recur  A:agent  E:effort  n:note  g:go-note  v:view  Tab:close  q:quit".to_string()
             } else if app.view == View::Due {
                 " j/k:nav  Enter:toggle  a:add  d:due  T/N/W/M/Q/Y:due-quick  X:clr-due  f:filter  v:view  [/]:window  G:group  q:quit".to_string()
             } else {
-                " j/k:nav  Enter:toggle  a:add  d:due  T/N/W/M/Q/Y:due-quick  X:clr-due  f:filter  p:priority  e:title  t:tags  r:desc  R:recur  A:agent  n:note  g:go-note  v:view  G:group  C:sessions  D:set-dir  Tab:details  ^r:reload  q:quit".to_string()
+                " j/k:nav  Enter:toggle  a:add  d:due  T/N/W/M/Q/Y:due-quick  X:clr-due  f:filter  p:priority  e:title  t:tags  r:desc  R:recur  A:agent  E:effort  n:note  g:go-note  v:view  G:group  C:sessions  D:set-dir  Tab:details  ^r:reload  q:quit".to_string()
             }
         }
         Mode::Adding => {
@@ -3787,6 +3931,9 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
         Mode::EditingAgent => {
             " j/k:nav  Enter:select  Esc:cancel ".to_string()
         }
+        Mode::EditingEffort => {
+            " j/k:nav  Enter:select  Esc:cancel ".to_string()
+        }
         Mode::SessionDirectoryPicker => {
             " j/k:nav  Enter:select  Esc:cancel ".to_string()
         }
@@ -3832,6 +3979,7 @@ mod tests {
             recurrence: None,
             note: None,
             agent: None,
+            effort: None,
         }
     }
 
@@ -4118,6 +4266,7 @@ mod tests {
             note_picker_task_idx: None,
             agent_picker_items: Vec::new(),
             agent_picker_selected: 0,
+            effort_picker_selected: 0,
             claude_sessions: Vec::new(),
             next_session_id: 0,
             session_selected: 0,
@@ -4198,6 +4347,7 @@ mod tests {
             note_picker_task_idx: None,
             agent_picker_items: Vec::new(),
             agent_picker_selected: 0,
+            effort_picker_selected: 0,
             claude_sessions: Vec::new(),
             next_session_id: 0,
             session_selected: 0,
@@ -4846,6 +4996,7 @@ mod tests {
             recurrence: None,
             note: None,
             agent: Some("test".to_string()),
+            effort: None,
         };
         make_app_with_tmpfile(vec![task])
     }
@@ -4953,8 +5104,13 @@ mod tests {
     // -- per-view-grouping tests --
 
     #[test]
-    fn group_by_priority_next_is_due_date() {
-        assert_eq!(GroupBy::Priority.next(), GroupBy::DueDate);
+    fn group_by_priority_next_is_effort() {
+        assert_eq!(GroupBy::Priority.next(), GroupBy::Effort);
+    }
+
+    #[test]
+    fn group_by_effort_next_is_due_date() {
+        assert_eq!(GroupBy::Effort.next(), GroupBy::DueDate);
     }
 
     #[test]
@@ -4979,6 +5135,7 @@ mod tests {
             recurrence: None,
             note: None,
             agent: Some("a".to_string()),
+            effort: None,
         };
         let mut app = make_app_with_tasks(vec![task]);
         // Due view starts with None

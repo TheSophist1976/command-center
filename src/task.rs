@@ -1,6 +1,36 @@
 use chrono::{DateTime, Datelike, Local, NaiveDate, Utc, Weekday};
 use serde::{Serialize, Serializer};
 
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Effort {
+    High,
+    Medium,
+    Low,
+}
+
+impl std::fmt::Display for Effort {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Effort::High => write!(f, "high"),
+            Effort::Medium => write!(f, "medium"),
+            Effort::Low => write!(f, "low"),
+        }
+    }
+}
+
+impl std::str::FromStr for Effort {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "high" => Ok(Effort::High),
+            "medium" | "med" => Ok(Effort::Medium),
+            "low" => Ok(Effort::Low),
+            _ => Err(format!("Invalid effort: '{}'. Valid values: high, medium, low", s)),
+        }
+    }
+}
+
 // -- Recurrence --
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -274,6 +304,8 @@ pub struct Task {
     pub note: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub agent: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub effort: Option<Effort>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -418,6 +450,7 @@ mod tests {
             recurrence: None,
             note: None,
             agent: None,
+            effort: None,
         }
     }
 

@@ -1,7 +1,7 @@
 use chrono::{Datelike, DateTime, Duration, NaiveDate, Utc, Weekday};
 use std::str::FromStr;
 
-use crate::task::{Priority, Recurrence, Status, Task, TaskFile};
+use crate::task::{Effort, Priority, Recurrence, Status, Task, TaskFile};
 
 #[derive(Debug)]
 pub struct ParseError {
@@ -93,6 +93,7 @@ pub fn parse(content: &str, strict: bool) -> Result<TaskFile, Vec<ParseError>> {
                         recurrence: metadata.recurrence,
                         note: metadata.note,
                         agent: metadata.agent,
+                        effort: metadata.effort,
                     });
                 } else if strict {
                     errors.push(ParseError {
@@ -168,6 +169,7 @@ struct Metadata {
     recurrence: Option<Recurrence>,
     note: Option<String>,
     agent: Option<String>,
+    effort: Option<Effort>,
 }
 
 fn parse_metadata_comment(line: &str) -> Option<Metadata> {
@@ -184,6 +186,7 @@ fn parse_metadata_comment(line: &str) -> Option<Metadata> {
     let mut recurrence: Option<Recurrence> = None;
     let mut note: Option<String> = None;
     let mut agent: Option<String> = None;
+    let mut effort: Option<Effort> = None;
 
     for pair in inner.split_whitespace() {
         if let Some((key, rest)) = pair.split_once(':') {
@@ -217,6 +220,9 @@ fn parse_metadata_comment(line: &str) -> Option<Metadata> {
                         agent = Some(rest.to_string());
                     }
                 }
+                "effort" => {
+                    effort = Effort::from_str(rest).ok();
+                }
                 _ => {}
             }
         }
@@ -233,6 +239,7 @@ fn parse_metadata_comment(line: &str) -> Option<Metadata> {
         recurrence,
         note,
         agent,
+        effort,
     })
 }
 
@@ -275,6 +282,9 @@ pub fn serialize(task_file: &TaskFile) -> String {
         }
         if let Some(ref agent) = task.agent {
             meta_parts.push(format!("agent:{}", agent));
+        }
+        if let Some(ref effort) = task.effort {
+            meta_parts.push(format!("effort:{}", effort));
         }
         meta_parts.push(format!("created:{}", task.created.to_rfc3339()));
         if let Some(updated) = task.updated {
@@ -587,6 +597,7 @@ Some description here.
             recurrence: None,
             note: None,
             agent: None,
+            effort: None,
         });
         let out = serialize(&tf);
         assert!(out.contains("## [ ] Open task"));
@@ -611,6 +622,7 @@ Some description here.
             recurrence: None,
             note: None,
             agent: None,
+            effort: None,
         });
         let out = serialize(&tf);
         assert!(out.contains("## [x] Done task"));
@@ -635,6 +647,7 @@ Some description here.
             recurrence: None,
             note: None,
             agent: None,
+            effort: None,
         });
         let out = serialize(&tf);
         assert!(out.contains("tags:alpha,beta"));
@@ -664,6 +677,7 @@ Some description here.
             recurrence: None,
             note: None,
             agent: None,
+            effort: None,
         });
         let out = serialize(&tf);
         assert!(out.contains("project:Work%3AProject"));
@@ -688,6 +702,7 @@ Some description here.
             recurrence: None,
             note: None,
             agent: None,
+            effort: None,
         });
         let serialized = serialize(&tf);
         let parsed = parse(&serialized, false).unwrap();
@@ -936,6 +951,7 @@ Some description here.
             recurrence: None,
             note: Some("my-note".to_string()),
             agent: None,
+            effort: None,
         });
         let serialized = serialize(&tf);
         assert!(serialized.contains("note:my-note"));
@@ -983,6 +999,7 @@ Some description here.
             recurrence: None,
             note: None,
             agent: Some("command-center".to_string()),
+            effort: None,
         });
         let serialized = serialize(&tf);
         assert!(serialized.contains("agent:command-center"));
@@ -1009,6 +1026,7 @@ Some description here.
             recurrence: None,
             note: None,
             agent: None,
+            effort: None,
         });
         let serialized = serialize(&tf);
         assert!(!serialized.contains("agent:"));
@@ -1065,5 +1083,94 @@ Some description here.
     #[test]
     fn test_parse_due_empty_returns_none() {
         assert!(parse_due_date_input("", tue()).is_none());
+    }
+
+    // -- Effort field tests --
+
+    #[test]
+    fn test_parse_effort_high() {
+        let content = "<!-- format:2 -->\n<!-- next-id:2 -->\n\n## [ ] Task\n<!-- id:1 priority:medium created:2025-01-15T10:00:00+00:00 effort:high -->\n";
+        let tf = parse(content, false).unwrap();
+        assert_eq!(tf.tasks[0].effort, Some(crate::task::Effort::High));
+    }
+
+    #[test]
+    fn test_parse_effort_medium() {
+        let content = "<!-- format:2 -->\n<!-- next-id:2 -->\n\n## [ ] Task\n<!-- id:1 priority:medium created:2025-01-15T10:00:00+00:00 effort:medium -->\n";
+        let tf = parse(content, false).unwrap();
+        assert_eq!(tf.tasks[0].effort, Some(crate::task::Effort::Medium));
+    }
+
+    #[test]
+    fn test_parse_effort_low() {
+        let content = "<!-- format:2 -->\n<!-- next-id:2 -->\n\n## [ ] Task\n<!-- id:1 priority:medium created:2025-01-15T10:00:00+00:00 effort:low -->\n";
+        let tf = parse(content, false).unwrap();
+        assert_eq!(tf.tasks[0].effort, Some(crate::task::Effort::Low));
+    }
+
+    #[test]
+    fn test_parse_effort_missing_is_none() {
+        let content = "<!-- format:2 -->\n<!-- next-id:2 -->\n\n## [ ] Task\n<!-- id:1 priority:medium created:2025-01-15T10:00:00+00:00 -->\n";
+        let tf = parse(content, false).unwrap();
+        assert!(tf.tasks[0].effort.is_none());
+    }
+
+    #[test]
+    fn test_parse_effort_unknown_is_none() {
+        let content = "<!-- format:2 -->\n<!-- next-id:2 -->\n\n## [ ] Task\n<!-- id:1 priority:medium created:2025-01-15T10:00:00+00:00 effort:extreme -->\n";
+        let tf = parse(content, false).unwrap();
+        assert!(tf.tasks[0].effort.is_none());
+    }
+
+    #[test]
+    fn test_effort_round_trip() {
+        use chrono::{TimeZone, Utc};
+        use crate::task::{Effort, Priority, Status, Task};
+        let mut tf = TaskFile::new();
+        tf.tasks.push(Task {
+            id: 1,
+            title: "Effort task".to_string(),
+            status: Status::Open,
+            priority: Priority::Medium,
+            tags: Vec::new(),
+            created: Utc.with_ymd_and_hms(2025, 1, 1, 0, 0, 0).unwrap(),
+            updated: None,
+            description: None,
+            due_date: None,
+            project: None,
+            recurrence: None,
+            note: None,
+            agent: None,
+            effort: Some(Effort::Medium),
+        });
+        let serialized = serialize(&tf);
+        assert!(serialized.contains("effort:medium"));
+        let parsed = parse(&serialized, false).unwrap();
+        assert_eq!(parsed.tasks[0].effort, Some(Effort::Medium));
+    }
+
+    #[test]
+    fn test_effort_none_not_serialized() {
+        use chrono::{TimeZone, Utc};
+        use crate::task::{Priority, Status, Task};
+        let mut tf = TaskFile::new();
+        tf.tasks.push(Task {
+            id: 1,
+            title: "No effort".to_string(),
+            status: Status::Open,
+            priority: Priority::Medium,
+            tags: Vec::new(),
+            created: Utc.with_ymd_and_hms(2025, 1, 1, 0, 0, 0).unwrap(),
+            updated: None,
+            description: None,
+            due_date: None,
+            project: None,
+            recurrence: None,
+            note: None,
+            agent: None,
+            effort: None,
+        });
+        let serialized = serialize(&tf);
+        assert!(!serialized.contains("effort:"));
     }
 }
