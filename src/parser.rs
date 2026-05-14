@@ -123,8 +123,8 @@ pub fn parse(content: &str, strict: bool) -> Result<TaskFile, Vec<ParseError>> {
         }
     }
 
-    // If no next-id header was found, derive from max task id
-    if task_file.next_id == 1 && !task_file.tasks.is_empty() {
+    // Always ensure next_id > max existing task id to prevent races with external writers
+    if !task_file.tasks.is_empty() {
         let max_id = task_file.tasks.iter().map(|t| t.id).max().unwrap_or(0);
         if max_id >= task_file.next_id {
             task_file.next_id = max_id + 1;
