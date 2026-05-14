@@ -2,7 +2,7 @@ use std::process;
 
 use clap::Parser;
 
-use task::cli::{AgentCommand, AgentInstructionsCommand, AuthCommand, Cli, Command, ConfigCommand, NoteCommand};
+use task::cli::{AgentCommand, AgentInstructionsCommand, AgentMemoryCommand, AuthCommand, Cli, Command, ConfigCommand, NoteCommand};
 
 fn main() {
     let cli = Cli::parse();
@@ -101,7 +101,9 @@ fn run(cli: Cli) -> Result<(), (i32, String)> {
                         let mut task_file = task::storage::load(&path, false).map_err(|e| (1, e))?;
                         match task_file.find_task_mut(id) {
                             Some(t) => {
-                                t.note = Some(slug.clone());
+                                if !t.notes.contains(&slug) {
+                                    t.notes.push(slug.clone());
+                                }
                                 task::storage::save(&path, &task_file).map_err(|e| (1, e))?;
                             }
                             None => {
@@ -154,9 +156,13 @@ fn run(cli: Cli) -> Result<(), (i32, String)> {
                     let mut task_file = task::storage::load(&path, false).map_err(|e| (1, e))?;
                     match task_file.find_task_mut(task_id) {
                         Some(t) => {
-                            t.note = Some(slug.clone());
-                            task::storage::save(&path, &task_file).map_err(|e| (1, e))?;
-                            println!("Linked note '{}' to task {}", slug, task_id);
+                            if !t.notes.contains(&slug) {
+                                t.notes.push(slug.clone());
+                                task::storage::save(&path, &task_file).map_err(|e| (1, e))?;
+                                println!("Linked note '{}' to task {}", slug, task_id);
+                            } else {
+                                println!("Note '{}' already linked to task {}", slug, task_id);
+                            }
                             Ok(())
                         }
                         None => Err((1, format!("task {} not found", task_id))),
@@ -167,9 +173,15 @@ fn run(cli: Cli) -> Result<(), (i32, String)> {
                     let mut task_file = task::storage::load(&path, false).map_err(|e| (1, e))?;
                     match task_file.find_task_mut(task_id) {
                         Some(t) => {
-                            t.note = None;
-                            task::storage::save(&path, &task_file).map_err(|e| (1, e))?;
-                            println!("Unlinked note from task {}", task_id);
+                            if t.notes.is_empty() {
+                                println!("Task {} has no linked notes", task_id);
+                            } else if t.notes.len() == 1 {
+                                let removed = t.notes.remove(0);
+                                task::storage::save(&path, &task_file).map_err(|e| (1, e))?;
+                                println!("Unlinked note '{}' from task {}", removed, task_id);
+                            } else {
+                                println!("Task {} has {} notes. Use `task note link` to manage.", task_id, t.notes.len());
+                            }
                             Ok(())
                         }
                         None => Err((1, format!("task {} not found", task_id))),
@@ -180,7 +192,6 @@ fn run(cli: Cli) -> Result<(), (i32, String)> {
 
         Some(Command::Agent { subcommand }) => {
             let task_dir = path.parent().unwrap_or(std::path::Path::new(".")).to_path_buf();
-            let instructions_dir = task_dir.join("Notes").join("Instructions");
 
             match subcommand {
                 AgentCommand::Instructions { name, action } => {
@@ -189,21 +200,26 @@ fn run(cli: Cli) -> Result<(), (i32, String)> {
                     )
                     .unwrap_or_else(|| task::note::slugify(&name));
 
-                    let note_path = instructions_dir.join(format!("{}.md", slug));
+                    let agents_dir = task_dir.join("Notes").join("Agents").join(&slug);
+                    let note_path = agents_dir.join("instructions.md");
+                    let legacy_path = task_dir.join("Notes").join("Instructions").join(format!("{}.md", slug));
 
                     match action {
                         AgentInstructionsCommand::Show => {
-                            if note_path.exists() {
-                                match task::note::read_note(&note_path) {
-                                    Ok(note) => {
-                                        println!("# {}\n\n{}", note.title, note.body);
-                                        Ok(())
-                                    }
-                                    Err(e) => Err((1, e)),
-                                }
+                            let read_path = if note_path.exists() {
+                                &note_path
+                            } else if legacy_path.exists() {
+                                &legacy_path
                             } else {
                                 println!("No instructions found for agent '{}'.", name);
-                                Ok(())
+                                return Ok(());
+                            };
+                            match task::note::read_note(read_path) {
+                                Ok(note) => {
+                                    println!("# {}\n\n{}", note.title, note.body);
+                                    Ok(())
+                                }
+                                Err(e) => Err((1, e)),
                             }
                         }
 
@@ -211,8 +227,9 @@ fn run(cli: Cli) -> Result<(), (i32, String)> {
                             if title.is_none() && body.is_none() {
                                 return Err((1, "Provide at least --title or --body.".to_string()));
                             }
-                            let existing = if note_path.exists() {
-                                task::note::read_note(&note_path).ok()
+                            let read_path = if note_path.exists() { &note_path } else if legacy_path.exists() { &legacy_path } else { &note_path };
+                            let existing = if read_path.exists() {
+                                task::note::read_note(read_path).ok()
                             } else {
                                 None
                             };
@@ -221,11 +238,57 @@ fn run(cli: Cli) -> Result<(), (i32, String)> {
                             let new_body = body
                                 .unwrap_or_else(|| existing.as_ref().map(|n| n.body.clone()).unwrap_or_default());
                             let note = task::note::Note {
-                                slug: slug.clone(),
+                                slug: "instructions".to_string(),
                                 title: new_title,
                                 body: new_body,
                             };
-                            task::note::write_note(&instructions_dir, &note)
+                            task::note::write_note(&agents_dir, &note)
+                                .map(|p| println!("{}", p.display()))
+                                .map_err(|e| (1, e))
+                        }
+                    }
+                }
+
+                AgentCommand::Memory { name, action } => {
+                    let slug = task::note::slugify(&name);
+                    let agents_dir = task_dir.join("Notes").join("Agents").join(&slug);
+                    let memory_path = agents_dir.join("memory.md");
+
+                    match action {
+                        AgentMemoryCommand::Show => {
+                            if memory_path.exists() {
+                                match task::note::read_note(&memory_path) {
+                                    Ok(note) => {
+                                        println!("# {}\n\n{}", note.title, note.body);
+                                        Ok(())
+                                    }
+                                    Err(e) => Err((1, e)),
+                                }
+                            } else {
+                                println!("No memory found for agent '{}'.", name);
+                                Ok(())
+                            }
+                        }
+
+                        AgentMemoryCommand::Edit { title, body } => {
+                            if title.is_none() && body.is_none() {
+                                return Err((1, "Provide at least --title or --body.".to_string()));
+                            }
+                            let existing = if memory_path.exists() {
+                                task::note::read_note(&memory_path).ok()
+                            } else {
+                                None
+                            };
+                            let new_title = title
+                                .unwrap_or_else(|| existing.as_ref().map(|n| n.title.clone()).unwrap_or_else(|| format!("{} Memory", name)));
+                            let new_body = body
+                                .unwrap_or_else(|| existing.as_ref().map(|n| n.body.clone()).unwrap_or_default());
+                            let note = task::note::Note {
+                                slug: "memory".to_string(),
+                                title: new_title,
+                                body: new_body,
+                            };
+                            task::note::write_note(&agents_dir, &note)
                                 .map(|p| println!("{}", p.display()))
                                 .map_err(|e| (1, e))
                         }

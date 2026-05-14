@@ -36,6 +36,7 @@ STATUS_CONFIG=""
 STATUS_TODOIST=""
 STATUS_SKILL=""
 STATUS_AGENTS=""
+STATUS_EDITOR=""
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
@@ -314,9 +315,77 @@ else
 fi
 
 # =========================================================
-# 9. Cowork skill
+# 9. Note editor setup
 # =========================================================
-header "9. Installing Cowork skill"
+header "9. Note editor setup"
+
+info "Notes are now opened in external editors (no built-in editor)."
+echo ""
+
+# Check $EDITOR
+if [[ -n "${EDITOR:-}" ]]; then
+    success "\$EDITOR is set: $EDITOR"
+    STATUS_EDITOR="\$EDITOR=$EDITOR"
+else
+    warn "\$EDITOR is not set — notes cannot be opened for editing without configuration."
+    info "Options:"
+    echo "  1. Set \$EDITOR in your shell profile (recommended):"
+    echo "       export EDITOR=vim   # or nano, code, etc."
+    echo "  2. Configure Obsidian vault below"
+fi
+
+# Check glow
+if command -v glow &>/dev/null; then
+    success "glow found: $(glow --version 2>/dev/null | head -1)"
+    info "To enable: task config set note-viewer glow"
+else
+    info "glow not found (optional — enables read-only markdown preview)"
+    if ask_yn "Install glow via Homebrew?"; then
+        if command -v brew &>/dev/null; then
+            brew install glow
+            success "glow installed"
+            info "To enable: task config set note-viewer glow"
+        else
+            warn "Homebrew not found. Install glow from: https://github.com/charmbracelet/glow"
+        fi
+    fi
+fi
+
+# Obsidian vault config
+echo ""
+current_vault="$(grep '^obsidian-vault:' "$CONFIG_FILE" 2>/dev/null | sed 's/^obsidian-vault:[[:space:]]*//' || true)"
+if [[ -n "$current_vault" ]]; then
+    success "Obsidian vault: $current_vault"
+    STATUS_EDITOR="${STATUS_EDITOR:+$STATUS_EDITOR, }obsidian=$current_vault"
+else
+    if ask_yn "Configure Obsidian vault for note opening?"; then
+        printf "${BLUE}▸${NC} Enter your Obsidian vault name (e.g. MyVault): "
+        read -r vault_name < /dev/tty
+        if [[ -n "$vault_name" ]]; then
+            echo "obsidian-vault: $vault_name" >> "$CONFIG_FILE"
+            success "Set obsidian-vault: $vault_name"
+
+            printf "${BLUE}▸${NC} Enter relative path to notes in vault (e.g. Tasks/Notes) or leave blank: "
+            read -r notes_dir < /dev/tty
+            if [[ -n "$notes_dir" ]]; then
+                echo "obsidian-notes-dir: $notes_dir" >> "$CONFIG_FILE"
+                success "Set obsidian-notes-dir: $notes_dir"
+            fi
+            STATUS_EDITOR="${STATUS_EDITOR:+$STATUS_EDITOR, }obsidian=$vault_name"
+        else
+            warn "Skipped Obsidian config"
+        fi
+    else
+        info "Skipped Obsidian config"
+    fi
+fi
+
+[[ -z "$STATUS_EDITOR" ]] && STATUS_EDITOR="no editor configured (set \$EDITOR or obsidian-vault)"
+
+# =========================================================
+# 10. Cowork skill
+# =========================================================
+header "10. Installing Cowork skill"
 
 SKILL_SRC="$SCRIPT_DIR/skills/task-manager"
 SKILL_DEST="$HOME/.claude/skills/task-manager"
@@ -332,7 +401,7 @@ else
 fi
 
 # =========================================================
-# 10. Summary
+# 11. Summary
 # =========================================================
 header "Setup Complete"
 echo ""
@@ -341,6 +410,7 @@ printf "  %-16s %s\n" "Binaries:" "$STATUS_BINARY"
 printf "  %-16s %s\n" "PATH:" "$STATUS_PATH"
 printf "  %-16s %s\n" "Config:" "$STATUS_CONFIG"
 printf "  %-16s %s\n" "Todoist:" "$STATUS_TODOIST"
+printf "  %-16s %s\n" "Note Editor:" "$STATUS_EDITOR"
 printf "  %-16s %s\n" "AI Instruct:" "$STATUS_AGENTS"
 printf "  %-16s %s\n" "Skill:" "$STATUS_SKILL"
 echo ""

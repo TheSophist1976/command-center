@@ -34,7 +34,7 @@ Each agent may have a set of operating instructions written by the human. **Read
 
 Instructions are stored as a markdown note at:
 ```
-<task-dir>/Notes/Instructions/<your-agent-name>.md
+<task-dir>/Notes/Agents/<your-agent-name>/instructions.md
 ```
 
 Where `<task-dir>` is the directory containing `tasks.md` (resolved via `default-dir` in config or the file's parent directory).
@@ -55,6 +55,41 @@ If no instructions file exists, the command prints "No instructions found." and 
 ```bash
 task agent instructions <name> edit --title "My Agent Instructions" --body "Focus on..."
 ```
+
+---
+
+## Reading and Updating Memory
+
+Each agent has a persistent memory file that accumulates learned patterns and preferences across sessions. **Read your memory at the start of every session after reading your instructions.**
+
+Memory is stored at:
+```
+<task-dir>/Notes/Agents/<your-agent-name>/memory.md
+```
+
+**To read your memory:**
+```bash
+task agent memory <your-agent-name> show
+```
+
+If no memory file exists, the command prints "No memory found." and you should proceed without it — an empty memory is not an error.
+
+**When to update memory** (after completing tasks):
+- A preference or pattern has been observed at least twice
+- A standing fact is established (recurring contact, project preference, known constraint)
+- A past mistake is being corrected
+
+**What NOT to store in memory:**
+- One-off task details (those belong in the task note)
+- Information specific to a single task that won't recur
+- Anything likely to change within the current sprint
+
+**To update your memory:**
+```bash
+task agent memory <name> edit --body "<updated content>"
+```
+
+**Suggested memory sections:** `## Preferences`, `## Patterns`, `## Standing Context`
 
 ---
 
@@ -124,13 +159,15 @@ Optional description paragraph(s) here.
 | `due` | no | `YYYY-MM-DD` | `due:2026-03-15` |
 | `project` | no | URL-encoded string | `project:Work` |
 | `recur` | no | see below | `recur:weekly` |
-| `note` | no | note slug | `note:my-note` |
+| `notes` | no | comma-separated slugs | `notes:research,how-to-deploy` |
 | `agent` | no | profile name or `human` | `agent:command-center` |
 | `effort` | no | `high`, `medium`, or `low` | `effort:medium` |
 | `created` | yes | ISO 8601 | `created:2026-01-15T10:00:00+00:00` |
 | `updated` | no | ISO 8601 | `updated:2026-01-20T12:00:00+00:00` |
 
 **Priority values:** `critical`, `high`, `medium`, `low`
+
+**Notes field:** Multiple note slugs, comma-separated. Legacy `note:` key (single slug) is also accepted and treated as a one-element list. Slugs whose name contains `instructions`, `how-to`, or `steps` are treated as instruction notes by agents — read these first before working the task.
 
 **Effort values:** `high` (dedicated time + full concentration), `medium` (dedicated time, low energy), `low` (quick, can multitask)
 

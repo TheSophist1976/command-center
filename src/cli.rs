@@ -51,6 +51,32 @@ pub enum AgentCommand {
         #[command(subcommand)]
         action: AgentInstructionsCommand,
     },
+
+    /// Manage agent memory notes
+    Memory {
+        /// Agent name (must match an agent-<name> profile in config)
+        name: String,
+
+        #[command(subcommand)]
+        action: AgentMemoryCommand,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum AgentMemoryCommand {
+    /// Show the agent's memory note
+    Show,
+
+    /// Create or update the agent's memory note
+    Edit {
+        /// New title for the memory note
+        #[arg(long)]
+        title: Option<String>,
+
+        /// New body (replaces entire body)
+        #[arg(long)]
+        body: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]

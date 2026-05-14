@@ -285,7 +285,7 @@ mod tests {
             due_date: None,
             project: None,
             recurrence: None,
-            note: None,
+            notes: vec![],
             agent: None,
             effort: None,
         });
@@ -320,7 +320,7 @@ mod tests {
             due_date: None,
             project: None,
             recurrence: None,
-            note: None,
+            notes: vec![],
             agent: None,
             effort: None,
         });

@@ -62,8 +62,7 @@ enum Mode {
     EditingRecurrence,
     EditingDetailPanel,
     ConfirmingDetailSave,
-    EditingNote,
-    ConfirmingNoteExit,
+
     NotePicker,
     EditingAgent,
     EditingEffort,
@@ -469,158 +468,6 @@ impl Filter {
     }
 }
 
-struct NoteEditor {
-    slug: String,
-    title: String,
-    lines: Vec<String>,
-    cursor_row: usize,
-    cursor_col: usize,
-    viewport_offset: usize,
-    dirty: bool,
-}
-
-impl NoteEditor {
-    fn new(slug: &str, title: &str, body: &str) -> Self {
-        let lines: Vec<String> = if body.is_empty() {
-            vec![String::new()]
-        } else {
-            body.lines().map(|l| l.to_string()).collect()
-        };
-        Self {
-            slug: slug.to_string(),
-            title: title.to_string(),
-            lines,
-            cursor_row: 0,
-            cursor_col: 0,
-            viewport_offset: 0,
-            dirty: false,
-        }
-    }
-
-    fn insert_char(&mut self, c: char) {
-        let line = &mut self.lines[self.cursor_row];
-        let byte_idx = char_to_byte_index(line, self.cursor_col);
-        line.insert(byte_idx, c);
-        self.cursor_col += 1;
-        self.dirty = true;
-    }
-
-    fn insert_newline(&mut self) {
-        let line = &self.lines[self.cursor_row];
-        let byte_idx = char_to_byte_index(line, self.cursor_col);
-        let rest = line[byte_idx..].to_string();
-        self.lines[self.cursor_row] = line[..byte_idx].to_string();
-        self.cursor_row += 1;
-        self.lines.insert(self.cursor_row, rest);
-        self.cursor_col = 0;
-        self.dirty = true;
-    }
-
-    fn backspace(&mut self) {
-        if self.cursor_col > 0 {
-            let line = &mut self.lines[self.cursor_row];
-            let byte_idx = char_to_byte_index(line, self.cursor_col - 1);
-            let end_idx = char_to_byte_index(line, self.cursor_col);
-            line.replace_range(byte_idx..end_idx, "");
-            self.cursor_col -= 1;
-            self.dirty = true;
-        } else if self.cursor_row > 0 {
-            let current_line = self.lines.remove(self.cursor_row);
-            self.cursor_row -= 1;
-            self.cursor_col = self.lines[self.cursor_row].chars().count();
-            self.lines[self.cursor_row].push_str(&current_line);
-            self.dirty = true;
-        }
-    }
-
-    fn move_up(&mut self) {
-        if self.cursor_row > 0 {
-            self.cursor_row -= 1;
-            self.clamp_col();
-        }
-    }
-
-    fn move_down(&mut self) {
-        if self.cursor_row < self.lines.len() - 1 {
-            self.cursor_row += 1;
-            self.clamp_col();
-        }
-    }
-
-    fn move_left(&mut self) {
-        if self.cursor_col > 0 {
-            self.cursor_col -= 1;
-        }
-    }
-
-    fn move_right(&mut self) {
-        let line_len = self.lines[self.cursor_row].chars().count();
-        if self.cursor_col < line_len {
-            self.cursor_col += 1;
-        }
-    }
-
-    fn move_to_line_start(&mut self) {
-        self.cursor_col = 0;
-    }
-
-    fn move_to_line_end(&mut self) {
-        self.cursor_col = self.lines[self.cursor_row].chars().count();
-    }
-
-    fn clamp_col(&mut self) {
-        let line_len = self.lines[self.cursor_row].chars().count();
-        if self.cursor_col > line_len {
-            self.cursor_col = line_len;
-        }
-    }
-
-    fn ensure_cursor_visible(&mut self, visible_height: usize, text_width: usize) {
-        if visible_height == 0 {
-            return;
-        }
-        // Scroll up: cursor moved above the viewport
-        if self.cursor_row < self.viewport_offset {
-            self.viewport_offset = self.cursor_row;
-            return;
-        }
-        // Scroll down: advance viewport_offset one logical line at a time until
-        // the cursor's visual row fits within visible_height.
-        let cols_per_row = text_width.max(1);
-        let visual_rows_for = |line: &str| -> usize {
-            let n = line.chars().count();
-            if n == 0 { 1 } else { (n + cols_per_row - 1) / cols_per_row }
-        };
-        loop {
-            // Count display rows from viewport_offset up to (not including) cursor_row
-            let mut display_row: usize = 0;
-            for row in self.viewport_offset..self.cursor_row.min(self.lines.len()) {
-                display_row += visual_rows_for(&self.lines[row]);
-            }
-            // Add the visual row within the cursor's logical line
-            display_row += self.cursor_col / cols_per_row;
-            if display_row < visible_height {
-                break;
-            }
-            if self.viewport_offset < self.cursor_row {
-                self.viewport_offset += 1;
-            } else {
-                break;
-            }
-        }
-    }
-
-    fn body_text(&self) -> String {
-        self.lines.join("\n")
-    }
-}
-
-fn char_to_byte_index(s: &str, char_idx: usize) -> usize {
-    s.char_indices()
-        .nth(char_idx)
-        .map(|(i, _)| i)
-        .unwrap_or(s.len())
-}
 
 // -- Markdown styling for note editor --
 
@@ -1001,7 +848,6 @@ struct App {
     pending_navigation: Option<NavDirection>,
     notes_list: Vec<crate::note::Note>,
     notes_selected: usize,
-    note_editor: Option<NoteEditor>,
     note_picker_items: Vec<String>,
     note_picker_selected: usize,
     note_picker_task_idx: Option<usize>,
@@ -1072,7 +918,6 @@ impl App {
             pending_navigation: None,
             notes_list: Vec::new(),
             notes_selected: 0,
-            note_editor: None,
             note_picker_items: Vec::new(),
             note_picker_selected: 0,
             note_picker_task_idx: None,
@@ -1424,7 +1269,7 @@ fn toggle_task_status(app: &mut App, task_idx: usize) -> Result<(), String> {
                 due_date: Some(next_due),
                 project: task.project.clone(),
                 recurrence: Some(recur),
-                note: task.note.clone(),
+                notes: task.notes.clone(),
                 agent: task.agent.clone(),
                 effort: task.effort,
             };
@@ -1438,10 +1283,6 @@ fn toggle_task_status(app: &mut App, task_idx: usize) -> Result<(), String> {
 
 fn handle_key(_terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App, key: KeyCode, modifiers: event::KeyModifiers) -> Result<bool, String> {
     // Handle Ctrl+S in note editor
-    if app.mode == Mode::EditingNote && modifiers.contains(event::KeyModifiers::CONTROL) && key == KeyCode::Char('s') {
-        save_current_note(app)?;
-        return Ok(false);
-    }
     // Handle Ctrl+R: reload tasks from disk
     if modifiers.contains(event::KeyModifiers::CONTROL) && key == KeyCode::Char('r') {
         if app.mode != Mode::Normal {
@@ -1499,14 +1340,6 @@ fn handle_key(_terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut 
         }
         Mode::ConfirmingDetailSave => {
             handle_detail_confirm(app, key)?;
-            Ok(false)
-        }
-        Mode::EditingNote => {
-            handle_note_editor(app, key)?;
-            Ok(false)
-        }
-        Mode::ConfirmingNoteExit => {
-            handle_note_exit_confirm(app, key)?;
             Ok(false)
         }
         Mode::NotePicker => {
@@ -1757,9 +1590,17 @@ fn handle_normal(app: &mut App, key: KeyCode) -> Result<bool, String> {
         KeyCode::Char('n') => {
             if let Some(&task_idx) = filtered.get(app.selected) {
                 app.refresh_notes();
-                let mut items = vec!["(none)".to_string(), "(new note)".to_string()];
+                let task = &app.task_file.tasks[task_idx];
+                let mut items = vec!["(new note)".to_string()];
+                // Add remove entries for currently attached notes
+                for slug in &task.notes {
+                    items.push(format!("remove: {}", slug));
+                }
+                // Add all available notes for linking
                 for note in &app.notes_list {
-                    items.push(note.slug.clone());
+                    if !task.notes.contains(&note.slug) {
+                        items.push(note.slug.clone());
+                    }
                 }
                 app.note_picker_items = items;
                 app.note_picker_selected = 0;
@@ -1788,19 +1629,20 @@ fn handle_normal(app: &mut App, key: KeyCode) -> Result<bool, String> {
         KeyCode::Char('g') => {
             if let Some(&task_idx) = filtered.get(app.selected) {
                 let task = &app.task_file.tasks[task_idx];
-                if let Some(ref slug) = task.note {
-                    let note_path = app.notes_dir().join(format!("{}.md", slug));
-                    match crate::note::read_note(&note_path) {
-                        Ok(note) => {
-                            app.note_editor = Some(NoteEditor::new(&note.slug, &note.title, &note.body));
-                            app.mode = Mode::EditingNote;
-                        }
-                        Err(_) => {
-                            app.status_message = Some(format!("Note file not found: {}.md", slug));
-                        }
-                    }
+                if task.notes.is_empty() {
+                    app.status_message = Some("No notes linked to this task".to_string());
                 } else {
-                    app.status_message = Some("No note linked to this task".to_string());
+                    // Open first note; use 'n' key to navigate to specific notes
+                    let slug = task.notes[0].clone();
+                    let note_path = app.notes_dir().join(format!("{}.md", slug));
+                    if task.notes.len() > 1 {
+                        app.status_message = Some(format!("Opening '{}' ({} notes — use n to manage)", slug, task.notes.len()));
+                    }
+                    if let Err(e) = open_note_external(&note_path, &slug) {
+                        app.status_message = Some(e);
+                    } else {
+                        app.refresh_notes();
+                    }
                 }
             }
         }
@@ -1833,17 +1675,23 @@ fn handle_normal_notes(app: &mut App, key: KeyCode) -> Result<bool, String> {
             app.mode = Mode::Adding;
             app.input_buffer.clear();
         }
+        KeyCode::Char('V') => {
+            if let Some(note) = app.notes_list.get(app.notes_selected) {
+                let note_path = app.notes_dir().join(format!("{}.md", note.slug));
+                if let Err(e) = view_note_glow(&note_path, &note.slug) {
+                    app.status_message = Some(e);
+                } else {
+                    app.refresh_notes();
+                }
+            }
+        }
         KeyCode::Enter => {
             if let Some(note) = app.notes_list.get(app.notes_selected) {
                 let note_path = app.notes_dir().join(format!("{}.md", note.slug));
-                match crate::note::read_note(&note_path) {
-                    Ok(n) => {
-                        app.note_editor = Some(NoteEditor::new(&n.slug, &n.title, &n.body));
-                        app.mode = Mode::EditingNote;
-                    }
-                    Err(e) => {
-                        app.status_message = Some(format!("Error: {}", e));
-                    }
+                if let Err(e) = open_note_external(&note_path, &note.slug) {
+                    app.status_message = Some(e);
+                } else {
+                    app.refresh_notes();
                 }
             }
         }
@@ -1879,115 +1727,11 @@ fn handle_normal_notes(app: &mut App, key: KeyCode) -> Result<bool, String> {
             app.table_state.select(Some(0));
             app.clamp_selection();
         }
-        KeyCode::Char('V') => {
-            let prev = app.view.prev();
-            if prev == View::Notes {
-                app.refresh_notes();
-                app.notes_selected = 0;
-            }
-            app.view = prev;
-            app.selected = 0;
-            app.table_state.select(Some(0));
-            app.clamp_selection();
-        }
         _ => {}
     }
     Ok(false)
 }
 
-fn handle_note_editor(app: &mut App, key: KeyCode) -> Result<(), String> {
-    let editor = match app.note_editor.as_mut() {
-        Some(e) => e,
-        None => {
-            app.mode = Mode::Normal;
-            return Ok(());
-        }
-    };
-
-    match key {
-        KeyCode::Char(c) => {
-            editor.insert_char(c);
-        }
-        KeyCode::Enter => {
-            editor.insert_newline();
-        }
-        KeyCode::Backspace => {
-            editor.backspace();
-        }
-        KeyCode::Up => {
-            editor.move_up();
-        }
-        KeyCode::Down => {
-            editor.move_down();
-        }
-        KeyCode::Left => {
-            editor.move_left();
-        }
-        KeyCode::Right => {
-            editor.move_right();
-        }
-        KeyCode::Home => {
-            editor.move_to_line_start();
-        }
-        KeyCode::End => {
-            editor.move_to_line_end();
-        }
-        KeyCode::Esc => {
-            if editor.dirty {
-                app.mode = Mode::ConfirmingNoteExit;
-            } else {
-                app.note_editor = None;
-                if app.view == View::Notes {
-                    app.refresh_notes();
-                }
-                app.mode = Mode::Normal;
-            }
-        }
-        _ => {}
-    }
-    Ok(())
-}
-
-fn save_current_note(app: &mut App) -> Result<(), String> {
-    if let Some(ref editor) = app.note_editor {
-        let note = crate::note::Note {
-            slug: editor.slug.clone(),
-            title: editor.title.clone(),
-            body: editor.body_text(),
-        };
-        crate::note::write_note(&app.notes_dir(), &note)?;
-        if let Some(ref mut e) = app.note_editor {
-            e.dirty = false;
-        }
-        app.status_message = Some("Note saved".to_string());
-    }
-    Ok(())
-}
-
-fn handle_note_exit_confirm(app: &mut App, key: KeyCode) -> Result<(), String> {
-    match key {
-        KeyCode::Char('s') => {
-            save_current_note(app)?;
-            app.note_editor = None;
-            if app.view == View::Notes {
-                app.refresh_notes();
-            }
-            app.mode = Mode::Normal;
-        }
-        KeyCode::Char('d') => {
-            app.note_editor = None;
-            if app.view == View::Notes {
-                app.refresh_notes();
-            }
-            app.mode = Mode::Normal;
-        }
-        KeyCode::Char('c') | KeyCode::Esc => {
-            app.mode = Mode::EditingNote;
-        }
-        _ => {}
-    }
-    Ok(())
-}
 
 fn handle_note_picker(app: &mut App, key: KeyCode) -> Result<(), String> {
     match key {
@@ -2009,32 +1753,33 @@ fn handle_note_picker(app: &mut App, key: KeyCode) -> Result<(), String> {
                     return Ok(());
                 }
             };
-            match app.note_picker_selected {
-                0 => {
-                    // "(none)" - clear link
-                    app.task_file.tasks[task_idx].note = None;
-                    app.task_file.tasks[task_idx].updated = Some(Utc::now());
+            let selected_item = app.note_picker_items.get(app.note_picker_selected).cloned().unwrap_or_default();
+            if selected_item == "(new note)" {
+                // Create and link new note
+                app.mode = Mode::Adding;
+                app.input_buffer.clear();
+                // note_picker_task_idx stays set so Adding mode knows to create+link
+            } else if let Some(slug) = selected_item.strip_prefix("remove: ") {
+                // Remove this slug from task's notes
+                let slug = slug.to_string();
+                app.task_file.tasks[task_idx].notes.retain(|s| s != &slug);
+                app.task_file.tasks[task_idx].updated = Some(Utc::now());
+                app.save()?;
+                app.status_message = Some(format!("Removed note: {}", slug));
+                app.mode = Mode::Normal;
+                app.note_picker_task_idx = None;
+            } else if !selected_item.is_empty() {
+                // Append existing note to task's notes list
+                let task = &mut app.task_file.tasks[task_idx];
+                if !task.notes.contains(&selected_item) {
+                    task.notes.push(selected_item.clone());
+                    task.updated = Some(Utc::now());
                     app.save()?;
-                    app.status_message = Some("Note link cleared".to_string());
-                    app.mode = Mode::Normal;
+                    app.status_message = Some(format!("Linked note: {}", selected_item));
                 }
-                1 => {
-                    // "(new note)" - create and link
-                    app.mode = Mode::Adding;
-                    app.input_buffer.clear();
-                    // note_picker_task_idx stays set so Adding mode knows to create+link
-                }
-                n => {
-                    // Link existing note
-                    let slug = app.note_picker_items[n].clone();
-                    app.task_file.tasks[task_idx].note = Some(slug.clone());
-                    app.task_file.tasks[task_idx].updated = Some(Utc::now());
-                    app.save()?;
-                    app.status_message = Some(format!("Linked note: {}", slug));
-                    app.mode = Mode::Normal;
-                }
+                app.mode = Mode::Normal;
+                app.note_picker_task_idx = None;
             }
-            app.note_picker_task_idx = None;
         }
         KeyCode::Esc => {
             app.note_picker_task_idx = None;
@@ -2153,16 +1898,20 @@ fn handle_input(app: &mut App, key: KeyCode, action: InputAction) -> Result<(), 
                                 title: title.clone(),
                                 body: String::new(),
                             };
-                            crate::note::write_note(&app.notes_dir(), &note)?;
-                            // If creating from note picker, link to task
+                            let new_note_path = crate::note::write_note(&app.notes_dir(), &note)?;
+                            // If creating from note picker, append to task's notes
                             if let Some(task_idx) = app.note_picker_task_idx.take() {
-                                app.task_file.tasks[task_idx].note = Some(slug.clone());
-                                app.task_file.tasks[task_idx].updated = Some(Utc::now());
+                                let task = &mut app.task_file.tasks[task_idx];
+                                if !task.notes.contains(&slug) {
+                                    task.notes.push(slug.clone());
+                                }
+                                task.updated = Some(Utc::now());
                                 app.save()?;
                             }
-                            // Open editor for the new note
-                            app.note_editor = Some(NoteEditor::new(&slug, &title, ""));
-                            app.mode = Mode::EditingNote;
+                            // Open in external editor
+                            if let Err(e) = open_note_external(&new_note_path, &slug) {
+                                app.status_message = Some(e);
+                            }
                             app.refresh_notes();
                         } else {
                             let id = app.task_file.next_id;
@@ -2179,7 +1928,7 @@ fn handle_input(app: &mut App, key: KeyCode, action: InputAction) -> Result<(), 
                                 due_date: None,
                                 project: None,
                                 recurrence: None,
-                                note: None,
+                                notes: vec![],
                                 agent: None,
                                 effort: None,
                             });
@@ -2367,10 +2116,11 @@ fn handle_confirm(app: &mut App, key: KeyCode) -> Result<(), String> {
             let slug = app.input_buffer.clone();
             if !slug.is_empty() {
                 crate::note::delete_note(&app.notes_dir(), &slug)?;
-                // Clear any task links to this note
+                // Remove this note from all task notes lists
                 for task in &mut app.task_file.tasks {
-                    if task.note.as_deref() == Some(&slug) {
-                        task.note = None;
+                    let before = task.notes.len();
+                    task.notes.retain(|s| s != &slug);
+                    if task.notes.len() != before {
                         task.updated = Some(Utc::now());
                     }
                 }
@@ -2599,24 +2349,92 @@ fn handle_detail_confirm(app: &mut App, key: KeyCode) -> Result<(), String> {
 }
 
 
+// -- External note open helpers --
+
+fn build_obsidian_uri(slug: &str) -> Option<String> {
+    let vault = crate::config::read_config_value("obsidian-vault")?;
+    let notes_dir = crate::config::read_config_value("obsidian-notes-dir");
+    let file = match notes_dir {
+        Some(ref dir) => format!("{}/{}", dir, slug),
+        None => slug.to_string(),
+    };
+    Some(format!("obsidian://open?vault={}&file={}", vault, file))
+}
+
+/// Open a note for editing. Priority: Obsidian (if configured) > $EDITOR.
+/// For Obsidian: spawns `open` asynchronously without suspending the TUI.
+/// For $EDITOR: suspends TUI raw mode, waits for editor to exit, resumes.
+fn open_note_external(note_path: &std::path::Path, slug: &str) -> Result<(), String> {
+    // 1. Obsidian
+    if let Some(uri) = build_obsidian_uri(slug) {
+        std::process::Command::new("open")
+            .arg(&uri)
+            .spawn()
+            .map_err(|e| format!("Failed to open Obsidian: {}", e))?;
+        return Ok(());
+    }
+    // 2. $EDITOR
+    let editor = std::env::var("EDITOR").or_else(|_| std::env::var("VISUAL")).ok();
+    match editor {
+        Some(ed) => {
+            // Suspend TUI
+            crossterm::terminal::disable_raw_mode()
+                .map_err(|e| format!("Failed to disable raw mode: {}", e))?;
+            crossterm::execute!(
+                std::io::stdout(),
+                crossterm::terminal::LeaveAlternateScreen
+            ).map_err(|e| format!("Failed to leave alternate screen: {}", e))?;
+
+            let _status = std::process::Command::new(&ed)
+                .arg(note_path)
+                .status()
+                .map_err(|e| format!("Failed to launch editor '{}': {}", ed, e))?;
+
+            // Resume TUI
+            crossterm::execute!(
+                std::io::stdout(),
+                crossterm::terminal::EnterAlternateScreen
+            ).map_err(|e| format!("Failed to enter alternate screen: {}", e))?;
+            crossterm::terminal::enable_raw_mode()
+                .map_err(|e| format!("Failed to enable raw mode: {}", e))?;
+            Ok(())
+        }
+        None => Err("No editor configured. Set $EDITOR or add obsidian-vault to config.".to_string()),
+    }
+}
+
+/// View a note read-only with glow. Falls through to `open_note_external` if glow not configured.
+fn view_note_glow(note_path: &std::path::Path, slug: &str) -> Result<(), String> {
+    let viewer = crate::config::read_config_value("note-viewer");
+    match viewer.as_deref() {
+        Some("glow") => {
+            crossterm::terminal::disable_raw_mode()
+                .map_err(|e| format!("Failed to disable raw mode: {}", e))?;
+            crossterm::execute!(
+                std::io::stdout(),
+                crossterm::terminal::LeaveAlternateScreen
+            ).map_err(|e| format!("Failed to leave alternate screen: {}", e))?;
+
+            let _status = std::process::Command::new("glow")
+                .arg(note_path)
+                .status()
+                .map_err(|e| format!("Failed to launch glow: {}", e))?;
+
+            crossterm::execute!(
+                std::io::stdout(),
+                crossterm::terminal::EnterAlternateScreen
+            ).map_err(|e| format!("Failed to enter alternate screen: {}", e))?;
+            crossterm::terminal::enable_raw_mode()
+                .map_err(|e| format!("Failed to enable raw mode: {}", e))?;
+            Ok(())
+        }
+        _ => open_note_external(note_path, slug),
+    }
+}
+
 // -- Rendering --
 
 fn draw(frame: &mut Frame, app: &mut App) {
-    if app.mode == Mode::EditingNote || app.mode == Mode::ConfirmingNoteExit {
-        let chunks = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Length(1),
-                Constraint::Min(0),
-                Constraint::Length(1),
-            ])
-            .split(frame.area());
-
-        draw_header(frame, app, chunks[0]);
-        draw_note_editor(frame, app, chunks[1]);
-        draw_footer(frame, app, chunks[2]);
-        return;
-    }
     if app.mode == Mode::EditingAgent {
         let chunks = Layout::default()
             .direction(Direction::Vertical)
@@ -2868,7 +2686,14 @@ fn build_task_cells(
                         task.recurrence.as_ref().map(|r| format_recurrence_display(r)).unwrap_or_default()
                     ));
                 }
-                ColumnId::Note => cells.push(Cell::from(task.note.clone().unwrap_or_default())),
+                ColumnId::Note => {
+                    let note_str = match task.notes.len() {
+                        0 => String::new(),
+                        1 => task.notes[0].clone(),
+                        n => format!("[{}]", n),
+                    };
+                    cells.push(Cell::from(note_str));
+                }
                 ColumnId::Tags => cells.push(Cell::from(task.tags.join(", "))),
             }
         }
@@ -2913,7 +2738,14 @@ fn build_task_cells(
             ));
         }
         if show_note {
-            cells.push(Cell::from(task.note.clone().unwrap_or_default()));
+            {
+                let note_str = match task.notes.len() {
+                    0 => String::new(),
+                    1 => task.notes[0].clone(),
+                    n => format!("[{}]", n),
+                };
+                cells.push(Cell::from(note_str));
+            }
         }
         cells.push(Cell::from(tags_str));
         cells
@@ -2946,7 +2778,7 @@ fn draw_table(frame: &mut Frame, app: &mut App, area: Rect) {
     let show_agent = !using_config_columns && filtered.iter().any(|&i| app.task_file.tasks[i].agent.is_some());
     let show_effort = !using_config_columns && filtered.iter().any(|&i| app.task_file.tasks[i].effort.is_some());
     let show_recur = !using_config_columns && filtered.iter().any(|&i| app.task_file.tasks[i].recurrence.is_some());
-    let show_note = !using_config_columns && filtered.iter().any(|&i| app.task_file.tasks[i].note.is_some());
+    let show_note = !using_config_columns && filtered.iter().any(|&i| !app.task_file.tasks[i].notes.is_empty());
 
     // Build header cells
     let header_cells: Vec<&str> = if using_config_columns {
@@ -3246,7 +3078,11 @@ fn draw_detail_panel(frame: &mut Frame, app: &App, area: Rect) {
                 Some(r) => format_recurrence_display(r),
                 None => "-".to_string(),
             };
-            let note_str = task.note.as_deref().unwrap_or("(none)");
+            let note_str = if task.notes.is_empty() {
+                "(none)".to_string()
+            } else {
+                task.notes.join(", ")
+            };
             let agent_str = task.agent.as_deref().unwrap_or("(none)");
             let effort_str = match &task.effort {
                 Some(Effort::High) => "High",
@@ -3322,99 +3158,6 @@ fn draw_notes_list(frame: &mut Frame, app: &mut App, area: Rect) {
     let mut state = TableState::default();
     state.select(Some(app.notes_selected));
     frame.render_stateful_widget(table, area, &mut state);
-}
-
-fn draw_note_editor(frame: &mut Frame, app: &mut App, area: Rect) {
-    let editor = match app.note_editor.as_mut() {
-        Some(e) => e,
-        None => return,
-    };
-
-    let inner = Block::default()
-        .borders(Borders::ALL)
-        .title(format!(" {} ", editor.title));
-    let inner_area = inner.inner(area);
-    frame.render_widget(inner, area);
-
-    let visible_height = inner_area.height as usize;
-    let line_num_width = 4u16;
-    let text_width = inner_area.width.saturating_sub(line_num_width + 1);
-    let text_width_usize = text_width as usize;
-    let cols_per_row = text_width_usize.max(1);
-
-    editor.ensure_cursor_visible(visible_height, text_width_usize);
-
-    let visual_rows_for = |line: &str| -> usize {
-        let n = line.chars().count();
-        if n == 0 { 1 } else { (n + cols_per_row - 1) / cols_per_row }
-    };
-
-    // Compute code block state up to viewport_offset by scanning from line 0
-    let mut in_code_block = false;
-    for idx in 0..editor.viewport_offset.min(editor.lines.len()) {
-        let (_, new_state) = md_style::style_markdown_line(&editor.lines[idx], in_code_block);
-        in_code_block = new_state;
-    }
-
-    // Render lines with word wrap
-    let mut display_row: usize = 0;
-    let mut line_idx = editor.viewport_offset;
-    while display_row < visible_height && line_idx < editor.lines.len() {
-        let line = editor.lines[line_idx].clone();
-        let visual_rows = visual_rows_for(&line);
-
-        for vis_row in 0..visual_rows {
-            if display_row >= visible_height {
-                break;
-            }
-            let y = inner_area.y + display_row as u16;
-
-            // Line number gutter: only on the first visual row of this logical line
-            if vis_row == 0 {
-                let num_str = format!("{:>3} ", line_idx + 1);
-                let num_span = Span::styled(num_str, Style::default().fg(Color::DarkGray));
-                frame.render_widget(
-                    Paragraph::new(num_span),
-                    Rect::new(inner_area.x, y, line_num_width, 1),
-                );
-            } else {
-                frame.render_widget(
-                    Paragraph::new("    "),
-                    Rect::new(inner_area.x, y, line_num_width, 1),
-                );
-            }
-
-            // Render the chunk of this logical line for this visual row
-            let chunk_start = vis_row * cols_per_row;
-            let chunk: String = line.chars().skip(chunk_start).take(cols_per_row).collect();
-            let (spans, new_state) = md_style::style_markdown_line(&chunk, in_code_block);
-            // Only advance code-block state on the last visual row of this logical line
-            if vis_row == visual_rows - 1 {
-                in_code_block = new_state;
-            }
-            frame.render_widget(
-                Paragraph::new(Line::from(spans)),
-                Rect::new(inner_area.x + line_num_width, y, text_width, 1),
-            );
-
-            display_row += 1;
-        }
-        line_idx += 1;
-    }
-
-    // Set cursor position accounting for wrapped visual rows
-    let visual_row_within_line = editor.cursor_col / cols_per_row;
-    let visual_col_within_row = editor.cursor_col % cols_per_row;
-    let mut cursor_screen_row: usize = 0;
-    for row in editor.viewport_offset..editor.cursor_row.min(editor.lines.len()) {
-        cursor_screen_row += visual_rows_for(&editor.lines[row]);
-    }
-    cursor_screen_row += visual_row_within_line;
-    let cursor_x = inner_area.x + line_num_width + visual_col_within_row as u16;
-    let cursor_y = inner_area.y + cursor_screen_row as u16;
-    if cursor_y < inner_area.y + inner_area.height && cursor_x < inner_area.x + inner_area.width {
-        frame.set_cursor_position((cursor_x, cursor_y));
-    }
 }
 
 fn draw_note_picker(frame: &mut Frame, app: &App, area: Rect) {
@@ -3862,11 +3605,11 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
             } else if app.view == View::Notes {
                 " a:new  Enter:edit  d:delete  v:view  C:sessions  q:quit".to_string()
             } else if app.show_detail_panel {
-                " j/k:nav  Enter:edit  Space:toggle  a:add  d:due  f:filter  p:priority  e:title  t:tags  r:desc  R:recur  A:agent  E:effort  n:note  g:go-note  v:view  Tab:close  q:quit".to_string()
+                " j/k:nav  Enter:edit  Space:toggle  a:add  d:due  f:filter  p:priority  e:title  t:tags  r:desc  R:recur  A:agent  E:effort  n:note  g:edit-note  V:view-note  v:view  Tab:close  q:quit".to_string()
             } else if app.view == View::Due {
                 " j/k:nav  Enter:toggle  a:add  d:due  T/N/W/M/Q/Y:due-quick  X:clr-due  f:filter  v:view  [/]:window  G:group  q:quit".to_string()
             } else {
-                " j/k:nav  Enter:toggle  a:add  d:due  T/N/W/M/Q/Y:due-quick  X:clr-due  f:filter  p:priority  e:title  t:tags  r:desc  R:recur  A:agent  E:effort  n:note  g:go-note  v:view  G:group  C:sessions  D:set-dir  Tab:details  ^r:reload  q:quit".to_string()
+                " j/k:nav  Enter:toggle  a:add  d:due  T/N/W/M/Q/Y:due-quick  X:clr-due  f:filter  p:priority  e:title  t:tags  r:desc  R:recur  A:agent  E:effort  n:note  g:edit-note  V:view-note  v:view  G:group  C:sessions  D:set-dir  Tab:details  ^r:reload  q:quit".to_string()
             }
         }
         Mode::Adding => {
@@ -3917,12 +3660,6 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
             " j/k:field  c/h/m/l:priority  Enter/Space:status  Esc:done ".to_string()
         }
         Mode::ConfirmingDetailSave => {
-            " Unsaved changes. [s]ave  [d]iscard  [c]ancel ".to_string()
-        }
-        Mode::EditingNote => {
-            " Ctrl+S:save  Esc:exit  Arrow keys:navigate ".to_string()
-        }
-        Mode::ConfirmingNoteExit => {
             " Unsaved changes. [s]ave  [d]iscard  [c]ancel ".to_string()
         }
         Mode::NotePicker => {
@@ -3977,7 +3714,7 @@ mod tests {
             due_date: due,
             project: None,
             recurrence: None,
-            note: None,
+            notes: vec![],
             agent: None,
             effort: None,
         }
@@ -4260,7 +3997,6 @@ mod tests {
             pending_navigation: None,
             notes_list: Vec::new(),
             notes_selected: 0,
-            note_editor: None,
             note_picker_items: Vec::new(),
             note_picker_selected: 0,
             note_picker_task_idx: None,
@@ -4341,7 +4077,6 @@ mod tests {
             pending_navigation: None,
             notes_list: Vec::new(),
             notes_selected: 0,
-            note_editor: None,
             note_picker_items: Vec::new(),
             note_picker_selected: 0,
             note_picker_task_idx: None,
@@ -4777,207 +4512,7 @@ mod tests {
         assert_eq!(indices, vec![1, 2, 0]); // High, Medium, Low
     }
 
-    // -- NoteEditor tests --
-
-    #[test]
-    fn note_editor_new_empty_body() {
-        let ed = NoteEditor::new("my-note", "My Note", "");
-        assert_eq!(ed.lines, vec![""]);
-        assert_eq!(ed.cursor_row, 0);
-        assert_eq!(ed.cursor_col, 0);
-        assert!(!ed.dirty);
-    }
-
-    #[test]
-    fn note_editor_new_multiline_body() {
-        let ed = NoteEditor::new("slug", "Title", "line one\nline two\nline three");
-        assert_eq!(ed.lines.len(), 3);
-        assert_eq!(ed.lines[0], "line one");
-        assert_eq!(ed.lines[2], "line three");
-    }
-
-    #[test]
-    fn note_editor_insert_char() {
-        let mut ed = NoteEditor::new("s", "T", "hello");
-        ed.cursor_col = 5;
-        ed.insert_char('!');
-        assert_eq!(ed.lines[0], "hello!");
-        assert_eq!(ed.cursor_col, 6);
-        assert!(ed.dirty);
-    }
-
-    #[test]
-    fn note_editor_insert_char_middle() {
-        let mut ed = NoteEditor::new("s", "T", "hllo");
-        ed.cursor_col = 1;
-        ed.insert_char('e');
-        assert_eq!(ed.lines[0], "hello");
-        assert_eq!(ed.cursor_col, 2);
-    }
-
-    #[test]
-    fn note_editor_insert_newline() {
-        let mut ed = NoteEditor::new("s", "T", "hello world");
-        ed.cursor_col = 5;
-        ed.insert_newline();
-        assert_eq!(ed.lines.len(), 2);
-        assert_eq!(ed.lines[0], "hello");
-        assert_eq!(ed.lines[1], " world");
-        assert_eq!(ed.cursor_row, 1);
-        assert_eq!(ed.cursor_col, 0);
-        assert!(ed.dirty);
-    }
-
-    #[test]
-    fn note_editor_backspace_within_line() {
-        let mut ed = NoteEditor::new("s", "T", "hello");
-        ed.cursor_col = 5;
-        ed.backspace();
-        assert_eq!(ed.lines[0], "hell");
-        assert_eq!(ed.cursor_col, 4);
-        assert!(ed.dirty);
-    }
-
-    #[test]
-    fn note_editor_backspace_joins_lines() {
-        let mut ed = NoteEditor::new("s", "T", "first\nsecond");
-        ed.cursor_row = 1;
-        ed.cursor_col = 0;
-        ed.backspace();
-        assert_eq!(ed.lines.len(), 1);
-        assert_eq!(ed.lines[0], "firstsecond");
-        assert_eq!(ed.cursor_row, 0);
-        assert_eq!(ed.cursor_col, 5);
-    }
-
-    #[test]
-    fn note_editor_backspace_at_start_does_nothing() {
-        let mut ed = NoteEditor::new("s", "T", "hello");
-        ed.cursor_col = 0;
-        ed.backspace();
-        assert_eq!(ed.lines[0], "hello");
-        assert!(!ed.dirty);
-    }
-
-    #[test]
-    fn note_editor_move_up_down() {
-        let mut ed = NoteEditor::new("s", "T", "line1\nline2\nline3");
-        assert_eq!(ed.cursor_row, 0);
-        ed.move_down();
-        assert_eq!(ed.cursor_row, 1);
-        ed.move_down();
-        assert_eq!(ed.cursor_row, 2);
-        ed.move_down(); // at bottom, stays
-        assert_eq!(ed.cursor_row, 2);
-        ed.move_up();
-        assert_eq!(ed.cursor_row, 1);
-        ed.move_up();
-        assert_eq!(ed.cursor_row, 0);
-        ed.move_up(); // at top, stays
-        assert_eq!(ed.cursor_row, 0);
-    }
-
-    #[test]
-    fn note_editor_move_left_right() {
-        let mut ed = NoteEditor::new("s", "T", "abc");
-        ed.move_right();
-        assert_eq!(ed.cursor_col, 1);
-        ed.move_right();
-        ed.move_right();
-        assert_eq!(ed.cursor_col, 3);
-        ed.move_right(); // at end, stays
-        assert_eq!(ed.cursor_col, 3);
-        ed.move_left();
-        assert_eq!(ed.cursor_col, 2);
-        ed.move_left();
-        ed.move_left();
-        assert_eq!(ed.cursor_col, 0);
-        ed.move_left(); // at start, stays
-        assert_eq!(ed.cursor_col, 0);
-    }
-
-    #[test]
-    fn note_editor_clamp_col_on_move() {
-        let mut ed = NoteEditor::new("s", "T", "long line\nhi");
-        ed.cursor_col = 9; // end of "long line"
-        ed.move_down();
-        assert_eq!(ed.cursor_col, 2); // clamped to end of "hi"
-    }
-
-    #[test]
-    fn note_editor_ensure_cursor_visible() {
-        let mut ed = NoteEditor::new("s", "T", "a\nb\nc\nd\ne\nf");
-        ed.viewport_offset = 0;
-        ed.cursor_row = 5;
-        ed.ensure_cursor_visible(3, 80);
-        assert_eq!(ed.viewport_offset, 3); // scrolled so row 5 is visible in 3-line viewport
-
-        ed.cursor_row = 1;
-        ed.ensure_cursor_visible(3, 80);
-        assert_eq!(ed.viewport_offset, 1); // scrolled up
-    }
-
-    #[test]
-    fn note_editor_move_to_line_start() {
-        let mut ed = NoteEditor::new("s", "T", "hello");
-        ed.cursor_col = 3;
-        ed.move_to_line_start();
-        assert_eq!(ed.cursor_col, 0);
-        // Already at start — no-op
-        ed.move_to_line_start();
-        assert_eq!(ed.cursor_col, 0);
-    }
-
-    #[test]
-    fn note_editor_move_to_line_end() {
-        let mut ed = NoteEditor::new("s", "T", "hello");
-        ed.cursor_col = 0;
-        ed.move_to_line_end();
-        assert_eq!(ed.cursor_col, 5); // "hello".chars().count()
-        // Empty line stays at 0
-        let mut ed2 = NoteEditor::new("s", "T", "");
-        ed2.move_to_line_end();
-        assert_eq!(ed2.cursor_col, 0);
-    }
-
-    #[test]
-    fn note_editor_visual_row_counting() {
-        // A 10-char line with cols_per_row=4 produces ceil(10/4)=3 visual rows
-        let line = "0123456789"; // 10 chars
-        let cols_per_row: usize = 4;
-        let n = line.chars().count();
-        let visual_rows = if n == 0 { 1 } else { (n + cols_per_row - 1) / cols_per_row };
-        assert_eq!(visual_rows, 3);
-
-        // Empty line always produces 1 visual row
-        let empty = "";
-        let n2 = empty.chars().count();
-        let visual_rows2 = if n2 == 0 { 1 } else { (n2 + cols_per_row - 1) / cols_per_row };
-        assert_eq!(visual_rows2, 1);
-    }
-
-    #[test]
-    fn note_editor_body_text() {
-        let ed = NoteEditor::new("s", "T", "line1\nline2");
-        assert_eq!(ed.body_text(), "line1\nline2");
-    }
-
-    #[test]
-    fn char_to_byte_index_ascii() {
-        assert_eq!(char_to_byte_index("hello", 0), 0);
-        assert_eq!(char_to_byte_index("hello", 3), 3);
-        assert_eq!(char_to_byte_index("hello", 5), 5);
-    }
-
-    #[test]
-    fn char_to_byte_index_multibyte() {
-        let s = "héllo";
-        assert_eq!(char_to_byte_index(s, 0), 0);
-        assert_eq!(char_to_byte_index(s, 1), 1); // 'h' is 1 byte
-        assert_eq!(char_to_byte_index(s, 2), 3); // 'é' is 2 bytes
-    }
-
-    // -- due date editing tests --
+        // -- due date editing tests --
 
     fn make_app_with_due(due: Option<chrono::NaiveDate>) -> App {
         use crate::task::{Task, Status, Priority};
@@ -4994,7 +4529,7 @@ mod tests {
             due_date: due,
             project: None,
             recurrence: None,
-            note: None,
+            notes: vec![],
             agent: Some("test".to_string()),
             effort: None,
         };
@@ -5133,7 +4668,7 @@ mod tests {
             due_date: None,
             project: None,
             recurrence: None,
-            note: None,
+            notes: vec![],
             agent: Some("a".to_string()),
             effort: None,
         };

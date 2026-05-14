@@ -91,7 +91,7 @@ pub fn parse(content: &str, strict: bool) -> Result<TaskFile, Vec<ParseError>> {
                         due_date: metadata.due_date,
                         project: metadata.project,
                         recurrence: metadata.recurrence,
-                        note: metadata.note,
+                        notes: metadata.notes,
                         agent: metadata.agent,
                         effort: metadata.effort,
                     });
@@ -167,7 +167,7 @@ struct Metadata {
     due_date: Option<NaiveDate>,
     project: Option<String>,
     recurrence: Option<Recurrence>,
-    note: Option<String>,
+    notes: Vec<String>,
     agent: Option<String>,
     effort: Option<Effort>,
 }
@@ -184,7 +184,7 @@ fn parse_metadata_comment(line: &str) -> Option<Metadata> {
     let mut due_date: Option<NaiveDate> = None;
     let mut project: Option<String> = None;
     let mut recurrence: Option<Recurrence> = None;
-    let mut note: Option<String> = None;
+    let mut notes: Vec<String> = Vec::new();
     let mut agent: Option<String> = None;
     let mut effort: Option<Effort> = None;
 
@@ -211,9 +211,16 @@ fn parse_metadata_comment(line: &str) -> Option<Metadata> {
                     recurrence = Recurrence::from_str(rest).ok();
                 }
                 "note" => {
+                    // Legacy single-note key — treat as single-element list
                     if !rest.is_empty() {
-                        note = Some(rest.to_string());
+                        notes = vec![rest.to_string()];
                     }
+                }
+                "notes" => {
+                    notes = rest.split(',')
+                        .map(|s| s.trim().to_string())
+                        .filter(|s| !s.is_empty())
+                        .collect();
                 }
                 "agent" => {
                     if !rest.is_empty() {
@@ -237,7 +244,7 @@ fn parse_metadata_comment(line: &str) -> Option<Metadata> {
         due_date,
         project,
         recurrence,
-        note,
+        notes,
         agent,
         effort,
     })
@@ -277,8 +284,8 @@ pub fn serialize(task_file: &TaskFile) -> String {
         if let Some(ref recur) = task.recurrence {
             meta_parts.push(format!("recur:{}", recur));
         }
-        if let Some(ref note_slug) = task.note {
-            meta_parts.push(format!("note:{}", note_slug));
+        if !task.notes.is_empty() {
+            meta_parts.push(format!("notes:{}", task.notes.join(",")));
         }
         if let Some(ref agent) = task.agent {
             meta_parts.push(format!("agent:{}", agent));
@@ -595,7 +602,7 @@ Some description here.
             due_date: None,
             project: None,
             recurrence: None,
-            note: None,
+            notes: vec![],
             agent: None,
             effort: None,
         });
@@ -620,7 +627,7 @@ Some description here.
             due_date: None,
             project: None,
             recurrence: None,
-            note: None,
+            notes: vec![],
             agent: None,
             effort: None,
         });
@@ -645,7 +652,7 @@ Some description here.
             due_date: Some(NaiveDate::from_ymd_opt(2025, 12, 31).unwrap()),
             project: Some("My Project".to_string()),
             recurrence: None,
-            note: None,
+            notes: vec![],
             agent: None,
             effort: None,
         });
@@ -675,7 +682,7 @@ Some description here.
             due_date: None,
             project: Some("Work:Project".to_string()),
             recurrence: None,
-            note: None,
+            notes: vec![],
             agent: None,
             effort: None,
         });
@@ -700,7 +707,7 @@ Some description here.
             due_date: None,
             project: Some("My Project".to_string()),
             recurrence: None,
-            note: None,
+            notes: vec![],
             agent: None,
             effort: None,
         });
@@ -914,26 +921,33 @@ Some description here.
         assert_eq!(tf.tasks.len(), 1);
     }
 
-    // -- Note metadata tests --
+    // -- Notes metadata tests --
 
     #[test]
-    fn test_parse_task_with_note_metadata() {
+    fn test_parse_legacy_note_key_as_single_element() {
         let content = "<!-- format:2 -->\n<!-- next-id:2 -->\n\n## [ ] Task with note\n<!-- id:1 priority:medium created:2025-01-15T10:00:00+00:00 note:meeting-notes -->\n";
         let tf = parse(content, false).unwrap();
         assert_eq!(tf.tasks.len(), 1);
-        assert_eq!(tf.tasks[0].note, Some("meeting-notes".to_string()));
+        assert_eq!(tf.tasks[0].notes, vec!["meeting-notes".to_string()]);
     }
 
     #[test]
-    fn test_parse_task_without_note_metadata() {
+    fn test_parse_notes_key_multiple() {
+        let content = "<!-- format:2 -->\n<!-- next-id:2 -->\n\n## [ ] Task\n<!-- id:1 priority:medium created:2025-01-15T10:00:00+00:00 notes:alpha,beta,gamma -->\n";
+        let tf = parse(content, false).unwrap();
+        assert_eq!(tf.tasks[0].notes, vec!["alpha", "beta", "gamma"]);
+    }
+
+    #[test]
+    fn test_parse_task_without_notes() {
         let content = "<!-- format:2 -->\n<!-- next-id:2 -->\n\n## [ ] Task no note\n<!-- id:1 priority:medium created:2025-01-15T10:00:00+00:00 -->\n";
         let tf = parse(content, false).unwrap();
         assert_eq!(tf.tasks.len(), 1);
-        assert!(tf.tasks[0].note.is_none());
+        assert!(tf.tasks[0].notes.is_empty());
     }
 
     #[test]
-    fn test_note_metadata_round_trip() {
+    fn test_notes_round_trip_single() {
         use chrono::{TimeZone, Utc};
         use crate::task::{Priority, Status, Task};
         let mut tf = TaskFile::new();
@@ -949,14 +963,67 @@ Some description here.
             due_date: None,
             project: None,
             recurrence: None,
-            note: Some("my-note".to_string()),
+            notes: vec!["my-note".to_string()],
             agent: None,
             effort: None,
         });
         let serialized = serialize(&tf);
-        assert!(serialized.contains("note:my-note"));
+        assert!(serialized.contains("notes:my-note"));
         let parsed = parse(&serialized, false).unwrap();
-        assert_eq!(parsed.tasks[0].note, Some("my-note".to_string()));
+        assert_eq!(parsed.tasks[0].notes, vec!["my-note".to_string()]);
+    }
+
+    #[test]
+    fn test_notes_round_trip_multiple() {
+        use chrono::{TimeZone, Utc};
+        use crate::task::{Priority, Status, Task};
+        let mut tf = TaskFile::new();
+        tf.tasks.push(Task {
+            id: 1,
+            title: "Multi-note task".to_string(),
+            status: Status::Open,
+            priority: Priority::Medium,
+            tags: Vec::new(),
+            created: Utc.with_ymd_and_hms(2025, 1, 1, 0, 0, 0).unwrap(),
+            updated: None,
+            description: None,
+            due_date: None,
+            project: None,
+            recurrence: None,
+            notes: vec!["note-a".to_string(), "note-b".to_string()],
+            agent: None,
+            effort: None,
+        });
+        let serialized = serialize(&tf);
+        assert!(serialized.contains("notes:note-a,note-b"));
+        let parsed = parse(&serialized, false).unwrap();
+        assert_eq!(parsed.tasks[0].notes, vec!["note-a".to_string(), "note-b".to_string()]);
+    }
+
+    #[test]
+    fn test_notes_empty_not_serialized() {
+        use chrono::{TimeZone, Utc};
+        use crate::task::{Priority, Status, Task};
+        let mut tf = TaskFile::new();
+        tf.tasks.push(Task {
+            id: 1,
+            title: "No notes".to_string(),
+            status: Status::Open,
+            priority: Priority::Medium,
+            tags: Vec::new(),
+            created: Utc.with_ymd_and_hms(2025, 1, 1, 0, 0, 0).unwrap(),
+            updated: None,
+            description: None,
+            due_date: None,
+            project: None,
+            recurrence: None,
+            notes: vec![],
+            agent: None,
+            effort: None,
+        });
+        let serialized = serialize(&tf);
+        assert!(!serialized.contains("notes:"));
+        assert!(!serialized.contains("note:"));
     }
 
     #[test]
@@ -997,7 +1064,7 @@ Some description here.
             due_date: None,
             project: None,
             recurrence: None,
-            note: None,
+            notes: vec![],
             agent: Some("command-center".to_string()),
             effort: None,
         });
@@ -1024,7 +1091,7 @@ Some description here.
             due_date: None,
             project: None,
             recurrence: None,
-            note: None,
+            notes: vec![],
             agent: None,
             effort: None,
         });
@@ -1139,7 +1206,7 @@ Some description here.
             due_date: None,
             project: None,
             recurrence: None,
-            note: None,
+            notes: vec![],
             agent: None,
             effort: Some(Effort::Medium),
         });
@@ -1166,7 +1233,7 @@ Some description here.
             due_date: None,
             project: None,
             recurrence: None,
-            note: None,
+            notes: vec![],
             agent: None,
             effort: None,
         });

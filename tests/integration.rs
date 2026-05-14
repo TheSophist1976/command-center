@@ -427,7 +427,7 @@ fn test_agent_instructions_edit_creates_file() {
     ]);
     assert!(out.status.success(), "edit failed: {}", stderr(&out));
 
-    let note_path = dir.path().join("Notes").join("Instructions").join("mybot.md");
+    let note_path = dir.path().join("Notes").join("Agents").join("mybot").join("instructions.md");
     assert!(note_path.exists(), "instruction file was not created");
     let content = std::fs::read_to_string(&note_path).unwrap();
     assert!(content.contains("Focus on correctness."));
