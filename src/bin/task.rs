@@ -3,6 +3,7 @@ use std::process;
 use clap::Parser;
 
 use task::cli::{AgentCommand, AgentInstructionsCommand, AgentMemoryCommand, AuthCommand, Cli, Command, ConfigCommand, NoteCommand};
+use std::str::FromStr;
 
 fn main() {
     let cli = Cli::parse();
@@ -189,6 +190,49 @@ fn run(cli: Cli) -> Result<(), (i32, String)> {
                     }
                 }
             }
+        }
+
+        Some(Command::Add { title, priority, due, project, tags, agent, description }) => {
+            let mut task_file = task::storage::load(&path, false).map_err(|e| (1, e))?;
+
+            let priority_parsed = task::task::Priority::from_str(&priority)
+                .map_err(|e| (1, e))?;
+
+            let today = chrono::Local::now().date_naive();
+            let due_date = due.as_deref().and_then(|d| task::parser::parse_due_date_input(d, today));
+
+            let tag_list: Vec<String> = tags
+                .as_deref()
+                .unwrap_or("")
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect();
+
+            let id = task_file.next_id;
+            task_file.next_id += 1;
+
+            let new_task = task::task::Task {
+                id,
+                title: title.clone(),
+                status: task::task::Status::Open,
+                priority: priority_parsed,
+                tags: tag_list,
+                created: chrono::Utc::now(),
+                updated: None,
+                description,
+                due_date,
+                project,
+                recurrence: None,
+                notes: Vec::new(),
+                agent,
+                effort: None,
+            };
+
+            task_file.tasks.push(new_task);
+            task::storage::save(&path, &task_file).map_err(|e| (1, e))?;
+            println!("Created task {}: {}", id, title);
+            Ok(())
         }
 
         Some(Command::Agent { subcommand }) => {

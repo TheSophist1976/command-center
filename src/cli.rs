@@ -39,6 +39,36 @@ pub enum Command {
         #[command(subcommand)]
         subcommand: AgentCommand,
     },
+
+    /// Add a new task
+    Add {
+        /// Task title (wrap in quotes if it contains spaces)
+        title: String,
+
+        /// Priority: critical, high, medium (default), low
+        #[arg(short, long, default_value = "medium")]
+        priority: String,
+
+        /// Due date: YYYY-MM-DD or weekday name (e.g. monday, fri)
+        #[arg(short, long)]
+        due: Option<String>,
+
+        /// Project name
+        #[arg(long)]
+        project: Option<String>,
+
+        /// Comma-separated tags (e.g. security,ci-cd)
+        #[arg(long)]
+        tags: Option<String>,
+
+        /// Agent to assign the task to
+        #[arg(long)]
+        agent: Option<String>,
+
+        /// Task description
+        #[arg(long)]
+        description: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
