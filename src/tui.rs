@@ -1591,18 +1591,20 @@ fn handle_normal(app: &mut App, key: KeyCode) -> Result<bool, String> {
             if let Some(&task_idx) = filtered.get(app.selected) {
                 app.refresh_notes();
                 let task = &app.task_file.tasks[task_idx];
-                let mut items = vec!["(new note)".to_string()];
-                // Add remove entries for currently attached notes
-                for slug in &task.notes {
-                    items.push(format!("remove: {}", slug));
-                }
-                // Add all available notes for linking
-                for note in &app.notes_list {
-                    if !task.notes.contains(&note.slug) {
+                if task.notes.is_empty() {
+                    // No notes attached — go straight to add flow
+                    let mut items = vec!["(new note)".to_string()];
+                    for note in &app.notes_list {
                         items.push(note.slug.clone());
                     }
+                    app.note_picker_items = items;
+                } else {
+                    // Notes attached — show only the linked notes to view + management options
+                    let mut items: Vec<String> = task.notes.clone();
+                    items.push("--- add note ---".to_string());
+                    items.push("--- remove note ---".to_string());
+                    app.note_picker_items = items;
                 }
-                app.note_picker_items = items;
                 app.note_picker_selected = 0;
                 app.note_picker_task_idx = Some(task_idx);
                 app.mode = Mode::NotePicker;
@@ -1759,6 +1761,25 @@ fn handle_note_picker(app: &mut App, key: KeyCode) -> Result<(), String> {
                 app.mode = Mode::Adding;
                 app.input_buffer.clear();
                 // note_picker_task_idx stays set so Adding mode knows to create+link
+            } else if selected_item == "--- add note ---" {
+                // Switch picker to add-note mode: show all unlinked notes
+                app.refresh_notes();
+                let task = &app.task_file.tasks[task_idx];
+                let mut items = vec!["(new note)".to_string()];
+                for note in &app.notes_list {
+                    if !task.notes.contains(&note.slug) {
+                        items.push(note.slug.clone());
+                    }
+                }
+                app.note_picker_items = items;
+                app.note_picker_selected = 0;
+                // stay in NotePicker mode, note_picker_task_idx unchanged
+            } else if selected_item == "--- remove note ---" {
+                // Switch picker to remove mode: show only linked notes with remove: prefix
+                let task = &app.task_file.tasks[task_idx];
+                let items: Vec<String> = task.notes.iter().map(|s| format!("remove: {}", s)).collect();
+                app.note_picker_items = items;
+                app.note_picker_selected = 0;
             } else if let Some(slug) = selected_item.strip_prefix("remove: ") {
                 // Remove this slug from task's notes
                 let slug = slug.to_string();
@@ -1769,16 +1790,27 @@ fn handle_note_picker(app: &mut App, key: KeyCode) -> Result<(), String> {
                 app.mode = Mode::Normal;
                 app.note_picker_task_idx = None;
             } else if !selected_item.is_empty() {
-                // Append existing note to task's notes list
+                // Open note for viewing/editing OR link it if in add mode
                 let task = &mut app.task_file.tasks[task_idx];
-                if !task.notes.contains(&selected_item) {
+                if task.notes.contains(&selected_item) {
+                    // Already linked — open it in external editor
+                    let note_path = app.notes_dir().join(format!("{}.md", selected_item));
+                    app.mode = Mode::Normal;
+                    app.note_picker_task_idx = None;
+                    if let Err(e) = open_note_external(&note_path, &selected_item) {
+                        app.status_message = Some(e);
+                    } else {
+                        app.refresh_notes();
+                    }
+                } else {
+                    // Not linked — add it
                     task.notes.push(selected_item.clone());
                     task.updated = Some(Utc::now());
                     app.save()?;
                     app.status_message = Some(format!("Linked note: {}", selected_item));
+                    app.mode = Mode::Normal;
+                    app.note_picker_task_idx = None;
                 }
-                app.mode = Mode::Normal;
-                app.note_picker_task_idx = None;
             }
         }
         KeyCode::Esc => {
