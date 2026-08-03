@@ -865,11 +865,14 @@ struct App {
     session_viewing_output: bool,
     session_output_scroll: usize,
     session_output_follow: bool,
+    // mtime of tasks.md at last load — used to detect external writes before saving
+    file_mtime: Option<std::time::SystemTime>,
 }
 
 impl App {
     fn new(path: &Path) -> Result<Self, String> {
         let task_file = storage::load(path, false)?;
+        let file_mtime = std::fs::metadata(path).ok().and_then(|m| m.modified().ok());
         let view = config::read_config_value("default-view")
             .map(|v| View::from_config(&v))
             .unwrap_or(View::Due);
@@ -934,6 +937,7 @@ impl App {
             session_viewing_output: false,
             session_output_scroll: 0,
             session_output_follow: true,
+            file_mtime,
         };
         app.table_state.select(Some(0));
         // Load persisted sessions
@@ -1105,14 +1109,35 @@ impl App {
         });
     }
 
-    fn save(&self) -> Result<(), String> {
-        storage::save(&self.file_path, &self.task_file)
+    fn save(&mut self) -> Result<(), String> {
+        // If the file was modified externally since we last loaded it, reload first
+        // to avoid clobbering external writes (e.g. from agent subagents).
+        if let Some(stored_mtime) = self.file_mtime {
+            if let Ok(meta) = std::fs::metadata(&self.file_path) {
+                if let Ok(current_mtime) = meta.modified() {
+                    if current_mtime != stored_mtime {
+                        let _ = self.reload_from_disk();
+                        self.status_message = Some(
+                            "File changed externally — reloaded. Please redo your action."
+                                .to_string(),
+                        );
+                        return Ok(());
+                    }
+                }
+            }
+        }
+        storage::save(&self.file_path, &self.task_file)?;
+        self.file_mtime =
+            std::fs::metadata(&self.file_path).ok().and_then(|m| m.modified().ok());
+        Ok(())
     }
 
     fn reload_from_disk(&mut self) -> Result<(), String> {
         let task_file = storage::load(&self.file_path, false)?;
         let n = task_file.tasks.len();
         self.task_file = task_file;
+        self.file_mtime =
+            std::fs::metadata(&self.file_path).ok().and_then(|m| m.modified().ok());
         self.clamp_selection();
         self.status_message = Some(format!("Reloaded {} tasks from disk", n));
         Ok(())
@@ -4045,6 +4070,7 @@ mod tests {
             session_viewing_output: false,
             session_output_scroll: 0,
             session_output_follow: true,
+            file_mtime: None,
         }
     }
 
@@ -4090,6 +4116,7 @@ mod tests {
         task_file.tasks = tasks;
         // Write initial file so save() works
         let _ = storage::save(&path, &task_file);
+        let file_mtime = std::fs::metadata(&path).ok().and_then(|m| m.modified().ok());
         App {
             task_file,
             file_path: path,
@@ -4125,6 +4152,7 @@ mod tests {
             session_viewing_output: false,
             session_output_scroll: 0,
             session_output_follow: true,
+            file_mtime,
         }
     }
 
