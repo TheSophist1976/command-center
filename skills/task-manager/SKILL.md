@@ -3,13 +3,13 @@ name: task-manager
 description: Read and edit the user's task list. Use this skill when the user wants to list, view, add, edit, complete, reopen, or delete tasks.
 ---
 
-The user's tasks are stored in a markdown file at:
+The user's tasks are stored in a SQLite database at:
 
 ```
-~/Documents/Mark-main/Tasks/tasks.md
+~/Documents/Mark-main/Tasks/tasks.db
 ```
 
-Read and edit this file directly for task operations. For note operations, use the `task note` CLI subcommands documented below.
+Use the `task` CLI for every task operation — never open or edit `tasks.db` directly, it is a database file, not a text file. For note operations, use the `task note` CLI subcommands documented below.
 
 ## Finding Your Tasks
 
@@ -19,64 +19,77 @@ Tasks can be assigned to specific AI agents via the `agent` field in task metada
 2. Find all lines starting with `agent-` — these define named agent profiles and their working directories, e.g. `agent-command-center: ~/code/command-center`
 3. Expand tildes in directory paths (replace `~` with your home directory)
 4. Find the profile whose directory is a prefix of your current working directory — use the longest match if multiple profiles match
-5. Filter tasks to those where `agent:<your-profile-name>` appears in the metadata comment
+5. Run `task list --agent <your-profile-name> --status open` to see the tasks assigned to you
 
 Only work on tasks assigned to your agent profile. Tasks with `agent:human` are for the human. Tasks with no `agent` field are unassigned — do not work on these unless explicitly told to.
 
-## File Format
-
-Each task is a single line with a GitHub-style checkbox:
+## Listing Tasks
 
 ```
-- [ ] id:42 priority:high [tag1,tag2] due:2026-03-25 project:Work | Task title here | created:2026-01-01T00:00:00Z updated:2026-01-01T00:00:00Z
+task list [--status open|done] [--agent <name>] [--project <name>] [--tag <tag>] [--due-before <YYYY-MM-DD>]
 ```
 
-- `[ ]` = open task, `[x]` = done
-- Fields before `|`: `id:`, `priority:`, tags in `[...]`, `due:`, `project:` (all optional except `id:`)
-- Title follows the first ` | `
-- Timestamps follow the second ` | `
+With no flags, lists all tasks. Output is one line per task: status, id, priority, due date, title.
 
-## Reading Tasks
+## Viewing a Task
 
-Read the file and parse each `- [ ]` or `- [x]` line. Present ID, status, priority, title, and due date.
+```
+task show <id>
+```
+
+Prints full detail: title, priority, tags, due date, project, recurrence, notes, agent, effort, created/updated timestamps, and description.
 
 ## Adding a Task
 
-Append a new line:
 ```
-- [ ] id:<next_id> priority:medium | <title> | created:<ISO timestamp>
+task add "<title>" [--priority critical|high|medium|low] [--due <YYYY-MM-DD or weekday>] [--project <name>] [--tags <a,b,c>] [--agent <name>] [--description "<text>"]
 ```
-Use the highest existing `id:` + 1 for `<next_id>`.
+
+Only `<title>` is required; `--priority` defaults to `medium`. The id is assigned automatically and printed in the output (`Created task 12: <title>`).
 
 ## Editing a Task
 
-Find the line with the matching `id:` and update the relevant field in place. Always update the `updated:` timestamp.
+```
+task edit <id> [--title "<new title>"] [--priority <p>] [--due <date>] [--project <name>] [--tags <a,b,c>] [--agent <name>] [--description "<text>"] [--effort high|medium|low]
+```
+
+Only the fields you pass are changed; `updated` is set automatically.
 
 ## Completing a Task
 
-Change `[ ]` to `[x]` on the matching line. Update `updated:` timestamp.
+```
+task done <id>
+```
+
+If the task has a recurrence set, this automatically creates the next occurrence as a new open task and reports its id. Running `done` on an already-done task is a no-op (prints a message, doesn't error).
 
 ## Reopening a Task
 
-Change `[x]` to `[ ]` on the matching line. Update `updated:` timestamp.
+```
+task reopen <id>
+```
 
 ## Deleting a Task
 
-Remove the line with the matching `id:` entirely.
+```
+task rm <id>
+```
 
 ## Valid Field Values
 
 **Priority:** `critical`, `high`, `medium` (default), `low`
 
-**Tags:** comma-separated inside `[...]`, lowercase alphanumeric and hyphens — e.g., `[frontend,api-v2]`
+**Effort:** `high`, `medium`, `low`
 
-**Due date:** `YYYY-MM-DD` — e.g., `due:2026-03-25`
+**Tags:** comma-separated, e.g. `--tags frontend,api-v2`
 
-**Timestamps:** ISO 8601 — e.g., `2026-03-18T12:00:00Z`
+**Due date:** `YYYY-MM-DD`, or a weekday name/abbreviation (resolves to the next future occurrence) — e.g. `--due 2026-03-25` or `--due friday`
+
+**Recurrence:** set via the interactive TUI, not currently exposed as an `add`/`edit` flag
 
 ## Notes
 
-Notes are markdown files stored in the same directory as `tasks.md`. Each note has a slug (derived from its title) and is stored as `<slug>.md`. Use the `task note` CLI subcommands to manage notes.
+Notes are markdown files stored in the same directory as `tasks.db`. Each note has a slug (derived from its title) and is stored as `<slug>.md`. Notes are unaffected by the SQLite migration — they remain plain `.md` files, managed with the `task note` CLI subcommands below.
 
 ### Commands
 
@@ -84,7 +97,7 @@ Notes are markdown files stored in the same directory as `tasks.md`. Each note h
 |---------|-------------|--------|
 | `task note list` | List all notes | `<slug>  <title>` per line, sorted by slug |
 | `task note add "<title>"` | Create a new note with empty body | File path of created note |
-| `task note add "<title>" --task <id>` | Create a note and link it to a task | File path (links `note` field on the task) |
+| `task note add "<title>" --task <id>` | Create a note and link it to a task | File path (links `notes` field on the task) |
 | `task note show <slug>` | Print the note's title and body | Raw markdown content |
 | `task note edit <slug> --title "<new title>"` | Update the note's title | File path |
 | `task note edit <slug> --body "<new body>"` | Replace the note's body | File path |
@@ -97,6 +110,11 @@ Notes are markdown files stored in the same directory as `tasks.md`. Each note h
 
 - `task note edit` requires at least one of `--title` or `--body`; omitting both is an error
 - `task note add --task <id>` creates the note even if the task is not found, but exits with code 1 and prints a warning
-- `task note rm` does not automatically clear the `note` field on tasks that referenced the deleted note
+- `task note rm` does not automatically clear the `notes` field on tasks that referenced the deleted note
 - `task note unlink` is idempotent — succeeds even if the task has no note linked
-- The `--file` flag (global) can be used to target a different task file: `task --file /path/to/tasks.md note list`
+- The `--file` flag (global) can be used to target a different task database: `task --file /path/to/tasks.db note list`
+
+## Rules to Never Break
+
+- **Never guess or hand-construct a task id** — always use the id the CLI reports back to you (from `add`, `list`, or `show`).
+- **Never edit `tasks.db` with a text editor or by hand** — it's a SQLite database, not a text file; use the CLI for every read and write.
