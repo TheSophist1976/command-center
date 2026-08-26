@@ -33,6 +33,8 @@ Markdown files on disk, unchanged.
   first run, with the old file left in place afterward.
 - Update `AGENTS.md` to document the CLI workflow, replacing the file-format
   documentation.
+- Show the running build's version in the TUI header (the CLI already
+  exposes `--version` via clap).
 
 ## Non-goals
 
@@ -50,10 +52,24 @@ Markdown files on disk, unchanged.
 
 ### Data model
 
-`Task`, `Status`, `Priority`, `Effort`, `Recurrence` in `src/task.rs` are
-unchanged. `TaskFile.next_id` and `TaskFile.format_version` are dropped —
-SQLite's `AUTOINCREMENT` assigns IDs, and schema identity is just "does
-`tasks.db` exist."
+`Task`, `Status`, `Priority`, `Effort`, `Recurrence`, and `TaskFile` in
+`src/task.rs` are unchanged, **including** `TaskFile.next_id` and
+`TaskFile.format_version`. This is a deliberate revision from the original
+brainstormed design (which proposed dropping `next_id` in favor of SQLite
+`AUTOINCREMENT`): `next_id` is read and incremented in-place at several
+call sites (`tui.rs`'s new-task and recurrence-spawn flows, `todoist.rs`'s
+bulk import, both `add` command handlers), not just at load time. Making
+IDs autoincrement-assigned would require touching every one of those call
+sites to learn the ID only after insert. Instead, `db::load` computes
+`next_id` transiently as `MAX(id) + 1` (or `1` if the table is empty) every
+time it loads — the value is never persisted in the DB, matching how it's
+never truly "stored" today either (the markdown header is just a cache of
+this same derivation, per `parser.rs`'s "always ensure next_id > max
+existing id" comment). `format_version` stays for parity with `TaskFile`'s
+current shape but is unused by the SQLite path — schema identity is just
+"does `tasks.db` exist." All existing callers that do
+`let id = task_file.next_id; task_file.next_id += 1;` then push a `Task`
+and call `save` keep working unmodified.
 
 ### Schema
 
@@ -61,7 +77,7 @@ Single table:
 
 ```sql
 CREATE TABLE tasks (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    id          INTEGER PRIMARY KEY,   -- explicit id always supplied by callers; see Data model
     title       TEXT NOT NULL,
     status      TEXT NOT NULL,           -- 'open' | 'done'
     priority    TEXT NOT NULL,           -- 'critical' | 'high' | 'medium' | 'low'
@@ -94,18 +110,15 @@ full, never queried piecemeal at the SQL level beyond simple filters).
   (WAL mode, busy timeout), runs the migration check (below), `SELECT *`
   the whole table into a `Vec<Task>`, wraps it in `TaskFile`.
 - `save(path, &TaskFile) -> Result<(), String>`: today's whole-file
-  rewrite becomes a transaction that diffs are unnecessary for — simplest
-  correct approach is `DELETE FROM tasks; INSERT ...` for each task in one
-  transaction, preserving explicit `id` values (SQLite allows explicit
-  `INTEGER PRIMARY KEY` inserts, so round-tripping an in-memory `TaskFile`
-  back to the DB doesn't reassign IDs). This keeps `load`/`save` semantics
-  identical to today from the callers' point of view (mutate `TaskFile` in
-  memory, then call `save`), so `tui.rs`, `bin/task.rs`, and `todoist.rs`
-  need no changes beyond the module path.
-- New tasks (`id` unset) get a real `INSERT ... DEFAULT VALUES`-style path
-  so SQLite assigns the `AUTOINCREMENT` id — this only matters for `add`,
-  which already knows to grab a fresh id; it will instead insert-then-read
-  `last_insert_rowid()`.
+  rewrite becomes a transaction — `DELETE FROM tasks; INSERT ...` for each
+  task in `task_file.tasks`, one transaction, always supplying the
+  in-memory `id` explicitly. This keeps `load`/`save` semantics identical
+  to today from the callers' point of view (mutate `TaskFile` in memory —
+  including assigning new tasks an id from `task_file.next_id` — then call
+  `save`), so `tui.rs`, `bin/task.rs`, `bin/task_tui.rs`, and `todoist.rs`
+  need no changes to their id-assignment logic, only to the module path
+  (`storage::` → `db::`) and dropping the now-removed `strict` parameter
+  from `load` calls.
 - `backup_daily(path)`: replace `fs::copy` with `VACUUM INTO
   <backup_dir>/tasks-<date>.db` run against the live connection — safe
   under WAL, produces one consistent file. Same 7-backup pruning logic,
@@ -118,10 +131,10 @@ On `load`, if the resolved `.db` path doesn't exist:
 1. Check for a `tasks.md` in the same directory.
 2. If present, run the existing `parser::parse` against it (this code path
    is kept solely for migration — no longer used for normal load/save).
-3. Create `tasks.db`, insert all parsed tasks (preserving their existing
-   `id` values so cross-references — e.g. notes' `task:<id>` links, if any
-   exist — stay valid), and seed SQLite's autoincrement sequence to
-   `max(id)` so the next inserted task doesn't collide.
+3. Create `tasks.db`, insert all parsed tasks with their existing `id`
+   values preserved (so cross-references — e.g. notes' `task:<id>` links,
+   if any exist — stay valid). No sequence-seeding is needed since ids are
+   always supplied explicitly, never DB-assigned (see Data model above).
 4. Leave `tasks.md` on disk, untouched, going forward.
 5. If neither file exists, create an empty `tasks.db` (today's "start with
    an empty `TaskFile`" behavior).
@@ -151,6 +164,27 @@ New subcommands, all operating through the same `db::load`/mutate/
 
 Errors (task not found, invalid enum value) use the same
 `Result<(), (i32, String)>` convention already used in `bin/task.rs`.
+
+`src/bin/task.rs` and `src/bin/task_tui.rs` are near-duplicates today (the
+only difference is what `None | Some(Command::Tui)` does — print a message
+vs. launch the TUI). Adding six new subcommands to both independently would
+double the new surface area for no reason. This change extracts the task
+CRUD command bodies (`add`, `list`, `show`, `edit`, `done`, `reopen`, `rm`)
+into a new `src/commands.rs` module as plain functions
+(`pub fn add(path: &Path, ...) -> Result<String, (i32, String)>`, etc., one
+per subcommand, returning the stdout text to print on success), called
+identically from both binaries. This only touches the commands being added
+in this change — the existing `Auth`/`Config`/`Note`/`Agent` duplication in
+the two binaries is left as-is (out of scope).
+
+### Version display
+
+Both `task` and `task-tui` gain a way to see the running build's version.
+`task --version` already works via clap's `version` attribute on `Cli`
+(`src/cli.rs`); this is unchanged. The TUI's header bar (`draw_header` in
+`src/tui.rs`) is extended to include the crate version
+(`env!("CARGO_PKG_VERSION")`) so it's visible while the TUI is running,
+e.g. `task-manager v3.4.0  |  <view>  |  <filter>`.
 
 ### `AGENTS.md` update
 
