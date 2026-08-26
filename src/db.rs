@@ -134,7 +134,7 @@ fn insert_task_row(conn: &Connection, t: &Task) -> Result<(), String> {
     Ok(())
 }
 
-fn migrate_from_markdown(db_path: &Path, conn: &Connection) -> Result<(), String> {
+fn migrate_from_markdown(db_path: &Path, conn: &mut Connection) -> Result<(), String> {
     let md_path = db_path.with_file_name("tasks.md");
     if !md_path.exists() {
         return Ok(());
@@ -148,17 +148,22 @@ fn migrate_from_markdown(db_path: &Path, conn: &Connection) -> Result<(), String
         let msgs: Vec<String> = errors.iter().map(|e| e.to_string()).collect();
         format!("Failed to migrate {}: {}", md_path.display(), msgs.join("\n"))
     })?;
+    let tx = conn
+        .transaction()
+        .map_err(|e| format!("Failed to start migration transaction: {}", e))?;
     for t in &task_file.tasks {
-        insert_task_row(conn, t)?;
+        insert_task_row(&tx, t)?;
     }
+    tx.commit()
+        .map_err(|e| format!("Failed to commit migration transaction: {}", e))?;
     Ok(())
 }
 
 pub fn load(path: &Path) -> Result<TaskFile, String> {
     let needs_migration = !path.exists();
-    let conn = open_conn(path)?;
+    let mut conn = open_conn(path)?;
     if needs_migration {
-        migrate_from_markdown(path, &conn)?;
+        migrate_from_markdown(path, &mut conn)?;
     }
 
     let mut stmt = conn
@@ -383,5 +388,24 @@ mod tests {
         // A second load must NOT re-migrate from tasks.md (which still has the old task).
         let tf = load(&db_path).unwrap();
         assert!(tf.tasks.is_empty());
+    }
+
+    #[test]
+    fn test_migration_transaction_atomicity_on_insert_failure() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("tasks.db");
+        let md_path = dir.path().join("tasks.md");
+        // Create a markdown file with two tasks sharing the same ID (will cause constraint violation on second insert)
+        let content = "<!-- format:2 -->\n<!-- next-id:3 -->\n\n# Tasks\n\n## [ ] Task 1\n<!-- id:1 priority:high created:2025-01-01T00:00:00+00:00 -->\n\n## [ ] Task 2\n<!-- id:1 priority:medium created:2025-01-02T00:00:00+00:00 -->\n";
+        std::fs::write(&md_path, content).unwrap();
+
+        // Migration should fail due to duplicate ID
+        let result = load(&db_path);
+        assert!(result.is_err(), "Expected migration to fail due to duplicate task ID");
+
+        // The database file exists (created by open_conn), but should be empty (transaction rolled back)
+        assert!(db_path.exists());
+        let tf = load(&db_path).unwrap();
+        assert!(tf.tasks.is_empty(), "Database should be empty after failed migration");
     }
 }
