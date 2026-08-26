@@ -4738,6 +4738,52 @@ mod tests {
         assert_eq!(app.status_message, Some("Cannot reload: finish editing first".to_string()));
     }
 
+    #[test]
+    fn external_db_save_changes_mtime_so_save_guard_fires() {
+        // Verifies that db::save (as used by the CLI, e.g. `task edit`) actually
+        // changes tasks.db's mtime even though the connection runs in WAL mode,
+        // so the App::save() external-change guard reliably detects it.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("tasks.db");
+        let mut task_file = TaskFile::new();
+        task_file.tasks = vec![make_task(None)];
+        db::save(&path, &task_file).unwrap();
+
+        let mut app = App::new(&path).unwrap();
+        let loaded_mtime = app.file_mtime;
+        assert!(loaded_mtime.is_some());
+
+        // Ensure the filesystem clock advances past its granularity before the
+        // external write, so the mtime comparison isn't a false negative.
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+
+        // Simulate an external CLI process (`task edit`) writing to the same db.
+        let mut second_task = make_task(None);
+        second_task.id = 2;
+        task_file.tasks.push(second_task);
+        db::save(&path, &task_file).unwrap();
+
+        let current_mtime = std::fs::metadata(&path).ok().and_then(|m| m.modified().ok());
+        assert!(
+            current_mtime.is_some() && current_mtime != loaded_mtime,
+            "expected tasks.db mtime to change after an external db::save, \
+             loaded={:?} current={:?}",
+            loaded_mtime,
+            current_mtime
+        );
+
+        // App::save() should detect this, reload, and refuse to clobber the
+        // external write instead of silently overwriting it.
+        app.task_file.tasks[0].title = "local edit that should be discarded".to_string();
+        app.save().unwrap();
+
+        assert_eq!(app.task_file.tasks.len(), 2, "save() should have reloaded from disk");
+        assert_eq!(
+            app.status_message,
+            Some("File changed externally — reloaded. Please redo your action.".to_string())
+        );
+    }
+
     // -- per-view-grouping tests --
 
     #[test]
