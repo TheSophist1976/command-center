@@ -41,7 +41,7 @@ use crate::claude_session::{
     self, ClaudeSession, ClaudeSessionStatus, SessionEvent,
 };
 use crate::config;
-use crate::storage;
+use crate::db;
 use crate::task::{Effort, Priority, Status, Task, TaskFile};
 // -- Types --
 
@@ -865,13 +865,13 @@ struct App {
     session_viewing_output: bool,
     session_output_scroll: usize,
     session_output_follow: bool,
-    // mtime of tasks.md at last load — used to detect external writes before saving
+    // mtime of tasks.db at last load — used to detect external writes before saving
     file_mtime: Option<std::time::SystemTime>,
 }
 
 impl App {
     fn new(path: &Path) -> Result<Self, String> {
-        let task_file = storage::load(path, false)?;
+        let task_file = db::load(path)?;
         let file_mtime = std::fs::metadata(path).ok().and_then(|m| m.modified().ok());
         let view = config::read_config_value("default-view")
             .map(|v| View::from_config(&v))
@@ -978,7 +978,7 @@ impl App {
     fn task_filename(&self) -> String {
         self.file_path.file_name()
             .and_then(|n| n.to_str())
-            .unwrap_or("tasks.md")
+            .unwrap_or("tasks.db")
             .to_string()
     }
 
@@ -1126,14 +1126,14 @@ impl App {
                 }
             }
         }
-        storage::save(&self.file_path, &self.task_file)?;
+        db::save(&self.file_path, &self.task_file)?;
         self.file_mtime =
             std::fs::metadata(&self.file_path).ok().and_then(|m| m.modified().ok());
         Ok(())
     }
 
     fn reload_from_disk(&mut self) -> Result<(), String> {
-        let task_file = storage::load(&self.file_path, false)?;
+        let task_file = db::load(&self.file_path)?;
         let n = task_file.tasks.len();
         self.task_file = task_file;
         self.file_mtime =
@@ -2039,8 +2039,8 @@ fn handle_input(app: &mut App, key: KeyCode, action: InputAction) -> Result<(), 
                         app.save()?;
                         config::write_config_value("default-dir", &trimmed)
                             .map_err(|e| format!("Failed to save config: {}", e))?;
-                        let new_path = std::path::PathBuf::from(&trimmed).join("tasks.md");
-                        app.task_file = storage::load(&new_path, false)?;
+                        let new_path = std::path::PathBuf::from(&trimmed).join("tasks.db");
+                        app.task_file = db::load(&new_path)?;
                         app.file_path = new_path;
                         app.selected = 0;
                         app.table_state.select(Some(0));
@@ -4111,11 +4111,11 @@ mod tests {
         let id = COUNTER.fetch_add(1, Ordering::Relaxed);
         let dir = PathBuf::from(format!("target/tmp/tui-test-{}-{}", std::process::id(), id));
         let _ = std::fs::create_dir_all(&dir);
-        let path = dir.join("tasks.md");
+        let path = dir.join("tasks.db");
         let mut task_file = TaskFile::new();
         task_file.tasks = tasks;
         // Write initial file so save() works
-        let _ = storage::save(&path, &task_file);
+        let _ = db::save(&path, &task_file);
         let file_mtime = std::fs::metadata(&path).ok().and_then(|m| m.modified().ok());
         App {
             task_file,
@@ -4662,14 +4662,19 @@ mod tests {
     #[test]
     fn reload_from_disk_updates_task_file_and_sets_status_message() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("tasks.md");
+        let path = dir.path().join("tasks.db");
         // Write initial file with 1 task
-        std::fs::write(&path, "<!-- format:2 -->\n<!-- next-id:2 -->\n\n# Tasks\n\n## [ ] Task one\n<!-- id:1 priority:medium created:2026-01-01T00:00:00+00:00 -->\n").unwrap();
+        let mut task_file = TaskFile::new();
+        task_file.tasks = vec![make_task(None)];
+        db::save(&path, &task_file).unwrap();
         let mut app = App::new(&path).unwrap();
         assert_eq!(app.task_file.tasks.len(), 1);
 
         // External writer adds a second task
-        std::fs::write(&path, "<!-- format:2 -->\n<!-- next-id:3 -->\n\n# Tasks\n\n## [ ] Task one\n<!-- id:1 priority:medium created:2026-01-01T00:00:00+00:00 -->\n\n## [ ] Task two\n<!-- id:2 priority:medium created:2026-01-02T00:00:00+00:00 -->\n").unwrap();
+        let mut second_task = make_task(None);
+        second_task.id = 2;
+        task_file.tasks.push(second_task);
+        db::save(&path, &task_file).unwrap();
 
         app.reload_from_disk().unwrap();
 
@@ -4680,8 +4685,10 @@ mod tests {
     #[test]
     fn ctrl_r_in_non_normal_mode_sets_warning_and_does_not_reload() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("tasks.md");
-        std::fs::write(&path, "<!-- format:2 -->\n<!-- next-id:2 -->\n\n# Tasks\n\n## [ ] Task one\n<!-- id:1 priority:medium created:2026-01-01T00:00:00+00:00 -->\n").unwrap();
+        let path = dir.path().join("tasks.db");
+        let mut task_file = TaskFile::new();
+        task_file.tasks = vec![make_task(None)];
+        db::save(&path, &task_file).unwrap();
         let mut app = App::new(&path).unwrap();
         app.mode = Mode::Adding;
 

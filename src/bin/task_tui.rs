@@ -19,8 +19,8 @@ fn main() {
 }
 
 fn run(cli: Cli) -> Result<(), (i32, String)> {
-    let path = task::storage::resolve_file_path(cli.file.as_deref());
-    task::storage::backup_daily(&path);
+    let path = task::db::resolve_file_path(cli.file.as_deref());
+    task::db::backup_daily(&path);
 
     match cli.command {
         None | Some(Command::Tui) => {
@@ -99,13 +99,13 @@ fn run(cli: Cli) -> Result<(), (i32, String)> {
                     println!("{}", file_path.display());
 
                     if let Some(id) = task_id {
-                        let mut task_file = task::storage::load(&path, false).map_err(|e| (1, e))?;
+                        let mut task_file = task::db::load(&path).map_err(|e| (1, e))?;
                         match task_file.find_task_mut(id) {
                             Some(t) => {
                                 if !t.notes.contains(&slug) {
                                     t.notes.push(slug.clone());
                                 }
-                                task::storage::save(&path, &task_file).map_err(|e| (1, e))?;
+                                task::db::save(&path, &task_file).map_err(|e| (1, e))?;
                             }
                             None => {
                                 eprintln!("Warning: task {} not found; note was created but not linked", id);
@@ -154,12 +154,12 @@ fn run(cli: Cli) -> Result<(), (i32, String)> {
                 }
 
                 NoteCommand::Link { slug, task_id } => {
-                    let mut task_file = task::storage::load(&path, false).map_err(|e| (1, e))?;
+                    let mut task_file = task::db::load(&path).map_err(|e| (1, e))?;
                     match task_file.find_task_mut(task_id) {
                         Some(t) => {
                             if !t.notes.contains(&slug) {
                                 t.notes.push(slug.clone());
-                                task::storage::save(&path, &task_file).map_err(|e| (1, e))?;
+                                task::db::save(&path, &task_file).map_err(|e| (1, e))?;
                                 println!("Linked note '{}' to task {}", slug, task_id);
                             } else {
                                 println!("Note '{}' already linked to task {}", slug, task_id);
@@ -171,14 +171,14 @@ fn run(cli: Cli) -> Result<(), (i32, String)> {
                 }
 
                 NoteCommand::Unlink { task_id } => {
-                    let mut task_file = task::storage::load(&path, false).map_err(|e| (1, e))?;
+                    let mut task_file = task::db::load(&path).map_err(|e| (1, e))?;
                     match task_file.find_task_mut(task_id) {
                         Some(t) => {
                             if t.notes.is_empty() {
                                 println!("Task {} has no linked notes", task_id);
                             } else if t.notes.len() == 1 {
                                 let removed = t.notes.remove(0);
-                                task::storage::save(&path, &task_file).map_err(|e| (1, e))?;
+                                task::db::save(&path, &task_file).map_err(|e| (1, e))?;
                                 println!("Unlinked note '{}' from task {}", removed, task_id);
                             } else {
                                 println!("Task {} has {} notes. Use `task note link` to manage.", task_id, t.notes.len());
@@ -299,7 +299,7 @@ fn run(cli: Cli) -> Result<(), (i32, String)> {
         }
 
         Some(Command::Add { title, priority, due, project, tags, agent, description }) => {
-            let mut task_file = task::storage::load(&path, false).map_err(|e| (1, e))?;
+            let mut task_file = task::db::load(&path).map_err(|e| (1, e))?;
             let priority_parsed = task::task::Priority::from_str(&priority).map_err(|e| (1, e))?;
             let today = chrono::Local::now().date_naive();
             let due_date = due.as_deref().and_then(|d| task::parser::parse_due_date_input(d, today));
@@ -322,7 +322,7 @@ fn run(cli: Cli) -> Result<(), (i32, String)> {
                 agent,
                 effort: None,
             });
-            task::storage::save(&path, &task_file).map_err(|e| (1, e))?;
+            task::db::save(&path, &task_file).map_err(|e| (1, e))?;
             println!("Created task {}: {}", id, title);
             Ok(())
         }

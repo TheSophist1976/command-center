@@ -4,7 +4,6 @@ pub mod config;
 pub mod db;
 pub mod note;
 pub mod parser;
-pub mod storage;
 pub mod task;
 
 #[cfg(feature = "tui")]
