@@ -200,6 +200,52 @@ pub fn save(path: &Path, task_file: &TaskFile) -> Result<(), String> {
     Ok(())
 }
 
+pub fn backup_daily(path: &Path) {
+    if !path.exists() {
+        return;
+    }
+    let parent = match path.parent() {
+        Some(p) => p,
+        None => return,
+    };
+    let backup_dir = parent.join(".backups");
+    if fs::create_dir_all(&backup_dir).is_err() {
+        return;
+    }
+    let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+    let backup_path = backup_dir.join(format!("tasks-{}.db", today));
+    // VACUUM INTO refuses to overwrite an existing file.
+    let _ = fs::remove_file(&backup_path);
+
+    if let Ok(conn) = Connection::open(path) {
+        let _ = conn.execute("VACUUM INTO ?1", params![backup_path.to_string_lossy()]);
+    }
+
+    // Prune: keep only the 7 most recent backups.
+    let entries = match fs::read_dir(&backup_dir) {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+    let mut backups: Vec<String> = entries
+        .filter_map(|e| e.ok())
+        .filter_map(|e| {
+            let name = e.file_name().to_string_lossy().to_string();
+            if name.starts_with("tasks-") && name.ends_with(".db") {
+                Some(name)
+            } else {
+                None
+            }
+        })
+        .collect();
+    backups.sort();
+    if backups.len() > 7 {
+        let to_remove = backups.len() - 7;
+        for name in &backups[..to_remove] {
+            let _ = fs::remove_file(backup_dir.join(name));
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -407,5 +453,77 @@ mod tests {
         assert!(db_path.exists());
         let tf = load(&db_path).unwrap();
         assert!(tf.tasks.is_empty(), "Database should be empty after failed migration");
+    }
+
+    #[test]
+    fn test_backup_daily_creates_backup_file() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("tasks.db");
+        let mut tf = TaskFile::new();
+        tf.tasks.push(sample_task(1, "Backed up"));
+        save(&path, &tf).unwrap();
+
+        backup_daily(&path);
+
+        let backup_dir = dir.path().join(".backups");
+        assert!(backup_dir.exists());
+        let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+        let backup_path = backup_dir.join(format!("tasks-{}.db", today));
+        assert!(backup_path.exists());
+
+        let backed_up = load(&backup_path).unwrap();
+        assert_eq!(backed_up.tasks.len(), 1);
+        assert_eq!(backed_up.tasks[0].title, "Backed up");
+    }
+
+    #[test]
+    fn test_backup_daily_no_file_no_error() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("nonexistent.db");
+        backup_daily(&path); // should not panic
+        assert!(!dir.path().join(".backups").exists());
+    }
+
+    #[test]
+    fn test_backup_daily_overwrites_same_day() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("tasks.db");
+        let mut tf = TaskFile::new();
+        tf.tasks.push(sample_task(1, "Version 1"));
+        save(&path, &tf).unwrap();
+        backup_daily(&path);
+
+        let mut tf2 = TaskFile::new();
+        tf2.tasks.push(sample_task(1, "Version 2"));
+        save(&path, &tf2).unwrap();
+        backup_daily(&path);
+
+        let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+        let backup_path = dir.path().join(".backups").join(format!("tasks-{}.db", today));
+        let backed_up = load(&backup_path).unwrap();
+        assert_eq!(backed_up.tasks[0].title, "Version 2");
+    }
+
+    #[test]
+    fn test_backup_daily_prunes_old_files() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("tasks.db");
+        save(&path, &TaskFile::new()).unwrap();
+        let backup_dir = dir.path().join(".backups");
+        fs::create_dir(&backup_dir).unwrap();
+        for i in 1..=9 {
+            fs::write(backup_dir.join(format!("tasks-2025-01-{:02}.db", i)), "old").unwrap();
+        }
+        backup_daily(&path);
+        let entries: Vec<_> = fs::read_dir(&backup_dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().starts_with("tasks-"))
+            .collect();
+        assert_eq!(entries.len(), 7);
+        assert!(!backup_dir.join("tasks-2025-01-01.db").exists());
+        assert!(!backup_dir.join("tasks-2025-01-02.db").exists());
+        assert!(!backup_dir.join("tasks-2025-01-03.db").exists());
+        assert!(backup_dir.join("tasks-2025-01-04.db").exists());
     }
 }
