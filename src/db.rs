@@ -2,6 +2,7 @@ use rusqlite::{params, Connection};
 use std::path::{Path, PathBuf};
 use chrono::{DateTime, NaiveDate, Utc};
 use std::str::FromStr;
+use std::fs;
 
 use crate::task::{Effort, Priority, Recurrence, Status, Task, TaskFile};
 
@@ -133,8 +134,32 @@ fn insert_task_row(conn: &Connection, t: &Task) -> Result<(), String> {
     Ok(())
 }
 
+fn migrate_from_markdown(db_path: &Path, conn: &Connection) -> Result<(), String> {
+    let md_path = db_path.with_file_name("tasks.md");
+    if !md_path.exists() {
+        return Ok(());
+    }
+    let content = fs::read_to_string(&md_path)
+        .map_err(|e| format!("Failed to read {} during migration: {}", md_path.display(), e))?;
+    if content.trim().is_empty() {
+        return Ok(());
+    }
+    let task_file = crate::parser::parse(&content, false).map_err(|errors| {
+        let msgs: Vec<String> = errors.iter().map(|e| e.to_string()).collect();
+        format!("Failed to migrate {}: {}", md_path.display(), msgs.join("\n"))
+    })?;
+    for t in &task_file.tasks {
+        insert_task_row(conn, t)?;
+    }
+    Ok(())
+}
+
 pub fn load(path: &Path) -> Result<TaskFile, String> {
+    let needs_migration = !path.exists();
     let conn = open_conn(path)?;
+    if needs_migration {
+        migrate_from_markdown(path, &conn)?;
+    }
 
     let mut stmt = conn
         .prepare("SELECT id, title, status, priority, tags, created, updated, description, due_date, project, recurrence, notes, agent, effort FROM tasks ORDER BY id")
@@ -309,5 +334,54 @@ mod tests {
 
         let loaded = load(&path).unwrap();
         assert_eq!(loaded.next_id, 6);
+    }
+
+    #[test]
+    fn test_load_migrates_existing_markdown() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("tasks.db");
+        let md_path = dir.path().join("tasks.md");
+        let content = "<!-- format:2 -->\n<!-- next-id:3 -->\n\n# Tasks\n\n## [ ] Task A\n<!-- id:1 priority:high tags:x,y created:2025-01-01T00:00:00+00:00 -->\n\nDescription here.\n\n## [x] Task B\n<!-- id:2 priority:low created:2025-01-02T00:00:00+00:00 updated:2025-01-03T00:00:00+00:00 -->\n";
+        std::fs::write(&md_path, content).unwrap();
+
+        let tf = load(&db_path).unwrap();
+        assert_eq!(tf.tasks.len(), 2);
+        assert_eq!(tf.next_id, 3);
+        let task_a = tf.tasks.iter().find(|t| t.id == 1).unwrap();
+        assert_eq!(task_a.title, "Task A");
+        assert_eq!(task_a.priority, Priority::High);
+        assert_eq!(task_a.tags, vec!["x", "y"]);
+        assert_eq!(task_a.description, Some("Description here.".to_string()));
+
+        // tasks.md is left untouched
+        assert!(md_path.exists());
+        assert_eq!(std::fs::read_to_string(&md_path).unwrap(), content);
+    }
+
+    #[test]
+    fn test_load_no_markdown_no_db_creates_empty() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("tasks.db");
+        let tf = load(&db_path).unwrap();
+        assert!(tf.tasks.is_empty());
+        assert!(db_path.exists());
+    }
+
+    #[test]
+    fn test_load_does_not_remigrate_once_db_exists() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("tasks.db");
+        let md_path = dir.path().join("tasks.md");
+        std::fs::write(&md_path, "<!-- format:2 -->\n<!-- next-id:2 -->\n\n# Tasks\n\n## [ ] From markdown\n<!-- id:1 priority:medium created:2025-01-01T00:00:00+00:00 -->\n").unwrap();
+
+        // First load migrates.
+        load(&db_path).unwrap();
+
+        // Now save an empty TaskFile directly to the DB (simulating the user deleting the task).
+        save(&db_path, &TaskFile::new()).unwrap();
+
+        // A second load must NOT re-migrate from tasks.md (which still has the old task).
+        let tf = load(&db_path).unwrap();
+        assert!(tf.tasks.is_empty());
     }
 }
