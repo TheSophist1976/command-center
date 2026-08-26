@@ -93,11 +93,11 @@ pub fn list(path: &Path, args: ListArgs) -> Result<String, (i32, String)> {
     let mut tasks: Vec<&Task> = task_file
         .tasks
         .iter()
-        .filter(|t| status_filter.map_or(true, |s| t.status == s))
-        .filter(|t| args.agent.as_deref().map_or(true, |a| t.agent.as_deref() == Some(a)))
-        .filter(|t| args.project.as_deref().map_or(true, |p| t.project.as_deref() == Some(p)))
-        .filter(|t| args.tag.as_deref().map_or(true, |tag| t.tags.iter().any(|x| x == tag)))
-        .filter(|t| due_before.map_or(true, |d| t.due_date.map_or(false, |td| td <= d)))
+        .filter(|t| status_filter.is_none_or(|s| t.status == s))
+        .filter(|t| args.agent.as_deref().is_none_or(|a| t.agent.as_deref() == Some(a)))
+        .filter(|t| args.project.as_deref().is_none_or(|p| t.project.as_deref() == Some(p)))
+        .filter(|t| args.tag.as_deref().is_none_or(|tag| t.tags.iter().any(|x| x == tag)))
+        .filter(|t| due_before.is_none_or(|d| t.due_date.is_some_and(|td| td <= d)))
         .collect();
 
     tasks.sort_by(|a, b| {
