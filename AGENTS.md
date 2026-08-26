@@ -1,8 +1,8 @@
 # Tasks File — AI Instructions
 
-**Before modifying `tasks.md`, read this file in full.**
+**Before working with tasks, read this file in full.**
 
-This document describes the exact format of `tasks.md`, the rules for safely reading and modifying it, and how to find the tasks assigned to you.
+This document describes how to work with tasks via the `task` CLI (tasks are stored in a SQLite database, `tasks.db`), and how to find the tasks assigned to you.
 
 ---
 
@@ -18,7 +18,7 @@ Tasks can be assigned to specific AI agents using the `agent` field in the task 
    ```
 3. **Expand tildes** in directory paths (replace `~` with your home directory)
 4. **Find the profile whose directory is a prefix of your current working directory** — use the longest match if multiple profiles match
-5. **Filter `tasks.md`** to tasks where `agent:<your-profile-name>` appears in the metadata comment
+5. **Filter tasks to those assigned to you** by running `task list --agent <your-profile-name>`
 
 **Example**: If your CWD is `/Users/mark/code/command-center/src` and a profile exists with dir `/Users/mark/code/command-center`, your agent name is `command-center`. Work only on tasks with `agent:command-center` in their metadata.
 
@@ -96,8 +96,6 @@ task agent memory <name> edit --body "<updated content>"
 ## TUI Auto-Filter
 
 When `task-tui` is launched from your project directory, it automatically applies a filter showing only tasks assigned to your agent. You will see `filter: agent:<name>` in the header. Press `Esc` to clear the filter and see all tasks.
-
----
 
 ---
 
