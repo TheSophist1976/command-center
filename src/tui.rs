@@ -2607,17 +2607,33 @@ fn draw(frame: &mut Frame, app: &mut App) {
     }
 }
 
+fn header_title(view_label: &str, active_filter_summary: Option<&str>) -> String {
+    match active_filter_summary {
+        Some(summary) => format!(
+            " task-manager v{}  |  {}  |  filter: {} ",
+            env!("CARGO_PKG_VERSION"),
+            view_label,
+            summary
+        ),
+        None => format!(" task-manager v{}  |  {} ", env!("CARGO_PKG_VERSION"), view_label),
+    }
+}
+
 fn draw_header(frame: &mut Frame, app: &App, area: Rect) {
     let view_label = if app.view == View::Due {
         format!("Due [{}]", app.due_window.label())
     } else {
         app.view.display_name().to_string()
     };
-    let title = if app.filter.is_active() {
-        format!(" task-manager  |  {}  |  filter: {} ", view_label, app.filter.summary())
+    let filter_summary = if app.filter.is_active() {
+        Some(app.filter.summary())
     } else {
-        format!(" task-manager  |  {} ", view_label)
+        None
     };
+    let title = header_title(
+        &view_label,
+        filter_summary.as_deref(),
+    );
     let header = Paragraph::new(title).style(
         Style::default()
             .fg(theme::BAR_FG)
@@ -2625,6 +2641,25 @@ fn draw_header(frame: &mut Frame, app: &App, area: Rect) {
             .add_modifier(Modifier::BOLD),
     );
     frame.render_widget(header, area);
+}
+
+#[cfg(test)]
+mod header_tests {
+    use super::*;
+
+    #[test]
+    fn test_header_title_includes_version() {
+        let title = header_title("Due [Overdue]", None);
+        assert!(title.contains(env!("CARGO_PKG_VERSION")));
+        assert!(title.starts_with(" task-manager v"));
+    }
+
+    #[test]
+    fn test_header_title_includes_filter_when_active() {
+        let title = header_title("Recurring", Some("agent:bot"));
+        assert!(title.contains("filter: agent:bot"));
+        assert!(title.contains(env!("CARGO_PKG_VERSION")));
+    }
 }
 
 fn format_recurrence_display(r: &crate::task::Recurrence) -> String {
