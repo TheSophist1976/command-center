@@ -3,7 +3,6 @@ use std::process;
 use clap::Parser;
 
 use task::cli::{AgentCommand, AgentInstructionsCommand, AgentMemoryCommand, AuthCommand, Cli, Command, ConfigCommand, NoteCommand};
-use std::str::FromStr;
 
 fn main() {
     let cli = Cli::parse();
@@ -193,45 +192,46 @@ fn run(cli: Cli) -> Result<(), (i32, String)> {
         }
 
         Some(Command::Add { title, priority, due, project, tags, agent, description }) => {
-            let mut task_file = task::db::load(&path).map_err(|e| (1, e))?;
+            let msg = task::commands::add(&path, task::commands::AddArgs {
+                title, priority, due, project, tags, agent, description,
+            })?;
+            println!("{}", msg);
+            Ok(())
+        }
 
-            let priority_parsed = task::task::Priority::from_str(&priority)
-                .map_err(|e| (1, e))?;
+        Some(Command::List { status, agent, project, tag, due_before }) => {
+            let msg = task::commands::list(&path, task::commands::ListArgs {
+                status, agent, project, tag, due_before,
+            })?;
+            println!("{}", msg);
+            Ok(())
+        }
 
-            let today = chrono::Local::now().date_naive();
-            let due_date = due.as_deref().and_then(|d| task::parser::parse_due_date_input(d, today));
+        Some(Command::Show { id }) => {
+            println!("{}", task::commands::show(&path, id)?);
+            Ok(())
+        }
 
-            let tag_list: Vec<String> = tags
-                .as_deref()
-                .unwrap_or("")
-                .split(',')
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty())
-                .collect();
+        Some(Command::Edit { id, title, priority, due, project, tags, agent, description, effort }) => {
+            let msg = task::commands::edit(&path, id, task::commands::EditArgs {
+                title, priority, due, project, tags, agent, description, effort,
+            })?;
+            println!("{}", msg);
+            Ok(())
+        }
 
-            let id = task_file.next_id;
-            task_file.next_id += 1;
+        Some(Command::Done { id }) => {
+            println!("{}", task::commands::done(&path, id)?);
+            Ok(())
+        }
 
-            let new_task = task::task::Task {
-                id,
-                title: title.clone(),
-                status: task::task::Status::Open,
-                priority: priority_parsed,
-                tags: tag_list,
-                created: chrono::Utc::now(),
-                updated: None,
-                description,
-                due_date,
-                project,
-                recurrence: None,
-                notes: Vec::new(),
-                agent,
-                effort: None,
-            };
+        Some(Command::Reopen { id }) => {
+            println!("{}", task::commands::reopen(&path, id)?);
+            Ok(())
+        }
 
-            task_file.tasks.push(new_task);
-            task::db::save(&path, &task_file).map_err(|e| (1, e))?;
-            println!("Created task {}: {}", id, title);
+        Some(Command::Rm { id }) => {
+            println!("{}", task::commands::rm(&path, id)?);
             Ok(())
         }
 

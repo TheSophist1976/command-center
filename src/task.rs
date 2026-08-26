@@ -324,7 +324,6 @@ impl TaskFile {
         }
     }
 
-    #[cfg(test)]
     pub fn find_task(&self, id: u32) -> Option<&Task> {
         self.tasks.iter().find(|t| t.id == id)
     }
@@ -333,7 +332,6 @@ impl TaskFile {
         self.tasks.iter_mut().find(|t| t.id == id)
     }
 
-    #[cfg(test)]
     pub fn remove_task(&mut self, id: u32) -> Option<Task> {
         if let Some(pos) = self.tasks.iter().position(|t| t.id == id) {
             Some(self.tasks.remove(pos))

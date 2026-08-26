@@ -69,6 +69,83 @@ pub enum Command {
         #[arg(long)]
         description: Option<String>,
     },
+
+    /// List tasks
+    List {
+        /// Filter by status: open or done
+        #[arg(long)]
+        status: Option<String>,
+
+        /// Filter by assigned agent
+        #[arg(long)]
+        agent: Option<String>,
+
+        /// Filter by project
+        #[arg(long)]
+        project: Option<String>,
+
+        /// Filter by a single tag
+        #[arg(long)]
+        tag: Option<String>,
+
+        /// Only show tasks due on or before this date (YYYY-MM-DD)
+        #[arg(long)]
+        due_before: Option<String>,
+    },
+
+    /// Show a task's full detail
+    Show {
+        /// Task id
+        id: u32,
+    },
+
+    /// Edit a task
+    Edit {
+        /// Task id
+        id: u32,
+
+        #[arg(long)]
+        title: Option<String>,
+
+        #[arg(short, long)]
+        priority: Option<String>,
+
+        #[arg(short, long)]
+        due: Option<String>,
+
+        #[arg(long)]
+        project: Option<String>,
+
+        #[arg(long)]
+        tags: Option<String>,
+
+        #[arg(long)]
+        agent: Option<String>,
+
+        #[arg(long)]
+        description: Option<String>,
+
+        #[arg(long)]
+        effort: Option<String>,
+    },
+
+    /// Mark a task done
+    Done {
+        /// Task id
+        id: u32,
+    },
+
+    /// Reopen a completed task
+    Reopen {
+        /// Task id
+        id: u32,
+    },
+
+    /// Delete a task
+    Rm {
+        /// Task id
+        id: u32,
+    },
 }
 
 #[derive(Subcommand)]
