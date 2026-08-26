@@ -466,3 +466,131 @@ fn test_agent_instructions_show_no_file() {
     assert!(out.status.success());
     assert!(stdout(&out).contains("No instructions found"));
 }
+
+// -- Task CRUD CLI tests --
+
+fn task_db_path(dir: &std::path::Path) -> std::path::PathBuf {
+    dir.join("tasks.db")
+}
+
+#[test]
+fn test_add_and_list() {
+    let dir = temp_dir();
+    let db_path = task_db_path(dir.path());
+
+    let out = task_bin()
+        .args(["--file", db_path.to_str().unwrap(), "add", "Buy milk", "--priority", "high"])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "add failed: {}", stderr(&out));
+    assert!(stdout(&out).contains("Created task 1: Buy milk"));
+
+    let out = task_bin()
+        .args(["--file", db_path.to_str().unwrap(), "list"])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "list failed: {}", stderr(&out));
+    assert!(stdout(&out).contains("Buy milk"));
+}
+
+#[test]
+fn test_list_no_tasks() {
+    let dir = temp_dir();
+    let db_path = task_db_path(dir.path());
+
+    let out = task_bin()
+        .args(["--file", db_path.to_str().unwrap(), "list"])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    assert!(stdout(&out).contains("No matching tasks."));
+}
+
+#[test]
+fn test_show_task() {
+    let dir = temp_dir();
+    let db_path = task_db_path(dir.path());
+    task_bin().args(["--file", db_path.to_str().unwrap(), "add", "Read a book"]).output().unwrap();
+
+    let out = task_bin()
+        .args(["--file", db_path.to_str().unwrap(), "show", "1"])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    assert!(stdout(&out).contains("Read a book"));
+}
+
+#[test]
+fn test_edit_task() {
+    let dir = temp_dir();
+    let db_path = task_db_path(dir.path());
+    task_bin().args(["--file", db_path.to_str().unwrap(), "add", "Original title"]).output().unwrap();
+
+    let out = task_bin()
+        .args(["--file", db_path.to_str().unwrap(), "edit", "1", "--title", "New title"])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "edit failed: {}", stderr(&out));
+    assert!(stdout(&out).contains("Updated task 1: New title"));
+}
+
+#[test]
+fn test_done_and_reopen_task() {
+    let dir = temp_dir();
+    let db_path = task_db_path(dir.path());
+    task_bin().args(["--file", db_path.to_str().unwrap(), "add", "Finish this"]).output().unwrap();
+
+    let out = task_bin().args(["--file", db_path.to_str().unwrap(), "done", "1"]).output().unwrap();
+    assert!(out.status.success());
+    assert!(stdout(&out).contains("Completed task 1"));
+
+    let out = task_bin()
+        .args(["--file", db_path.to_str().unwrap(), "list", "--status", "open"])
+        .output()
+        .unwrap();
+    assert!(!stdout(&out).contains("Finish this"));
+
+    let out = task_bin().args(["--file", db_path.to_str().unwrap(), "reopen", "1"]).output().unwrap();
+    assert!(out.status.success());
+    assert!(stdout(&out).contains("Reopened task 1"));
+}
+
+#[test]
+fn test_rm_task() {
+    let dir = temp_dir();
+    let db_path = task_db_path(dir.path());
+    task_bin().args(["--file", db_path.to_str().unwrap(), "add", "Delete me"]).output().unwrap();
+
+    let out = task_bin().args(["--file", db_path.to_str().unwrap(), "rm", "1"]).output().unwrap();
+    assert!(out.status.success());
+    assert!(stdout(&out).contains("Deleted task 1: Delete me"));
+
+    let out = task_bin().args(["--file", db_path.to_str().unwrap(), "list"]).output().unwrap();
+    assert!(stdout(&out).contains("No matching tasks."));
+}
+
+#[test]
+fn test_show_missing_task_fails() {
+    let dir = temp_dir();
+    let db_path = task_db_path(dir.path());
+
+    let out = task_bin().args(["--file", db_path.to_str().unwrap(), "show", "42"]).output().unwrap();
+    assert!(!out.status.success());
+    assert!(stderr(&out).contains("not found"));
+}
+
+#[test]
+fn test_migration_from_existing_markdown() {
+    let dir = temp_dir();
+    let md_path = dir.path().join("tasks.md");
+    let db_path = task_db_path(dir.path());
+    fs::write(&md_path, "<!-- format:2 -->\n<!-- next-id:2 -->\n\n# Tasks\n\n## [ ] Legacy task\n<!-- id:1 priority:medium created:2025-01-01T00:00:00+00:00 -->\n").unwrap();
+
+    let out = task_bin()
+        .args(["--file", db_path.to_str().unwrap(), "list"])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "list failed: {}", stderr(&out));
+    assert!(stdout(&out).contains("Legacy task"));
+    assert!(md_path.exists(), "tasks.md should be left in place after migration");
+}
