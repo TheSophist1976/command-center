@@ -23,7 +23,7 @@
 
 ---
 
-### Task 1: Add `rusqlite` dependency, remove `fs2`
+### Task 1: Add `rusqlite` dependency
 
 **Files:**
 - Modify: `Cargo.toml`
@@ -31,27 +31,27 @@
 **Interfaces:**
 - Produces: `rusqlite` crate available to all subsequent tasks via `use rusqlite::{...}`.
 
+**Note:** `fs2` is deliberately left in `Cargo.toml` for now — `src/storage.rs` still imports it and isn't deleted until Task 5. Removing `fs2` here would break the whole-crate build (and every later task's `cargo test`) for the entire span between this task and Task 5. `fs2` removal happens in Task 5, right after `storage.rs` is deleted.
+
 - [ ] **Step 1: Edit `Cargo.toml`**
 
-In the `[dependencies]` table, replace the `fs2 = "0.4"` line with:
+In the `[dependencies]` table, add `rusqlite` below the existing `fs2 = "0.4"` line (leave `fs2` in place):
 
 ```toml
 rusqlite = { version = "0.32", features = ["bundled"] }
 ```
 
-- [ ] **Step 2: Build to fetch the new dependency and confirm nothing references `fs2` yet**
+- [ ] **Step 2: Build to fetch the new dependency**
 
 Run: `cargo build --features tui`
-Expected: builds successfully (no code references `rusqlite` yet, and `fs2`'s only usage in `src/storage.rs` still compiles since we haven't touched it — wait, `fs2` was removed from `Cargo.toml` but `src/storage.rs` still does `use fs2::FileExt;`). Expected instead: **build fails** with `error[E0432]: unresolved import 'fs2'` in `src/storage.rs`. This is expected and confirms `storage.rs` is the only `fs2` consumer — it gets replaced in Task 5.
+Expected: builds successfully — `rusqlite` is now a fetched, compiled dependency, and `fs2` still resolves normally since `storage.rs` is untouched.
 
 - [ ] **Step 3: Commit**
 
 ```bash
 git add Cargo.toml Cargo.lock
-git commit -m "build: swap fs2 for rusqlite ahead of SQLite storage backend"
+git commit -m "build: add rusqlite dependency ahead of SQLite storage backend"
 ```
-
-(The build failure from Step 2 is expected and resolved by Task 5; do not attempt to fix `storage.rs` in this task.)
 
 ---
 
@@ -426,7 +426,7 @@ pub mod task;
 - [ ] **Step 6: Run the full test suite to confirm nothing else broke**
 
 Run: `cargo build --features tui && cargo test --lib`
-Expected: PASS (note: `storage.rs` still references the now-removed `fs2` crate, so this step is expected to fail the same way as Task 1 Step 2 until Task 5 — confirm the *only* failure is the `fs2` import error in `storage.rs`, and `db.rs` tests pass when run in isolation per Step 4).
+Expected: PASS — the whole crate (including `storage.rs`, still present and unmodified) builds and all existing tests plus the new `db.rs` tests pass. `storage.rs` and `db.rs` coexist until Task 5 cuts callers over and deletes `storage.rs`.
 
 - [ ] **Step 7: Commit**
 
@@ -819,7 +819,17 @@ grep -n "storage::" src/todoist.rs
 
 `todoist.rs` uses `TaskFile` directly but check for any `storage::load`/`storage::save` calls in its non-test code and its `#[cfg(test)]` module; apply the same `storage::` → `db::` substitution and drop the `strict` bool argument from any `load` calls found.
 
-- [ ] **Step 6: Full workspace build and test**
+- [ ] **Step 6: Remove the now-unused `fs2` dependency**
+
+Confirm nothing but the just-deleted `storage.rs` ever used it:
+
+```bash
+grep -rn "fs2" src/
+```
+
+Expected: no output. In `Cargo.toml`, delete the `fs2 = "0.4"` line from `[dependencies]` (leave the `rusqlite` line added in Task 1 in place).
+
+- [ ] **Step 7: Full workspace build and test**
 
 Run: `cargo build --features tui`
 Expected: builds cleanly, no references to `fs2` or `storage` remain.
@@ -827,7 +837,7 @@ Expected: builds cleanly, no references to `fs2` or `storage` remain.
 Run: `cargo test --features tui`
 Expected: All tests pass. If any test still references `tasks.md` paths or the old `storage` module name, update them to `tasks.db` / `db` to match.
 
-- [ ] **Step 7: Commit**
+- [ ] **Step 8: Commit**
 
 ```bash
 git add -A
