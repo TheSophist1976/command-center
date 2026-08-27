@@ -7,7 +7,7 @@ use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Json, Response};
 use axum::routing::get;
 use axum::Router;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::str::FromStr;
 
 use crate::commands::filter_and_sort_tasks;
@@ -106,11 +106,81 @@ async fn get_task(
         .ok_or_else(|| app_error(StatusCode::NOT_FOUND, format!("Task {} not found", id)))
 }
 
+#[derive(Deserialize)]
+pub struct AddTaskRequest {
+    pub title: String,
+    pub priority: Option<String>,
+    pub due: Option<String>,
+    pub project: Option<String>,
+    pub tags: Option<String>,
+    pub agent: Option<String>,
+    pub description: Option<String>,
+}
+
+#[derive(Serialize)]
+pub struct AgentProfile {
+    pub name: String,
+    pub dir: String,
+}
+
+fn parse_csv(s: Option<&str>) -> Vec<String> {
+    s.unwrap_or("")
+        .split(',')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect()
+}
+
+async fn add_task(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<AddTaskRequest>,
+) -> Result<Json<Task>, (StatusCode, Json<serde_json::Value>)> {
+    let mut task_file = db::load(&state.db_path)
+        .map_err(|e| app_error(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+
+    let priority_str = req.priority.as_deref().unwrap_or("medium");
+    let priority = crate::task::Priority::from_str(priority_str)
+        .map_err(|e| app_error(StatusCode::BAD_REQUEST, e))?;
+    let today = chrono::Local::now().date_naive();
+    let due_date = req.due.as_deref().and_then(|d| crate::parser::parse_due_date_input(d, today));
+
+    let id = task_file.next_id;
+    task_file.next_id += 1;
+    let new_task = Task {
+        id,
+        title: req.title,
+        status: Status::Open,
+        priority,
+        tags: parse_csv(req.tags.as_deref()),
+        created: chrono::Utc::now(),
+        updated: None,
+        description: req.description,
+        due_date,
+        project: req.project,
+        recurrence: None,
+        notes: Vec::new(),
+        agent: req.agent,
+        effort: None,
+    };
+    task_file.tasks.push(new_task.clone());
+    db::save(&state.db_path, &task_file).map_err(|e| app_error(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    Ok(Json(new_task))
+}
+
+async fn list_agents() -> Json<Vec<AgentProfile>> {
+    let profiles = crate::config::list_agent_profiles()
+        .into_iter()
+        .map(|(name, dir)| AgentProfile { name, dir })
+        .collect();
+    Json(profiles)
+}
+
 pub fn router(state: AppState) -> Router {
     let state = Arc::new(state);
     Router::new()
-        .route("/api/tasks", get(list_tasks))
+        .route("/api/tasks", get(list_tasks).post(add_task))
         .route("/api/tasks/:id", get(get_task))
+        .route("/api/agents", get(list_agents))
         .layer(middleware::from_fn(validate_host))
         .with_state(state)
 }
@@ -272,6 +342,75 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn test_add_task_creates_and_returns_task() {
+        let (_dir, state) = make_state();
+        let app = router(state);
+        let body = serde_json::json!({ "title": "New task", "priority": "high" });
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/tasks")
+                    .header("host", "127.0.0.1")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let json = body_json(response).await;
+        assert_eq!(json["title"], "New task");
+        assert_eq!(json["priority"], "high");
+        assert_eq!(json["id"], 1);
+    }
+
+    #[tokio::test]
+    async fn test_add_task_invalid_priority_returns_400() {
+        let (_dir, state) = make_state();
+        let app = router(state);
+        let body = serde_json::json!({ "title": "Bad", "priority": "urgent" });
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/tasks")
+                    .header("host", "127.0.0.1")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn test_list_agents_returns_configured_profiles() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("tasks.db");
+        let config_path = dir.path().join("config.md");
+        std::fs::write(&config_path, "agent-bot: /code/bot\n").unwrap();
+        unsafe { std::env::set_var("TASK_CONFIG_FILE", &config_path) };
+        let app = router(AppState { db_path });
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/agents")
+                    .header("host", "127.0.0.1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        unsafe { std::env::remove_var("TASK_CONFIG_FILE") };
+        assert_eq!(response.status(), StatusCode::OK);
+        let json = body_json(response).await;
+        assert_eq!(json[0]["name"], "bot");
+        assert_eq!(json[0]["dir"], "/code/bot");
     }
 
     #[tokio::test]
