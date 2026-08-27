@@ -247,6 +247,76 @@ async fn edit_task(
     Ok(Json(updated_task))
 }
 
+#[derive(Serialize)]
+pub struct DoneResponse {
+    pub completed: Task,
+    pub spawned: Option<Task>,
+}
+
+async fn done_task(
+    State(state): State<Arc<AppState>>,
+    AxumPath(id): AxumPath<u32>,
+) -> Result<Json<DoneResponse>, (StatusCode, Json<serde_json::Value>)> {
+    let mut task_file = db::load(&state.db_path)
+        .map_err(|e| app_error(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    let idx = task_file
+        .tasks
+        .iter()
+        .position(|t| t.id == id)
+        .ok_or_else(|| app_error(StatusCode::NOT_FOUND, format!("Task {} not found", id)))?;
+
+    task_file.tasks[idx].status = Status::Done;
+    task_file.tasks[idx].updated = Some(chrono::Utc::now());
+
+    let mut spawned = None;
+    if let Some(recur) = task_file.tasks[idx].recurrence {
+        let parent = task_file.tasks[idx].clone();
+        let next_due = crate::task::next_due_date(&recur, parent.due_date);
+        let new_id = task_file.next_id;
+        task_file.next_id += 1;
+        let new_task = Task {
+            id: new_id,
+            title: parent.title.clone(),
+            status: Status::Open,
+            priority: parent.priority,
+            tags: parent.tags.clone(),
+            created: chrono::Utc::now(),
+            updated: None,
+            description: parent.description.clone(),
+            due_date: Some(next_due),
+            project: parent.project.clone(),
+            recurrence: Some(recur),
+            notes: parent.notes.clone(),
+            agent: parent.agent.clone(),
+            effort: parent.effort,
+        };
+        task_file.tasks.push(new_task.clone());
+        spawned = Some(new_task);
+    }
+
+    let completed = task_file.tasks[idx].clone();
+    db::save(&state.db_path, &task_file).map_err(|e| app_error(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    Ok(Json(DoneResponse { completed, spawned }))
+}
+
+async fn reopen_task(
+    State(state): State<Arc<AppState>>,
+    AxumPath(id): AxumPath<u32>,
+) -> Result<Json<Task>, (StatusCode, Json<serde_json::Value>)> {
+    let mut task_file = db::load(&state.db_path)
+        .map_err(|e| app_error(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    let updated_task = {
+        let t = task_file
+            .find_task_mut(id)
+            .ok_or_else(|| app_error(StatusCode::NOT_FOUND, format!("Task {} not found", id)))?;
+        t.status = Status::Open;
+        t.updated = Some(chrono::Utc::now());
+        t.clone()
+    };
+    db::save(&state.db_path, &task_file).map_err(|e| app_error(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    Ok(Json(updated_task))
+}
+
 async fn list_agents() -> Json<Vec<AgentProfile>> {
     let profiles = crate::config::list_agent_profiles()
         .into_iter()
@@ -260,6 +330,8 @@ pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/api/tasks", get(list_tasks).post(add_task))
         .route("/api/tasks/:id", get(get_task).patch(edit_task))
+        .route("/api/tasks/:id/done", axum::routing::post(done_task))
+        .route("/api/tasks/:id/reopen", axum::routing::post(reopen_task))
         .route("/api/agents", get(list_agents))
         .layer(middleware::from_fn(validate_host))
         .with_state(state)
@@ -566,5 +638,97 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn test_done_task_marks_status_done() {
+        let (_dir, state) = make_state();
+        {
+            let mut tf = crate::task::TaskFile::new();
+            tf.tasks.push(crate::task::Task {
+                id: 1, title: "Finish me".to_string(), status: Status::Open, priority: crate::task::Priority::Medium,
+                tags: Vec::new(), created: chrono::Utc::now(), updated: None, description: None,
+                due_date: None, project: None, recurrence: None, notes: Vec::new(), agent: None, effort: None,
+            });
+            db::save(&state.db_path, &tf).unwrap();
+        }
+        let app = router(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/tasks/1/done")
+                    .header("host", "127.0.0.1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let json = body_json(response).await;
+        assert_eq!(json["completed"]["status"], "done");
+        assert!(json["spawned"].is_null());
+    }
+
+    #[tokio::test]
+    async fn test_done_task_recurring_spawns_next_occurrence() {
+        let (_dir, state) = make_state();
+        {
+            let mut tf = crate::task::TaskFile::new();
+            tf.tasks.push(crate::task::Task {
+                id: 1, title: "Recurring".to_string(), status: Status::Open, priority: crate::task::Priority::Medium,
+                tags: Vec::new(), created: chrono::Utc::now(), updated: None, description: None,
+                due_date: chrono::NaiveDate::from_ymd_opt(2026, 1, 5), project: None,
+                recurrence: Some(crate::task::Recurrence::from_str("weekly").unwrap()),
+                notes: Vec::new(), agent: None, effort: None,
+            });
+            db::save(&state.db_path, &tf).unwrap();
+        }
+        let app = router(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/tasks/1/done")
+                    .header("host", "127.0.0.1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let json = body_json(response).await;
+        assert_eq!(json["completed"]["status"], "done");
+        assert_eq!(json["spawned"]["id"], 2);
+        assert_eq!(json["spawned"]["due_date"], "2026-01-12");
+    }
+
+    #[tokio::test]
+    async fn test_reopen_task_sets_status_open() {
+        let (_dir, state) = make_state();
+        {
+            let mut tf = crate::task::TaskFile::new();
+            tf.tasks.push(crate::task::Task {
+                id: 1, title: "Reopen me".to_string(), status: Status::Done, priority: crate::task::Priority::Medium,
+                tags: Vec::new(), created: chrono::Utc::now(), updated: None, description: None,
+                due_date: None, project: None, recurrence: None, notes: Vec::new(), agent: None, effort: None,
+            });
+            db::save(&state.db_path, &tf).unwrap();
+        }
+        let app = router(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/tasks/1/reopen")
+                    .header("host", "127.0.0.1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let json = body_json(response).await;
+        assert_eq!(json["status"], "open");
     }
 }
