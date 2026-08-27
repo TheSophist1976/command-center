@@ -1,12 +1,26 @@
 import { useEffect, useMemo, useState } from 'react';
 import './tokens.css';
-import { Terminal, Sun, CalendarDays, Settings } from 'lucide-react';
+import { Terminal, Sun, CalendarDays, Settings, Search } from 'lucide-react';
 import { Button } from './components/Button';
 import { NewTaskForm } from './components/NewTaskForm';
-import { fetchTasks, fetchAgents, addTask, markDone, reopenTask, deleteTask } from './api';
+import { EditableField, FieldRow } from './components/EditableField';
+import { fetchTasks, fetchAgents, addTask, editTask, markDone, reopenTask, deleteTask } from './api';
 import type { Task, AgentProfile } from './types';
 import { countAllOpen } from './dueWindow';
 import { statusFor, statusColor } from './mockAgentStatus';
+
+const PRIORITY_OPTIONS = [
+  { value: 'critical', label: 'Critical' },
+  { value: 'high', label: 'High' },
+  { value: 'medium', label: 'Medium' },
+  { value: 'low', label: 'Low' },
+];
+
+const EFFORT_OPTIONS = [
+  { value: 'high', label: 'High' },
+  { value: 'medium', label: 'Medium' },
+  { value: 'low', label: 'Low' },
+];
 
 function groupByAgent(tasks: Task[]): Map<string, Task[]> {
   const groups = new Map<string, Task[]>();
@@ -31,6 +45,7 @@ export default function App() {
   const [selected, setSelected] = useState<Task | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [showNewTaskForm, setShowNewTaskForm] = useState(false);
+  const [search, setSearch] = useState('');
 
   useEffect(() => {
     Promise.all([fetchTasks(), fetchAgents()])
@@ -84,7 +99,23 @@ export default function App() {
     }
   }
 
-  const grouped = useMemo(() => groupByAgent(tasks), [tasks]);
+  async function handleEditField(id: number, changes: Parameters<typeof editTask>[1]) {
+    try {
+      const updated = await editTask(id, changes);
+      setTasks((prev) => prev.map((t) => (t.id === updated.id ? updated : t)));
+      setSelected(updated);
+    } catch (e) {
+      setError(String(e));
+    }
+  }
+
+  const filteredTasks = useMemo(() => {
+    const q = search.trim().toLowerCase();
+    if (!q) return tasks;
+    return tasks.filter((t) => t.title.toLowerCase().includes(q));
+  }, [tasks, search]);
+
+  const grouped = useMemo(() => groupByAgent(filteredTasks), [filteredTasks]);
   const todayCount = useMemo(() => countAllOpen(tasks), [tasks]);
 
   return (
@@ -133,6 +164,15 @@ export default function App() {
         <header style={{ height: 72, flex: 'none', padding: '0 24px', borderBottom: '1px solid var(--hairline)', display: 'flex', alignItems: 'center', gap: 16 }}>
           <span style={{ fontFamily: 'var(--font-display)', fontWeight: 600, fontSize: 22 }}>All tasks</span>
           <div style={{ flex: 1 }} />
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, height: 34, padding: '0 12px', border: '1px solid var(--hairline)', borderRadius: 5, background: 'var(--ink-2)', width: 240 }}>
+            <Search size={14} color="var(--fg-4)" />
+            <input
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              placeholder="Search tasks…"
+              style={{ flex: 1, background: 'transparent', border: 'none', outline: 'none', color: 'var(--fg-1)', fontSize: 13 }}
+            />
+          </div>
           {showNewTaskForm ? (
             <NewTaskForm onSubmit={handleAddTask} onCancel={() => setShowNewTaskForm(false)} />
           ) : (
@@ -195,9 +235,26 @@ export default function App() {
               fontFamily: 'var(--font-display)', fontWeight: 600, fontSize: 20, color: 'var(--fg-1)', marginBottom: 12,
               textDecoration: selected.status === 'done' ? 'line-through' : 'none',
             }}>
-              {selected.title}
+              <EditableField
+                value={selected.title}
+                onSave={(v) => v.trim() && handleEditField(selected.id, { title: v.trim() })}
+              />
             </div>
-            <div style={{ fontSize: 13, color: 'var(--fg-3)' }}>#{selected.id} · {selected.priority} · {selected.status}</div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 13, color: 'var(--fg-3)' }}>
+              <span>#{selected.id} ·</span>
+              <EditableField
+                value={selected.priority}
+                type="select"
+                options={PRIORITY_OPTIONS}
+                onSave={(v) => handleEditField(selected.id, { priority: v })}
+                display={
+                  <span style={{ color: priorityColor[selected.priority], fontWeight: 700, fontSize: 11, textTransform: 'uppercase' }}>
+                    {selected.priority}
+                  </span>
+                }
+              />
+              <span>· {selected.status}</span>
+            </div>
             <div style={{ display: 'flex', gap: 8, marginTop: 12, marginBottom: 20 }}>
               {selected.status === 'open' ? (
                 <Button size="sm" onClick={() => handleMarkDone(selected)}>Mark done</Button>
@@ -206,6 +263,60 @@ export default function App() {
               )}
               <Button size="sm" variant="secondary" onClick={() => handleDelete(selected)}>Delete</Button>
             </div>
+
+            <div style={{ display: 'flex', flexDirection: 'column', marginBottom: 20 }}>
+              <FieldRow label="Due">
+                <EditableField
+                  value={selected.due_date ?? ''}
+                  type="date"
+                  placeholder="No due date"
+                  onSave={(v) => handleEditField(selected.id, { due: v })}
+                />
+              </FieldRow>
+              <FieldRow label="Effort">
+                <EditableField
+                  value={selected.effort ?? 'medium'}
+                  type="select"
+                  options={EFFORT_OPTIONS}
+                  onSave={(v) => handleEditField(selected.id, { effort: v })}
+                  display={selected.effort ?? '—'}
+                />
+              </FieldRow>
+              <FieldRow label="Project">
+                <EditableField
+                  value={selected.project ?? ''}
+                  placeholder="No project"
+                  onSave={(v) => handleEditField(selected.id, { project: v })}
+                />
+              </FieldRow>
+              <FieldRow label="Agent">
+                <EditableField
+                  value={selected.agent ?? ''}
+                  placeholder="Unassigned"
+                  onSave={(v) => handleEditField(selected.id, { agent: v })}
+                />
+              </FieldRow>
+              <FieldRow label="Tags">
+                <EditableField
+                  value={selected.tags.join(', ')}
+                  placeholder="No tags"
+                  onSave={(v) => handleEditField(selected.id, { tags: v })}
+                  display={selected.tags.length ? selected.tags.join(', ') : undefined}
+                />
+              </FieldRow>
+              <FieldRow label="Recurrence">
+                <span style={{ color: 'var(--fg-4)' }}>{selected.recurrence ?? 'None'}</span>
+              </FieldRow>
+              <FieldRow label="Description">
+                <EditableField
+                  value={selected.description ?? ''}
+                  type="textarea"
+                  placeholder="No description"
+                  onSave={(v) => handleEditField(selected.id, { description: v })}
+                />
+              </FieldRow>
+            </div>
+
             {selected.agent && statusFor(selected.agent).state === 'waiting' && (
               <div style={{ marginTop: 'auto', paddingTop: 20, borderTop: '1px solid var(--hairline)' }}>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10 }}>
