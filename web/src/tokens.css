@@ -1,0 +1,56 @@
+:root {
+  /* Surfaces */
+  --ink: #00001E;
+  --ink-2: #020224;
+  --ink-3: #09163B;
+
+  /* Hairlines */
+  --hairline: rgba(255, 255, 255, 0.10);
+  --hairline-soft: rgba(255, 255, 255, 0.06);
+
+  /* Foreground (descending opacity) */
+  --fg-1: #FFFFFF;
+  --fg-2: rgba(255, 255, 255, 0.85);
+  --fg-3: rgba(255, 255, 255, 0.65);
+  --fg-4: rgba(255, 255, 255, 0.5);
+  --fg-5: rgba(255, 255, 255, 0.3);
+
+  /* Brand / semantic */
+  --magenta: #FF0095;
+  --cyan: #0099FF;
+  --teal: #00F3DB;
+  --citrine: #F5C518;
+  --danger: #E5484D;
+
+  /* Type */
+  --font-display: system-ui, -apple-system, sans-serif;
+  --font-body: system-ui, -apple-system, sans-serif;
+  --font-mono: ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+
+  /* Spacing (4px base) */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-6: 24px;
+  --space-8: 32px;
+
+  /* Radius */
+  --radius-xs: 2px;
+  --radius-sm: 5px;
+  --radius-md: 8px;
+  --radius-pill: 999px;
+}
+
+* { box-sizing: border-box; }
+
+html, body, #root {
+  margin: 0;
+  height: 100%;
+  background: var(--ink);
+  font-family: var(--font-body);
+  color: var(--fg-1);
+}
+
+a { color: var(--magenta); text-decoration: none; }
+a:hover { color: #CC0077; }
