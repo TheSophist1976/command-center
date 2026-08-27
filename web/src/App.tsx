@@ -6,8 +6,18 @@ import { NewTaskForm } from './components/NewTaskForm';
 import { EditableField, FieldRow } from './components/EditableField';
 import { fetchTasks, fetchAgents, addTask, editTask, markDone, reopenTask, deleteTask } from './api';
 import type { Task, AgentProfile } from './types';
-import { countAllOpen } from './dueWindow';
+import { countDueWindow, dueMatches, startOfToday, type DueWindow } from './dueWindow';
 import { statusFor, statusColor } from './mockAgentStatus';
+
+type DueFilter = DueWindow | 'all-tasks';
+
+const DUE_WINDOW_ITEMS: { value: DueFilter; label: string }[] = [
+  { value: 'day', label: 'Today' },
+  { value: 'week', label: 'This week' },
+  { value: 'month', label: 'This month' },
+  { value: 'year', label: 'This year' },
+  { value: 'all-tasks', label: 'All tasks' },
+];
 
 const PRIORITY_OPTIONS = [
   { value: 'critical', label: 'Critical' },
@@ -74,6 +84,8 @@ export default function App() {
   const [showNewTaskForm, setShowNewTaskForm] = useState(false);
   const [search, setSearch] = useState('');
   const [groupBy, setGroupBy] = useState<GroupBy>('agent');
+  const [dueFilter, setDueFilter] = useState<DueFilter>('all-tasks');
+  const today = useMemo(() => startOfToday(), []);
 
   useEffect(() => {
     Promise.all([fetchTasks(), fetchAgents()])
@@ -138,13 +150,18 @@ export default function App() {
   }
 
   const filteredTasks = useMemo(() => {
+    let result = tasks;
+    if (dueFilter !== 'all-tasks') {
+      result = result.filter((t) => dueMatches(t, today, dueFilter));
+    }
     const q = search.trim().toLowerCase();
-    if (!q) return tasks;
-    return tasks.filter((t) => t.title.toLowerCase().includes(q));
-  }, [tasks, search]);
+    if (q) {
+      result = result.filter((t) => t.title.toLowerCase().includes(q));
+    }
+    return result;
+  }, [tasks, dueFilter, search, today]);
 
   const grouped = useMemo(() => groupTasks(filteredTasks, groupBy), [filteredTasks, groupBy]);
-  const todayCount = useMemo(() => countAllOpen(tasks), [tasks]);
 
   return (
     <div style={{ display: 'flex', height: '100vh', overflow: 'hidden' }}>
@@ -160,16 +177,33 @@ export default function App() {
           </div>
           <span style={{ fontFamily: 'var(--font-display)', fontWeight: 700, fontSize: 14 }}>command center</span>
         </div>
-        <nav style={{ display: 'flex', flexDirection: 'column', padding: '0 10px', gap: 2 }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 10, height: 36, padding: '0 10px' }}>
-            <Sun size={16} color="var(--magenta)" />
-            <span style={{ flex: 1, fontSize: 14 }}>All open</span>
-            <span style={{ fontFamily: 'var(--font-mono)', fontSize: 12, color: 'var(--magenta)' }}>{todayCount}</span>
-          </div>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 10, height: 36, padding: '0 10px' }}>
-            <CalendarDays size={16} color="var(--fg-4)" />
-            <span style={{ flex: 1, fontSize: 14, color: 'var(--fg-3)' }}>Agents</span>
-          </div>
+        <div style={{ padding: '0 20px 8px', fontFamily: 'var(--font-display)', fontWeight: 700, fontSize: 11, letterSpacing: '0.08em', textTransform: 'uppercase', color: 'var(--fg-5)' }}>
+          Due window
+        </div>
+        <nav style={{ display: 'flex', flexDirection: 'column', padding: '0 10px', gap: 2, marginBottom: 12 }}>
+          {DUE_WINDOW_ITEMS.map((item) => {
+            const active = dueFilter === item.value;
+            const count = item.value === 'all-tasks' ? tasks.length : countDueWindow(tasks, today, item.value);
+            const Icon = item.value === 'day' ? Sun : CalendarDays;
+            return (
+              <div
+                key={item.value}
+                onClick={() => setDueFilter(item.value)}
+                style={{
+                  display: 'flex', alignItems: 'center', gap: 10, height: 36, padding: '0 10px',
+                  borderRadius: 5, cursor: 'pointer',
+                  background: active ? 'rgba(255,0,149,0.12)' : 'transparent',
+                  boxShadow: active ? '0 0 0 1px rgba(255,0,149,0.35)' : 'none',
+                }}
+              >
+                <Icon size={16} color={active ? 'var(--magenta)' : 'var(--fg-4)'} />
+                <span style={{ flex: 1, fontSize: 14, fontWeight: active ? 600 : 400, color: active ? 'var(--fg-1)' : 'var(--fg-3)' }}>
+                  {item.label}
+                </span>
+                <span style={{ fontFamily: 'var(--font-mono)', fontSize: 12, color: active ? 'var(--magenta)' : 'var(--fg-5)' }}>{count}</span>
+              </div>
+            );
+          })}
         </nav>
         <div style={{ padding: '8px 20px', display: 'flex', flexDirection: 'column', gap: 4 }}>
           {agents.map((a) => {
@@ -190,7 +224,9 @@ export default function App() {
 
       <main style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column' }}>
         <header style={{ height: 72, flex: 'none', padding: '0 24px', borderBottom: '1px solid var(--hairline)', display: 'flex', alignItems: 'center', gap: 16 }}>
-          <span style={{ fontFamily: 'var(--font-display)', fontWeight: 600, fontSize: 22 }}>All tasks</span>
+          <span style={{ fontFamily: 'var(--font-display)', fontWeight: 600, fontSize: 22 }}>
+            {DUE_WINDOW_ITEMS.find((i) => i.value === dueFilter)?.label ?? 'All tasks'}
+          </span>
           <div style={{ flex: 1 }} />
           <div style={{ display: 'flex', alignItems: 'center', gap: 8, height: 34, padding: '0 12px', border: '1px solid var(--hairline)', borderRadius: 5 }}>
             <span style={{ fontSize: 13, color: 'var(--fg-4)' }}>Group</span>
