@@ -5,6 +5,7 @@ import { Button } from './components/Button';
 import { fetchTasks, fetchAgents } from './api';
 import type { Task, AgentProfile } from './types';
 import { countAllOpen } from './dueWindow';
+import { statusFor, statusColor } from './mockAgentStatus';
 
 function groupByAgent(tasks: Task[]): Map<string, Task[]> {
   const groups = new Map<string, Task[]>();
@@ -67,12 +68,15 @@ export default function App() {
           </div>
         </nav>
         <div style={{ padding: '8px 20px', display: 'flex', flexDirection: 'column', gap: 4 }}>
-          {agents.map((a) => (
-            <div key={a.name} style={{ display: 'flex', alignItems: 'center', gap: 10, height: 28 }}>
-              <span style={{ width: 7, height: 7, borderRadius: 999, background: 'var(--fg-5)' }} />
-              <span style={{ fontFamily: 'var(--font-mono)', fontSize: 12.5, color: 'var(--fg-3)' }}>{a.name}</span>
-            </div>
-          ))}
+          {agents.map((a) => {
+            const status = statusFor(a.name);
+            return (
+              <div key={a.name} style={{ display: 'flex', alignItems: 'center', gap: 10, height: 28 }}>
+                <span style={{ width: 7, height: 7, borderRadius: 999, background: statusColor(status.state) }} />
+                <span style={{ fontFamily: 'var(--font-mono)', fontSize: 12.5, color: 'var(--fg-3)' }}>{a.name}</span>
+              </div>
+            );
+          })}
         </div>
         <div style={{ marginTop: 'auto', padding: '14px 20px 0', borderTop: '1px solid var(--hairline-soft)', display: 'flex', alignItems: 'center', gap: 10 }}>
           <Settings size={16} color="var(--fg-4)" />
@@ -138,6 +142,19 @@ export default function App() {
               {selected.title}
             </div>
             <div style={{ fontSize: 13, color: 'var(--fg-3)' }}>#{selected.id} · {selected.priority}</div>
+            {selected.agent && statusFor(selected.agent).state === 'waiting' && (
+              <div style={{ marginTop: 'auto', paddingTop: 20, borderTop: '1px solid var(--hairline)' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10 }}>
+                  <span style={{ width: 7, height: 7, borderRadius: 999, background: 'var(--citrine)' }} />
+                  <span style={{ fontFamily: 'var(--font-display)', fontWeight: 700, fontSize: 11, letterSpacing: '0.08em', textTransform: 'uppercase', color: 'var(--citrine)' }}>
+                    Agent waiting (preview — not yet live)
+                  </span>
+                </div>
+                <div style={{ padding: 14, borderRadius: 8, background: 'var(--ink-2)', border: '1px solid var(--hairline)', fontFamily: 'var(--font-mono)', fontSize: 12, color: 'var(--fg-2)' }}>
+                  {statusFor(selected.agent).detail ?? 'Waiting for input.'}
+                </div>
+              </div>
+            )}
           </>
         ) : (
           'Select a task'
