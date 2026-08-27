@@ -1,6 +1,6 @@
 # task
 
-A fast CLI task manager for developers and AI agents. Tasks are stored in a plain Markdown file that's human-readable, git-friendly, and easy for agents to parse.
+A fast CLI task manager for developers and AI agents. Tasks are stored in a local SQLite database (`tasks.db`). Notes remain plain Markdown files alongside it.
 
 ## Build
 
@@ -45,9 +45,21 @@ task-tui --file ~/projects/tasks.md
 | `task config set <key> <value>` | Set a configuration value |
 | `task config get <key>` | Get a configuration value |
 
+### Tasks
+
+| Command | Description |
+| --- | --- |
+| `task add "<title>" [--priority p] [--due date] [--project p] [--tags a,b] [--agent name] [--description "text"]` | Add a task (only title required; priority defaults to `medium`) |
+| `task list [--status open\|done] [--agent name] [--project name] [--tag t] [--due-before YYYY-MM-DD]` | List tasks, filtered |
+| `task show <id>` | Show full detail for one task |
+| `task edit <id> [--title] [--priority] [--due] [--project] [--tags] [--agent] [--description] [--effort]` | Edit a task — only the fields you pass are changed |
+| `task done <id>` | Mark done (spawns the next occurrence if the task recurs) |
+| `task reopen <id>` | Reopen a completed task |
+| `task rm <id>` | Delete a task |
+
 ### Notes
 
-Notes are stored in a `Notes/` subdirectory of the task file's directory.
+Notes are stored in a `Notes/` subdirectory alongside `tasks.db`.
 
 | Command | Description |
 | --- | --- |
@@ -65,7 +77,7 @@ Notes are stored in a `Notes/` subdirectory of the task file's directory.
 
 | Flag | Description |
 | --- | --- |
-| `--file <path>` | Use a custom task file (default: `tasks.md` in current directory) |
+| `--file <path>` | Use a custom task database (default: `tasks.db` in current directory) |
 
 ## Interactive TUI
 
@@ -201,7 +213,7 @@ Press `G` to cycle through groupings, or use `:group <field>` in command mode. G
 Task deletion is done via the CLI. There is no delete key in the TUI.
 
 ```sh
-# Delete by editing the tasks.md file directly, or use task delete if available
+task rm <id>
 ```
 
 ### Priority Levels
@@ -267,44 +279,49 @@ The most specific (longest-matching) directory wins when multiple profiles overl
 
 ## File Path Resolution
 
-The task file is resolved in this order:
+The task database is resolved in this order:
 
 1. `--file <path>` CLI flag
 2. `TASK_FILE` environment variable
-3. `default-dir` config value → `<dir>/tasks.md`
-4. `tasks.md` in the current directory
+3. `default-dir` config value → `<dir>/tasks.db`
+4. `tasks.db` in the current directory
 
-## File Format
+## Storage
 
-Tasks are stored as Markdown with metadata in HTML comments:
+Tasks are stored in a local SQLite database (`tasks.db`) — use the CLI or TUI for every read and write; don't edit it with a text editor or hand-written SQL. If a directory has an existing `tasks.md` (the old Markdown format) and no `tasks.db` yet, the first `task`/`task-tui` invocation in that directory migrates it automatically, once. The original `tasks.md` is left on disk afterward, untouched — the app just stops reading it going forward.
 
-```markdown
-<!-- format:1 -->
-<!-- next-id:4 -->
+Task fields: `id`, `title`, `status`, `priority`, `tags`, `due_date`, `project`, `recurrence`, `notes`, `agent`, `effort`, `description`, `created`, `updated`.
 
-# Tasks
+## Command Center Web
 
-## [ ] Build the login page
+A browser-based companion to the `task` CLI/TUI.
 
-<!-- id:1 priority:high tags:frontend,auth due:2026-03-15 agent:myapp created:2025-01-15T10:00:00Z updated:2025-01-16T09:00:00Z -->
-
-## [x] Set up CI pipeline
-
-<!-- id:2 priority:medium tags:infra recur:weekly created:2025-01-10T08:00:00Z -->
-
-## [ ] Write deployment docs
-
-<!-- id:3 priority:low note:deployment-guide created:2025-01-20T09:00:00Z -->
+**Development** (hot-reload frontend):
+```sh
+cargo run --bin task_server        # starts the API on http://127.0.0.1:4287
+cd web && npm install && npm run dev   # starts Vite dev server, proxies /api to task_server
 ```
 
-Metadata fields: `id`, `priority`, `tags`, `due`, `recur`, `note`, `project`, `agent`, `created`, `updated`.
+**Regular use** (single binary, built frontend):
+```sh
+cd web && npm install && npm run build   # produces web/dist/
+cd .. && cargo run --release --bin task_server
+# open http://127.0.0.1:4287
+```
 
-The file is safe to edit by hand. The parser is tolerant of formatting issues — malformed entries are skipped rather than causing errors.
+`task_server` resolves the task database the same way the CLI does (`--file`/`TASK_FILE`/`default-dir` config/`./tasks.db`). Override the port with `TASK_SERVER_PORT`. It binds to `127.0.0.1` only and validates the `Host` header on every request (including static file serving) to guard against DNS-rebinding attacks from other sites open in your browser — there's no other authentication, since this is a local, single-user tool.
+
+**Current scope:** table + inspector view of real tasks (the "1a" shell only — table + permanent detail panel, not the kanban-style board layout). Agent status shown in the sidebar and the inspector's "Agent waiting" panel is placeholder/mock data, clearly labeled "(preview — not yet live)" — it's not yet backed by real agent session state. No keyboard shortcuts, drag-and-drop, or in-browser note editing yet.
 
 ## Running Tests
 
 ```sh
 cargo test --features tui
+```
+
+Frontend build check:
+```sh
+cd web && npm run build
 ```
 
 ## License
