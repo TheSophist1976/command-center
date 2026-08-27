@@ -265,6 +265,10 @@ async fn done_task(
         .position(|t| t.id == id)
         .ok_or_else(|| app_error(StatusCode::NOT_FOUND, format!("Task {} not found", id)))?;
 
+    if task_file.tasks[idx].status == Status::Done {
+        return Ok(Json(DoneResponse { completed: task_file.tasks[idx].clone(), spawned: None }));
+    }
+
     task_file.tasks[idx].status = Status::Done;
     task_file.tasks[idx].updated = Some(chrono::Utc::now());
 
@@ -701,6 +705,56 @@ mod tests {
         assert_eq!(json["completed"]["status"], "done");
         assert_eq!(json["spawned"]["id"], 2);
         assert_eq!(json["spawned"]["due_date"], "2026-01-12");
+    }
+
+    #[tokio::test]
+    async fn test_done_task_already_done_does_not_spawn_duplicate() {
+        let (_dir, state) = make_state();
+        {
+            let mut tf = crate::task::TaskFile::new();
+            tf.tasks.push(crate::task::Task {
+                id: 1, title: "Recurring".to_string(), status: Status::Open, priority: crate::task::Priority::Medium,
+                tags: Vec::new(), created: chrono::Utc::now(), updated: None, description: None,
+                due_date: chrono::NaiveDate::from_ymd_opt(2026, 1, 5), project: None,
+                recurrence: Some(crate::task::Recurrence::from_str("weekly").unwrap()),
+                notes: Vec::new(), agent: None, effort: None,
+            });
+            db::save(&state.db_path, &tf).unwrap();
+        }
+        let app = router(state.clone());
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/tasks/1/done")
+                    .header("host", "127.0.0.1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let tasks_after_first = db::load(&state.db_path).unwrap().tasks.len();
+
+        let app = router(state.clone());
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/tasks/1/done")
+                    .header("host", "127.0.0.1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let json = body_json(response).await;
+        assert_eq!(json["completed"]["status"], "done");
+        assert!(json["spawned"].is_null());
+
+        let tasks_after_second = db::load(&state.db_path).unwrap().tasks.len();
+        assert_eq!(tasks_after_first, tasks_after_second);
     }
 
     #[tokio::test]
