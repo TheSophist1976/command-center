@@ -167,6 +167,86 @@ async fn add_task(
     Ok(Json(new_task))
 }
 
+#[derive(Deserialize)]
+pub struct EditTaskRequest {
+    pub title: Option<String>,
+    pub priority: Option<String>,
+    pub due: Option<String>,
+    pub project: Option<String>,
+    pub tags: Option<String>,
+    pub agent: Option<String>,
+    pub description: Option<String>,
+    pub effort: Option<String>,
+}
+
+async fn edit_task(
+    State(state): State<Arc<AppState>>,
+    AxumPath(id): AxumPath<u32>,
+    Json(req): Json<EditTaskRequest>,
+) -> Result<Json<Task>, (StatusCode, Json<serde_json::Value>)> {
+    let mut task_file = db::load(&state.db_path)
+        .map_err(|e| app_error(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+
+    let today = chrono::Local::now().date_naive();
+    let priority = req
+        .priority
+        .as_deref()
+        .map(crate::task::Priority::from_str)
+        .transpose()
+        .map_err(|e| app_error(StatusCode::BAD_REQUEST, e))?;
+    let effort = req
+        .effort
+        .as_deref()
+        .map(crate::task::Effort::from_str)
+        .transpose()
+        .map_err(|e| app_error(StatusCode::BAD_REQUEST, e))?;
+    let due_date = req
+        .due
+        .as_deref()
+        .map(|d| {
+            crate::parser::parse_due_date_input(d, today)
+                .ok_or_else(|| format!("Invalid due date: '{}'", d))
+        })
+        .transpose()
+        .map_err(|e| app_error(StatusCode::BAD_REQUEST, e))?;
+    let tags = req.tags.as_deref().map(|s| parse_csv(Some(s)));
+
+    let updated_task = {
+        let t = task_file
+            .find_task_mut(id)
+            .ok_or_else(|| app_error(StatusCode::NOT_FOUND, format!("Task {} not found", id)))?;
+        if let Some(title) = req.title {
+            t.title = title;
+        }
+        if let Some(p) = priority {
+            t.priority = p;
+        }
+        if let Some(d) = due_date {
+            t.due_date = Some(d);
+        }
+        if let Some(p) = req.project {
+            t.project = Some(p);
+        }
+        if let Some(tg) = tags {
+            t.tags = tg;
+        }
+        if let Some(a) = req.agent {
+            t.agent = Some(a);
+        }
+        if let Some(d) = req.description {
+            t.description = Some(d);
+        }
+        if let Some(e) = effort {
+            t.effort = Some(e);
+        }
+        t.updated = Some(chrono::Utc::now());
+        t.clone()
+    };
+
+    db::save(&state.db_path, &task_file).map_err(|e| app_error(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    Ok(Json(updated_task))
+}
+
 async fn list_agents() -> Json<Vec<AgentProfile>> {
     let profiles = crate::config::list_agent_profiles()
         .into_iter()
@@ -179,7 +259,7 @@ pub fn router(state: AppState) -> Router {
     let state = Arc::new(state);
     Router::new()
         .route("/api/tasks", get(list_tasks).post(add_task))
-        .route("/api/tasks/:id", get(get_task))
+        .route("/api/tasks/:id", get(get_task).patch(edit_task))
         .route("/api/agents", get(list_agents))
         .layer(middleware::from_fn(validate_host))
         .with_state(state)
@@ -433,5 +513,58 @@ mod tests {
         assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
         let json = body_json(response).await;
         assert_eq!(json["error"], "internal server error");
+    }
+
+    #[tokio::test]
+    async fn test_edit_task_updates_only_given_fields() {
+        let (_dir, state) = make_state();
+        {
+            let mut tf = crate::task::TaskFile::new();
+            tf.tasks.push(crate::task::Task {
+                id: 1, title: "Original".to_string(), status: Status::Open, priority: crate::task::Priority::Medium,
+                tags: Vec::new(), created: chrono::Utc::now(), updated: None, description: None,
+                due_date: None, project: None, recurrence: None, notes: Vec::new(), agent: None, effort: None,
+            });
+            db::save(&state.db_path, &tf).unwrap();
+        }
+        let app = router(state);
+        let body = serde_json::json!({ "priority": "critical" });
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("PATCH")
+                    .uri("/api/tasks/1")
+                    .header("host", "127.0.0.1")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let json = body_json(response).await;
+        assert_eq!(json["title"], "Original");
+        assert_eq!(json["priority"], "critical");
+        assert!(json["updated"].is_string());
+    }
+
+    #[tokio::test]
+    async fn test_edit_task_missing_id_returns_404() {
+        let (_dir, state) = make_state();
+        let app = router(state);
+        let body = serde_json::json!({ "title": "x" });
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("PATCH")
+                    .uri("/api/tasks/999")
+                    .header("host", "127.0.0.1")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
     }
 }
