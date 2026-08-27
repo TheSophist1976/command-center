@@ -3,7 +3,8 @@ use std::sync::Arc;
 
 use axum::extract::{Path as AxumPath, Query, State};
 use axum::http::StatusCode;
-use axum::response::Json;
+use axum::middleware::{self, Next};
+use axum::response::{IntoResponse, Json, Response};
 use axum::routing::get;
 use axum::Router;
 use serde::Deserialize;
@@ -28,7 +29,30 @@ pub struct ListQuery {
 }
 
 fn app_error(status: StatusCode, message: impl Into<String>) -> (StatusCode, Json<serde_json::Value>) {
-    (status, Json(serde_json::json!({ "error": message.into() })))
+    let message = message.into();
+    if status == StatusCode::INTERNAL_SERVER_ERROR {
+        eprintln!("task_server error: {}", message);
+        return (status, Json(serde_json::json!({ "error": "internal server error" })));
+    }
+    (status, Json(serde_json::json!({ "error": message })))
+}
+
+fn host_is_allowed(host_header: &str) -> bool {
+    let hostname = host_header.split(':').next().unwrap_or("");
+    hostname == "127.0.0.1" || hostname == "localhost"
+}
+
+async fn validate_host(request: axum::extract::Request, next: Next) -> Response {
+    let allowed = request
+        .headers()
+        .get(axum::http::header::HOST)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(host_is_allowed);
+
+    if !allowed {
+        return (StatusCode::FORBIDDEN, "Forbidden").into_response();
+    }
+    next.run(request).await
 }
 
 async fn list_tasks(
@@ -87,6 +111,7 @@ pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/api/tasks", get(list_tasks))
         .route("/api/tasks/:id", get(get_task))
+        .layer(middleware::from_fn(validate_host))
         .with_state(state)
 }
 
@@ -114,7 +139,7 @@ mod tests {
         let (_dir, state) = make_state();
         let app = router(state);
         let response = app
-            .oneshot(Request::builder().uri("/api/tasks").body(Body::empty()).unwrap())
+            .oneshot(Request::builder().uri("/api/tasks").header("host", "127.0.0.1").body(Body::empty()).unwrap())
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
@@ -147,7 +172,7 @@ mod tests {
         }
         let app = router(state);
         let response = app
-            .oneshot(Request::builder().uri("/api/tasks").body(Body::empty()).unwrap())
+            .oneshot(Request::builder().uri("/api/tasks").header("host", "127.0.0.1").body(Body::empty()).unwrap())
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
@@ -174,7 +199,7 @@ mod tests {
         }
         let app = router(state);
         let response = app
-            .oneshot(Request::builder().uri("/api/tasks?status=open").body(Body::empty()).unwrap())
+            .oneshot(Request::builder().uri("/api/tasks?status=open").header("host", "127.0.0.1").body(Body::empty()).unwrap())
             .await
             .unwrap();
         let json = body_json(response).await;
@@ -196,7 +221,7 @@ mod tests {
         }
         let app = router(state);
         let response = app
-            .oneshot(Request::builder().uri("/api/tasks/7").body(Body::empty()).unwrap())
+            .oneshot(Request::builder().uri("/api/tasks/7").header("host", "127.0.0.1").body(Body::empty()).unwrap())
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
@@ -209,9 +234,65 @@ mod tests {
         let (_dir, state) = make_state();
         let app = router(state);
         let response = app
-            .oneshot(Request::builder().uri("/api/tasks/999").body(Body::empty()).unwrap())
+            .oneshot(Request::builder().uri("/api/tasks/999").header("host", "127.0.0.1").body(Body::empty()).unwrap())
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn test_host_header_rejects_spoofed_host() {
+        let (_dir, state) = make_state();
+        let app = router(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/tasks")
+                    .header("host", "evil.com")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn test_host_header_accepts_127_0_0_1_with_port() {
+        let (_dir, state) = make_state();
+        let app = router(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/tasks")
+                    .header("host", "127.0.0.1:4287")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn test_internal_error_returns_generic_message() {
+        let dir = tempdir().unwrap();
+        // A directory can't be opened as a sqlite file, so db::load fails here,
+        // giving us a real internal error whose raw message must not leak to the client.
+        let state = AppState { db_path: dir.path().to_path_buf() };
+        let app = router(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/tasks")
+                    .header("host", "127.0.0.1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let json = body_json(response).await;
+        assert_eq!(json["error"], "internal server error");
     }
 }
