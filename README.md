@@ -311,6 +311,8 @@ cd .. && cargo run --release --bin task_server
 
 `task_server` resolves the task database the same way the CLI does (`--file`/`TASK_FILE`/`default-dir` config/`./tasks.db`). Override the port with `TASK_SERVER_PORT`. It binds to `127.0.0.1` only and validates the `Host` header on every request (including static file serving) to guard against DNS-rebinding attacks from other sites open in your browser — there's no other authentication, since this is a local, single-user tool.
 
+**Known limitation:** `task_server`'s write handlers (add/edit/done/reopen/delete) serialize against each other with an in-process lock, so two browser tabs hitting the same running server can't race each other into a lost write or duplicate id. This does *not* extend across processes — editing the same `tasks.db` with the CLI or TUI while `task_server` is running is still uncoordinated, and whichever process saves last wins, same as before this change.
+
 **Current scope:** table + inspector view of real tasks (the "1a" shell only — table + permanent detail panel, not the kanban-style board layout). Agent status shown in the sidebar and the inspector's "Agent waiting" panel is placeholder/mock data, clearly labeled "(preview — not yet live)" — it's not yet backed by real agent session state. No keyboard shortcuts, drag-and-drop, or in-browser note editing yet.
 
 ## Running Tests

@@ -17,6 +17,7 @@ use crate::task::{Status, Task};
 #[derive(Clone)]
 pub struct AppState {
     pub db_path: PathBuf,
+    pub write_lock: Arc<tokio::sync::Mutex<()>>,
 }
 
 #[derive(Deserialize)]
@@ -135,14 +136,23 @@ async fn add_task(
     State(state): State<Arc<AppState>>,
     Json(req): Json<AddTaskRequest>,
 ) -> Result<Json<Task>, (StatusCode, Json<serde_json::Value>)> {
-    let mut task_file = db::load(&state.db_path)
-        .map_err(|e| app_error(StatusCode::INTERNAL_SERVER_ERROR, e))?;
-
     let priority_str = req.priority.as_deref().unwrap_or("medium");
     let priority = crate::task::Priority::from_str(priority_str)
         .map_err(|e| app_error(StatusCode::BAD_REQUEST, e))?;
     let today = chrono::Local::now().date_naive();
-    let due_date = req.due.as_deref().and_then(|d| crate::parser::parse_due_date_input(d, today));
+    let due_date = req
+        .due
+        .as_deref()
+        .map(|d| {
+            crate::parser::parse_due_date_input(d, today)
+                .ok_or_else(|| format!("Invalid due date: '{}'", d))
+        })
+        .transpose()
+        .map_err(|e| app_error(StatusCode::BAD_REQUEST, e))?;
+
+    let _guard = state.write_lock.lock().await;
+    let mut task_file = db::load(&state.db_path)
+        .map_err(|e| app_error(StatusCode::INTERNAL_SERVER_ERROR, e))?;
 
     let id = task_file.next_id;
     task_file.next_id += 1;
@@ -184,9 +194,6 @@ async fn edit_task(
     AxumPath(id): AxumPath<u32>,
     Json(req): Json<EditTaskRequest>,
 ) -> Result<Json<Task>, (StatusCode, Json<serde_json::Value>)> {
-    let mut task_file = db::load(&state.db_path)
-        .map_err(|e| app_error(StatusCode::INTERNAL_SERVER_ERROR, e))?;
-
     let today = chrono::Local::now().date_naive();
     let priority = req
         .priority
@@ -210,6 +217,10 @@ async fn edit_task(
         .transpose()
         .map_err(|e| app_error(StatusCode::BAD_REQUEST, e))?;
     let tags = req.tags.as_deref().map(|s| parse_csv(Some(s)));
+
+    let _guard = state.write_lock.lock().await;
+    let mut task_file = db::load(&state.db_path)
+        .map_err(|e| app_error(StatusCode::INTERNAL_SERVER_ERROR, e))?;
 
     let updated_task = {
         let t = task_file
@@ -257,6 +268,7 @@ async fn done_task(
     State(state): State<Arc<AppState>>,
     AxumPath(id): AxumPath<u32>,
 ) -> Result<Json<DoneResponse>, (StatusCode, Json<serde_json::Value>)> {
+    let _guard = state.write_lock.lock().await;
     let mut task_file = db::load(&state.db_path)
         .map_err(|e| app_error(StatusCode::INTERNAL_SERVER_ERROR, e))?;
     let idx = task_file
@@ -307,6 +319,7 @@ async fn reopen_task(
     State(state): State<Arc<AppState>>,
     AxumPath(id): AxumPath<u32>,
 ) -> Result<Json<Task>, (StatusCode, Json<serde_json::Value>)> {
+    let _guard = state.write_lock.lock().await;
     let mut task_file = db::load(&state.db_path)
         .map_err(|e| app_error(StatusCode::INTERNAL_SERVER_ERROR, e))?;
     let updated_task = {
@@ -325,6 +338,7 @@ async fn delete_task(
     State(state): State<Arc<AppState>>,
     AxumPath(id): AxumPath<u32>,
 ) -> Result<StatusCode, (StatusCode, Json<serde_json::Value>)> {
+    let _guard = state.write_lock.lock().await;
     let mut task_file = db::load(&state.db_path)
         .map_err(|e| app_error(StatusCode::INTERNAL_SERVER_ERROR, e))?;
     task_file
@@ -373,7 +387,7 @@ mod tests {
     fn make_state() -> (tempfile::TempDir, AppState) {
         let dir = tempdir().unwrap();
         let db_path = dir.path().join("tasks.db");
-        (dir, AppState { db_path })
+        (dir, AppState { db_path, write_lock: Arc::new(tokio::sync::Mutex::new(())) })
     }
 
     async fn body_json(response: axum::response::Response) -> serde_json::Value {
@@ -546,6 +560,66 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_add_task_invalid_due_date_returns_400() {
+        let (_dir, state) = make_state();
+        let app = router(state);
+        let body = serde_json::json!({ "title": "Bad due", "due": "not-a-date" });
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/tasks")
+                    .header("host", "127.0.0.1")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn test_concurrent_add_task_requests_do_not_lose_writes() {
+        let (_dir, state) = make_state();
+        let app = router(state.clone());
+
+        let make_request = |title: &str| {
+            let body = serde_json::json!({ "title": title });
+            Request::builder()
+                .method("POST")
+                .uri("/api/tasks")
+                .header("host", "127.0.0.1")
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                .unwrap()
+        };
+
+        let app1 = app.clone();
+        let app2 = app.clone();
+        let (resp1, resp2) = tokio::join!(
+            app1.oneshot(make_request("Task A")),
+            app2.oneshot(make_request("Task B")),
+        );
+        let resp1 = resp1.unwrap();
+        let resp2 = resp2.unwrap();
+        assert_eq!(resp1.status(), StatusCode::OK);
+        assert_eq!(resp2.status(), StatusCode::OK);
+
+        let json1 = body_json(resp1).await;
+        let json2 = body_json(resp2).await;
+        let id1 = json1["id"].as_u64().unwrap();
+        let id2 = json2["id"].as_u64().unwrap();
+        assert_ne!(id1, id2, "both concurrent requests were assigned the same id");
+
+        let task_file = db::load(&state.db_path).unwrap();
+        assert_eq!(task_file.tasks.len(), 2, "one of the two concurrent writes was lost");
+        let mut ids: Vec<u32> = task_file.tasks.iter().map(|t| t.id).collect();
+        ids.sort();
+        assert_eq!(ids, vec![1, 2]);
+    }
+
+    #[tokio::test]
     async fn test_add_task_invalid_priority_returns_400() {
         let (_dir, state) = make_state();
         let app = router(state);
@@ -572,7 +646,7 @@ mod tests {
         let config_path = dir.path().join("config.md");
         std::fs::write(&config_path, "agent-bot: /code/bot\n").unwrap();
         unsafe { std::env::set_var("TASK_CONFIG_FILE", &config_path) };
-        let app = router(AppState { db_path });
+        let app = router(AppState { db_path, write_lock: Arc::new(tokio::sync::Mutex::new(())) });
         let response = app
             .oneshot(
                 Request::builder()
@@ -595,7 +669,10 @@ mod tests {
         let dir = tempdir().unwrap();
         // A directory can't be opened as a sqlite file, so db::load fails here,
         // giving us a real internal error whose raw message must not leak to the client.
-        let state = AppState { db_path: dir.path().to_path_buf() };
+        let state = AppState {
+            db_path: dir.path().to_path_buf(),
+            write_lock: Arc::new(tokio::sync::Mutex::new(())),
+        };
         let app = router(state);
         let response = app
             .oneshot(

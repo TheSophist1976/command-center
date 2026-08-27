@@ -15,7 +15,10 @@ async fn main() {
         println!("task_server: web/dist not found — API only, no static frontend (run `npm run build` in web/ first)");
     }
 
-    let app = router_with_static(AppState { db_path }, static_dir);
+    let app = router_with_static(
+        AppState { db_path, write_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())) },
+        static_dir,
+    );
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", port)).await.unwrap();
     axum::serve(listener, app).await.unwrap();
 }
