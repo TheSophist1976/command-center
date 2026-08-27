@@ -1,0 +1,25 @@
+export type Priority = 'critical' | 'high' | 'medium' | 'low';
+export type Effort = 'high' | 'medium' | 'low';
+export type Status = 'open' | 'done';
+
+export interface Task {
+  id: number;
+  title: string;
+  status: Status;
+  priority: Priority;
+  tags: string[];
+  created: string;
+  updated?: string;
+  description?: string;
+  due_date?: string;
+  project?: string;
+  recurrence?: string;
+  notes: string[];
+  agent?: string;
+  effort?: Effort;
+}
+
+export interface AgentProfile {
+  name: string;
+  dir: string;
+}
