@@ -298,7 +298,7 @@ pub struct Task {
     pub due_date: Option<NaiveDate>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub project: Option<String>,
-    #[serde(skip_serializing)]
+    #[serde(skip_serializing_if = "Option::is_none", serialize_with = "serialize_option_recurrence")]
     pub recurrence: Option<Recurrence>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub notes: Vec<String>,
@@ -424,6 +424,16 @@ where
 {
     match date {
         Some(d) => serializer.serialize_str(&d.format("%Y-%m-%d").to_string()),
+        None => serializer.serialize_none(),
+    }
+}
+
+fn serialize_option_recurrence<S>(r: &Option<Recurrence>, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    match r {
+        Some(r) => serializer.serialize_str(&r.to_string()),
         None => serializer.serialize_none(),
     }
 }
@@ -969,5 +979,20 @@ mod tests {
             let r: Recurrence = s.parse().unwrap();
             assert_eq!(r.to_string(), *s);
         }
+    }
+
+    #[test]
+    fn test_task_serialize_includes_recurrence_when_present() {
+        let mut task = make_task(1, "Recurring task");
+        task.recurrence = Some("weekly:fri".parse().unwrap());
+        let json = serde_json::to_string(&task).unwrap();
+        assert!(json.contains("\"recurrence\":\"weekly:fri\""), "json was: {}", json);
+    }
+
+    #[test]
+    fn test_task_serialize_omits_recurrence_when_none() {
+        let task = make_task(1, "No recurrence");
+        let json = serde_json::to_string(&task).unwrap();
+        assert!(!json.contains("\"recurrence\""), "json was: {}", json);
     }
 }
