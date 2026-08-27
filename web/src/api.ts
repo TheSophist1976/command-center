@@ -8,8 +8,14 @@ async function jsonOrThrow<T>(response: Response): Promise<T> {
   return response.json();
 }
 
+// The backend omits `notes` entirely when it's empty; normalize so callers always get a real array.
+function normalizeTask(task: Task): Task {
+  return { ...task, notes: task.notes ?? [] };
+}
+
 export async function fetchTasks(): Promise<Task[]> {
-  return jsonOrThrow(await fetch('/api/tasks'));
+  const tasks = await jsonOrThrow<Task[]>(await fetch('/api/tasks'));
+  return tasks.map(normalizeTask);
 }
 
 export async function fetchAgents(): Promise<AgentProfile[]> {
@@ -25,33 +31,42 @@ export async function addTask(input: {
   agent?: string;
   description?: string;
 }): Promise<Task> {
-  return jsonOrThrow(
+  const task = await jsonOrThrow<Task>(
     await fetch('/api/tasks', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify(input),
     }),
   );
+  return normalizeTask(task);
 }
 
 export async function editTask(id: number, changes: Partial<{
   title: string; priority: string; due: string; project: string; tags: string; agent: string; description: string; effort: string;
 }>): Promise<Task> {
-  return jsonOrThrow(
+  const task = await jsonOrThrow<Task>(
     await fetch(`/api/tasks/${id}`, {
       method: 'PATCH',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify(changes),
     }),
   );
+  return normalizeTask(task);
 }
 
 export async function markDone(id: number): Promise<{ completed: Task; spawned: Task | null }> {
-  return jsonOrThrow(await fetch(`/api/tasks/${id}/done`, { method: 'POST' }));
+  const result = await jsonOrThrow<{ completed: Task; spawned: Task | null }>(
+    await fetch(`/api/tasks/${id}/done`, { method: 'POST' }),
+  );
+  return {
+    completed: normalizeTask(result.completed),
+    spawned: result.spawned ? normalizeTask(result.spawned) : null,
+  };
 }
 
 export async function reopenTask(id: number): Promise<Task> {
-  return jsonOrThrow(await fetch(`/api/tasks/${id}/reopen`, { method: 'POST' }));
+  const task = await jsonOrThrow<Task>(await fetch(`/api/tasks/${id}/reopen`, { method: 'POST' }));
+  return normalizeTask(task);
 }
 
 export async function deleteTask(id: number): Promise<void> {

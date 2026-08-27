@@ -14,7 +14,7 @@ export interface Task {
   due_date?: string;
   project?: string;
   recurrence?: string;
-  notes: string[];
+  notes?: string[];
   agent?: string;
   effort?: Effort;
 }
