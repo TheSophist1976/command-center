@@ -22,12 +22,39 @@ const EFFORT_OPTIONS = [
   { value: 'low', label: 'Low' },
 ];
 
-function groupByAgent(tasks: Task[]): Map<string, Task[]> {
+type GroupBy = 'agent' | 'project' | 'priority' | 'none';
+
+const GROUP_BY_OPTIONS: { value: GroupBy; label: string }[] = [
+  { value: 'agent', label: 'Agent' },
+  { value: 'project', label: 'Project' },
+  { value: 'priority', label: 'Priority' },
+  { value: 'none', label: 'None' },
+];
+
+const PRIORITY_ORDER: Record<string, number> = { critical: 0, high: 1, medium: 2, low: 3 };
+
+function groupKey(task: Task, groupBy: GroupBy): string {
+  switch (groupBy) {
+    case 'agent':
+      return task.agent ?? 'unassigned';
+    case 'project':
+      return task.project ?? 'no project';
+    case 'priority':
+      return task.priority;
+    case 'none':
+      return '';
+  }
+}
+
+function groupTasks(tasks: Task[], groupBy: GroupBy): Map<string, Task[]> {
   const groups = new Map<string, Task[]>();
   for (const t of tasks) {
-    const key = t.agent ?? 'unassigned';
+    const key = groupKey(t, groupBy);
     if (!groups.has(key)) groups.set(key, []);
     groups.get(key)!.push(t);
+  }
+  if (groupBy === 'priority') {
+    return new Map([...groups.entries()].sort((a, b) => (PRIORITY_ORDER[a[0]] ?? 99) - (PRIORITY_ORDER[b[0]] ?? 99)));
   }
   return groups;
 }
@@ -46,6 +73,7 @@ export default function App() {
   const [error, setError] = useState<string | null>(null);
   const [showNewTaskForm, setShowNewTaskForm] = useState(false);
   const [search, setSearch] = useState('');
+  const [groupBy, setGroupBy] = useState<GroupBy>('agent');
 
   useEffect(() => {
     Promise.all([fetchTasks(), fetchAgents()])
@@ -115,7 +143,7 @@ export default function App() {
     return tasks.filter((t) => t.title.toLowerCase().includes(q));
   }, [tasks, search]);
 
-  const grouped = useMemo(() => groupByAgent(filteredTasks), [filteredTasks]);
+  const grouped = useMemo(() => groupTasks(filteredTasks, groupBy), [filteredTasks, groupBy]);
   const todayCount = useMemo(() => countAllOpen(tasks), [tasks]);
 
   return (
@@ -164,6 +192,20 @@ export default function App() {
         <header style={{ height: 72, flex: 'none', padding: '0 24px', borderBottom: '1px solid var(--hairline)', display: 'flex', alignItems: 'center', gap: 16 }}>
           <span style={{ fontFamily: 'var(--font-display)', fontWeight: 600, fontSize: 22 }}>All tasks</span>
           <div style={{ flex: 1 }} />
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, height: 34, padding: '0 12px', border: '1px solid var(--hairline)', borderRadius: 5 }}>
+            <span style={{ fontSize: 13, color: 'var(--fg-4)' }}>Group</span>
+            <select
+              value={groupBy}
+              onChange={(e) => setGroupBy(e.target.value as GroupBy)}
+              style={{ background: 'transparent', border: 'none', outline: 'none', color: 'var(--fg-1)', fontSize: 13, fontWeight: 600 }}
+            >
+              {GROUP_BY_OPTIONS.map((o) => (
+                <option key={o.value} value={o.value} style={{ background: 'var(--ink-2)' }}>
+                  {o.label}
+                </option>
+              ))}
+            </select>
+          </div>
           <div style={{ display: 'flex', alignItems: 'center', gap: 8, height: 34, padding: '0 12px', border: '1px solid var(--hairline)', borderRadius: 5, background: 'var(--ink-2)', width: 240 }}>
             <Search size={14} color="var(--fg-4)" />
             <input
@@ -188,13 +230,17 @@ export default function App() {
           <span style={{ width: 44 }}>Effort</span>
         </div>
         <div style={{ flex: 1, minHeight: 0, overflow: 'auto' }}>
-          {[...grouped.entries()].map(([agentName, agentTasks]) => (
-            <div key={agentName}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 10, height: 38, padding: '0 24px', background: 'var(--ink-2)', borderBottom: '1px solid var(--hairline-soft)' }}>
-                <span style={{ fontFamily: 'var(--font-mono)', fontSize: 12.5, fontWeight: 600 }}>{agentName}</span>
-                <span style={{ fontSize: 12, color: 'var(--fg-4)' }}>{agentTasks.length} tasks</span>
-              </div>
-              {agentTasks.map((t) => (
+          {[...grouped.entries()].map(([groupName, groupTasksList]) => (
+            <div key={groupName || 'all'}>
+              {groupBy !== 'none' && (
+                <div style={{ display: 'flex', alignItems: 'center', gap: 10, height: 38, padding: '0 24px', background: 'var(--ink-2)', borderBottom: '1px solid var(--hairline-soft)' }}>
+                  <span style={{ fontFamily: 'var(--font-mono)', fontSize: 12.5, fontWeight: 600, textTransform: groupBy === 'priority' ? 'uppercase' : 'none' }}>
+                    {groupName}
+                  </span>
+                  <span style={{ fontSize: 12, color: 'var(--fg-4)' }}>{groupTasksList.length} tasks</span>
+                </div>
+              )}
+              {groupTasksList.map((t) => (
                 <div
                   key={t.id}
                   onClick={() => setSelected(t)}
