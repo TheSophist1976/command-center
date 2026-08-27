@@ -364,6 +364,13 @@ fn notes_dir(state: &AppState) -> PathBuf {
         .join("Notes")
 }
 
+/// Slugs become filenames (`{slug}.md`) joined onto the notes directory. Reject anything
+/// that isn't alphanumeric/hyphen/underscore so a slug can never escape that directory
+/// (e.g. via `..` path segments or an absolute path).
+fn is_valid_slug(slug: &str) -> bool {
+    !slug.is_empty() && slug.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+}
+
 #[derive(Serialize)]
 pub struct NoteResponse {
     pub slug: String,
@@ -391,6 +398,7 @@ async fn list_task_notes(
     let notes: Vec<NoteResponse> = task
         .notes
         .iter()
+        .filter(|slug| is_valid_slug(slug))
         .filter_map(|slug| crate::note::read_note(&dir.join(format!("{}.md", slug))).ok())
         .map(NoteResponse::from)
         .collect();
@@ -438,6 +446,9 @@ async fn edit_note(
     AxumPath(slug): AxumPath<String>,
     Json(req): Json<EditNoteRequest>,
 ) -> Result<Json<NoteResponse>, (StatusCode, Json<serde_json::Value>)> {
+    if !is_valid_slug(&slug) {
+        return Err(app_error(StatusCode::BAD_REQUEST, "invalid note slug"));
+    }
     let _guard = state.write_lock.lock().await;
     let dir = notes_dir(&state);
     let path = dir.join(format!("{}.md", slug));
@@ -457,6 +468,9 @@ async fn unlink_task_note(
     State(state): State<Arc<AppState>>,
     AxumPath((id, slug)): AxumPath<(u32, String)>,
 ) -> Result<StatusCode, (StatusCode, Json<serde_json::Value>)> {
+    if !is_valid_slug(&slug) {
+        return Err(app_error(StatusCode::BAD_REQUEST, "invalid note slug"));
+    }
     let _guard = state.write_lock.lock().await;
     let mut task_file = db::load(&state.db_path)
         .map_err(|e| app_error(StatusCode::INTERNAL_SERVER_ERROR, e))?;
@@ -1065,6 +1079,53 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn test_edit_note_rejects_path_traversal_slug() {
+        let (_dir, state) = make_state();
+        let app = router(state);
+        let body = serde_json::json!({ "body": "pwned" });
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("PATCH")
+                    .uri("/api/notes/..%2f..%2f..%2fetc%2fpasswd")
+                    .header("host", "127.0.0.1")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn test_unlink_task_note_rejects_path_traversal_slug() {
+        let (_dir, state) = make_state();
+        {
+            let mut tf = crate::task::TaskFile::new();
+            tf.tasks.push(crate::task::Task {
+                id: 1, title: "Has notes".to_string(), status: Status::Open, priority: crate::task::Priority::Medium,
+                tags: Vec::new(), created: chrono::Utc::now(), updated: None, description: None,
+                due_date: None, project: None, recurrence: None, notes: vec!["real-note".to_string()], agent: None, effort: None,
+            });
+            db::save(&state.db_path, &tf).unwrap();
+        }
+        let app = router(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri("/api/tasks/1/notes/..%2f..%2fetc%2fpasswd")
+                    .header("host", "127.0.0.1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]
