@@ -2,7 +2,8 @@ import { useEffect, useMemo, useState } from 'react';
 import './tokens.css';
 import { Terminal, Sun, CalendarDays, Settings } from 'lucide-react';
 import { Button } from './components/Button';
-import { fetchTasks, fetchAgents } from './api';
+import { NewTaskForm } from './components/NewTaskForm';
+import { fetchTasks, fetchAgents, addTask, markDone, reopenTask, deleteTask } from './api';
 import type { Task, AgentProfile } from './types';
 import { countAllOpen } from './dueWindow';
 import { statusFor, statusColor } from './mockAgentStatus';
@@ -29,6 +30,7 @@ export default function App() {
   const [agents, setAgents] = useState<AgentProfile[]>([]);
   const [selected, setSelected] = useState<Task | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [showNewTaskForm, setShowNewTaskForm] = useState(false);
 
   useEffect(() => {
     Promise.all([fetchTasks(), fetchAgents()])
@@ -38,6 +40,49 @@ export default function App() {
       })
       .catch((e) => setError(String(e)));
   }, []);
+
+  async function handleAddTask(title: string) {
+    try {
+      const created = await addTask({ title });
+      setTasks((prev) => [...prev, created]);
+      setShowNewTaskForm(false);
+    } catch (e) {
+      setError(String(e));
+    }
+  }
+
+  async function handleMarkDone(task: Task) {
+    try {
+      const { completed, spawned } = await markDone(task.id);
+      setTasks((prev) => {
+        const next = prev.map((t) => (t.id === completed.id ? completed : t));
+        return spawned ? [...next, spawned] : next;
+      });
+      setSelected(completed);
+    } catch (e) {
+      setError(String(e));
+    }
+  }
+
+  async function handleReopen(task: Task) {
+    try {
+      const updated = await reopenTask(task.id);
+      setTasks((prev) => prev.map((t) => (t.id === updated.id ? updated : t)));
+      setSelected(updated);
+    } catch (e) {
+      setError(String(e));
+    }
+  }
+
+  async function handleDelete(task: Task) {
+    try {
+      await deleteTask(task.id);
+      setTasks((prev) => prev.filter((t) => t.id !== task.id));
+      setSelected(null);
+    } catch (e) {
+      setError(String(e));
+    }
+  }
 
   const grouped = useMemo(() => groupByAgent(tasks), [tasks]);
   const todayCount = useMemo(() => countAllOpen(tasks), [tasks]);
@@ -88,7 +133,11 @@ export default function App() {
         <header style={{ height: 72, flex: 'none', padding: '0 24px', borderBottom: '1px solid var(--hairline)', display: 'flex', alignItems: 'center', gap: 16 }}>
           <span style={{ fontFamily: 'var(--font-display)', fontWeight: 600, fontSize: 22 }}>All tasks</span>
           <div style={{ flex: 1 }} />
-          <Button>New task</Button>
+          {showNewTaskForm ? (
+            <NewTaskForm onSubmit={handleAddTask} onCancel={() => setShowNewTaskForm(false)} />
+          ) : (
+            <Button onClick={() => setShowNewTaskForm(true)}>New task</Button>
+          )}
         </header>
         {error && <div style={{ padding: 16, color: 'var(--danger)' }}>{error}</div>}
         <div style={{ display: 'flex', alignItems: 'center', gap: 16, height: 34, flex: 'none', padding: '0 24px', borderBottom: '1px solid var(--hairline-soft)', fontFamily: 'var(--font-display)', fontSize: 11, fontWeight: 700, letterSpacing: '0.06em', textTransform: 'uppercase', color: 'var(--fg-5)' }}>
@@ -119,7 +168,11 @@ export default function App() {
                   <span style={{ width: 78, fontFamily: 'var(--font-display)', fontSize: 11, fontWeight: 700, textTransform: 'uppercase', color: priorityColor[t.priority] }}>
                     {t.priority}
                   </span>
-                  <span style={{ flex: 1, minWidth: 0, fontSize: 14.5, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                  <span style={{
+                    flex: 1, minWidth: 0, fontSize: 14.5, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
+                    textDecoration: t.status === 'done' ? 'line-through' : 'none',
+                    color: t.status === 'done' ? 'var(--fg-4)' : 'inherit',
+                  }}>
                     {t.title}
                   </span>
                   <span style={{ width: 96, fontFamily: 'var(--font-mono)', fontSize: 12.5, color: 'var(--fg-3)' }}>
@@ -138,10 +191,21 @@ export default function App() {
       <aside style={{ width: 352, flex: 'none', background: 'var(--ink-3)', borderLeft: '1px solid var(--hairline)', display: 'flex', flexDirection: 'column', padding: selected ? '20px 24px' : 0, alignItems: selected ? 'stretch' : 'center', justifyContent: selected ? 'flex-start' : 'center', color: 'var(--fg-5)' }}>
         {selected ? (
           <>
-            <div style={{ fontFamily: 'var(--font-display)', fontWeight: 600, fontSize: 20, color: 'var(--fg-1)', marginBottom: 12 }}>
+            <div style={{
+              fontFamily: 'var(--font-display)', fontWeight: 600, fontSize: 20, color: 'var(--fg-1)', marginBottom: 12,
+              textDecoration: selected.status === 'done' ? 'line-through' : 'none',
+            }}>
               {selected.title}
             </div>
-            <div style={{ fontSize: 13, color: 'var(--fg-3)' }}>#{selected.id} · {selected.priority}</div>
+            <div style={{ fontSize: 13, color: 'var(--fg-3)' }}>#{selected.id} · {selected.priority} · {selected.status}</div>
+            <div style={{ display: 'flex', gap: 8, marginTop: 12, marginBottom: 20 }}>
+              {selected.status === 'open' ? (
+                <Button size="sm" onClick={() => handleMarkDone(selected)}>Mark done</Button>
+              ) : (
+                <Button size="sm" variant="secondary" onClick={() => handleReopen(selected)}>Reopen</Button>
+              )}
+              <Button size="sm" variant="secondary" onClick={() => handleDelete(selected)}>Delete</Button>
+            </div>
             {selected.agent && statusFor(selected.agent).state === 'waiting' && (
               <div style={{ marginTop: 'auto', paddingTop: 20, borderTop: '1px solid var(--hairline)' }}>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10 }}>

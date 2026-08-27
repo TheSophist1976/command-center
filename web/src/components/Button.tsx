@@ -22,11 +22,13 @@ interface ButtonProps {
   size?: ButtonSize;
   onClick?: () => void;
   disabled?: boolean;
+  type?: 'button' | 'submit';
 }
 
-export function Button({ children, variant = 'primary', size = 'sm', onClick, disabled }: ButtonProps) {
+export function Button({ children, variant = 'primary', size = 'sm', onClick, disabled, type = 'button' }: ButtonProps) {
   return (
     <button
+      type={type}
       onClick={onClick}
       disabled={disabled}
       style={{
