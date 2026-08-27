@@ -73,6 +73,36 @@ pub fn add(path: &Path, args: AddArgs) -> Result<String, (i32, String)> {
     Ok(format!("Created task {}: {}", id, args.title))
 }
 
+pub fn filter_and_sort_tasks<'a>(
+    tasks: &'a [Task],
+    status: Option<Status>,
+    agent: Option<&str>,
+    project: Option<&str>,
+    tag: Option<&str>,
+    due_before: Option<chrono::NaiveDate>,
+) -> Vec<&'a Task> {
+    let mut result: Vec<&Task> = tasks
+        .iter()
+        .filter(|t| status.is_none_or(|s| t.status == s))
+        .filter(|t| agent.is_none_or(|a| t.agent.as_deref() == Some(a)))
+        .filter(|t| project.is_none_or(|p| t.project.as_deref() == Some(p)))
+        .filter(|t| tag.is_none_or(|tag| t.tags.iter().any(|x| x == tag)))
+        .filter(|t| due_before.is_none_or(|d| t.due_date.is_some_and(|td| td <= d)))
+        .collect();
+
+    result.sort_by(|a, b| {
+        let date_cmp = match (a.due_date, b.due_date) {
+            (Some(x), Some(y)) => x.cmp(&y),
+            (Some(_), None) => std::cmp::Ordering::Less,
+            (None, Some(_)) => std::cmp::Ordering::Greater,
+            (None, None) => std::cmp::Ordering::Equal,
+        };
+        date_cmp.then(a.priority.cmp(&b.priority))
+    });
+
+    result
+}
+
 pub fn list(path: &Path, args: ListArgs) -> Result<String, (i32, String)> {
     let task_file = db::load(path).map_err(|e| (1, e))?;
     let status_filter = args
@@ -90,25 +120,14 @@ pub fn list(path: &Path, args: ListArgs) -> Result<String, (i32, String)> {
         })
         .transpose()?;
 
-    let mut tasks: Vec<&Task> = task_file
-        .tasks
-        .iter()
-        .filter(|t| status_filter.is_none_or(|s| t.status == s))
-        .filter(|t| args.agent.as_deref().is_none_or(|a| t.agent.as_deref() == Some(a)))
-        .filter(|t| args.project.as_deref().is_none_or(|p| t.project.as_deref() == Some(p)))
-        .filter(|t| args.tag.as_deref().is_none_or(|tag| t.tags.iter().any(|x| x == tag)))
-        .filter(|t| due_before.is_none_or(|d| t.due_date.is_some_and(|td| td <= d)))
-        .collect();
-
-    tasks.sort_by(|a, b| {
-        let date_cmp = match (a.due_date, b.due_date) {
-            (Some(x), Some(y)) => x.cmp(&y),
-            (Some(_), None) => std::cmp::Ordering::Less,
-            (None, Some(_)) => std::cmp::Ordering::Greater,
-            (None, None) => std::cmp::Ordering::Equal,
-        };
-        date_cmp.then(a.priority.cmp(&b.priority))
-    });
+    let tasks = filter_and_sort_tasks(
+        &task_file.tasks,
+        status_filter,
+        args.agent.as_deref(),
+        args.project.as_deref(),
+        args.tag.as_deref(),
+        due_before,
+    );
 
     if tasks.is_empty() {
         return Ok("No matching tasks.".to_string());
@@ -287,6 +306,52 @@ mod tests {
         let dir = tempdir().unwrap();
         let path = dir.path().join("tasks.db");
         (dir, path)
+    }
+
+    #[test]
+    fn test_filter_and_sort_tasks_by_status_and_agent() {
+        let mut tf = crate::task::TaskFile::new();
+        tf.tasks.push(sample_task_for_filter(1, "Open task", Status::Open, "bot"));
+        tf.tasks.push(sample_task_for_filter(2, "Other agent", Status::Done, "human"));
+        let result = filter_and_sort_tasks(&tf.tasks, Some(Status::Open), Some("bot"), None, None, None);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].id, 1);
+    }
+
+    #[test]
+    fn test_filter_and_sort_tasks_sorts_by_due_then_priority() {
+        let mut tf = crate::task::TaskFile::new();
+        let mut t1 = sample_task_for_filter(1, "No due, critical", Status::Open, "bot");
+        t1.priority = Priority::Critical;
+        t1.due_date = None;
+        let mut t2 = sample_task_for_filter(2, "Due today, low", Status::Open, "bot");
+        t2.priority = Priority::Low;
+        t2.due_date = chrono::NaiveDate::from_ymd_opt(2026, 1, 1);
+        tf.tasks.push(t1);
+        tf.tasks.push(t2);
+        let result = filter_and_sort_tasks(&tf.tasks, None, None, None, None, None);
+        // Due date ascending, None last — task 2 (has a due date) sorts before task 1 (no due date)
+        assert_eq!(result[0].id, 2);
+        assert_eq!(result[1].id, 1);
+    }
+
+    fn sample_task_for_filter(id: u32, title: &str, status: Status, agent: &str) -> Task {
+        Task {
+            id,
+            title: title.to_string(),
+            status,
+            priority: Priority::Medium,
+            tags: Vec::new(),
+            created: Utc::now(),
+            updated: None,
+            description: None,
+            due_date: None,
+            project: None,
+            recurrence: None,
+            notes: Vec::new(),
+            agent: Some(agent.to_string()),
+            effort: None,
+        }
     }
 
     #[test]
