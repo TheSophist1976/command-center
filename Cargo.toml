@@ -16,6 +16,10 @@ ratatui  = { version = "0.30", optional = true }
 crossterm = { version = "0.28", optional = true }
 reqwest = { version = "0.12", features = ["blocking", "json"] }
 dirs = "5"
+axum = "0.7"
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+tower = { version = "0.4", features = ["util"] }
+tower-http = { version = "0.5", features = ["fs"] }
 
 [dev-dependencies]
 tempfile = "3"
@@ -30,3 +34,7 @@ path = "src/bin/task.rs"
 name = "task-tui"
 path = "src/bin/task_tui.rs"
 required-features = ["tui"]
+
+[[bin]]
+name = "task_server"
+path = "src/bin/task_server.rs"
