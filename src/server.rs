@@ -353,15 +353,13 @@ pub fn router_with_static(state: AppState, static_dir: Option<std::path::PathBuf
         .route("/api/tasks/:id", get(get_task).patch(edit_task).delete(delete_task))
         .route("/api/tasks/:id/done", axum::routing::post(done_task))
         .route("/api/tasks/:id/reopen", axum::routing::post(reopen_task))
-        .route("/api/agents", get(list_agents))
-        .layer(middleware::from_fn(validate_host))
-        .with_state(state);
+        .route("/api/agents", get(list_agents));
 
     if let Some(dir) = static_dir {
         app = app.fallback_service(tower_http::services::ServeDir::new(dir));
     }
 
-    app
+    app.layer(middleware::from_fn(validate_host)).with_state(state)
 }
 
 #[cfg(test)]
@@ -855,5 +853,47 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn test_static_fallback_rejects_spoofed_host() {
+        let (_dir, state) = make_state();
+        let static_dir = tempdir().unwrap();
+        std::fs::write(static_dir.path().join("index.html"), "<html>hi</html>").unwrap();
+        let app = router_with_static(state, Some(static_dir.path().to_path_buf()));
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/index.html")
+                    .header("host", "evil.com")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn test_static_fallback_serves_file_with_valid_host() {
+        let (_dir, state) = make_state();
+        let static_dir = tempdir().unwrap();
+        std::fs::write(static_dir.path().join("index.html"), "<html>hi</html>").unwrap();
+        let app = router_with_static(state, Some(static_dir.path().to_path_buf()));
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/index.html")
+                    .header("host", "127.0.0.1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        assert_eq!(bytes, "<html>hi</html>".as_bytes());
     }
 }
