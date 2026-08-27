@@ -321,6 +321,19 @@ async fn reopen_task(
     Ok(Json(updated_task))
 }
 
+async fn delete_task(
+    State(state): State<Arc<AppState>>,
+    AxumPath(id): AxumPath<u32>,
+) -> Result<StatusCode, (StatusCode, Json<serde_json::Value>)> {
+    let mut task_file = db::load(&state.db_path)
+        .map_err(|e| app_error(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    task_file
+        .remove_task(id)
+        .ok_or_else(|| app_error(StatusCode::NOT_FOUND, format!("Task {} not found", id)))?;
+    db::save(&state.db_path, &task_file).map_err(|e| app_error(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
 async fn list_agents() -> Json<Vec<AgentProfile>> {
     let profiles = crate::config::list_agent_profiles()
         .into_iter()
@@ -330,15 +343,25 @@ async fn list_agents() -> Json<Vec<AgentProfile>> {
 }
 
 pub fn router(state: AppState) -> Router {
+    router_with_static(state, None)
+}
+
+pub fn router_with_static(state: AppState, static_dir: Option<std::path::PathBuf>) -> Router {
     let state = Arc::new(state);
-    Router::new()
+    let mut app = Router::new()
         .route("/api/tasks", get(list_tasks).post(add_task))
-        .route("/api/tasks/:id", get(get_task).patch(edit_task))
+        .route("/api/tasks/:id", get(get_task).patch(edit_task).delete(delete_task))
         .route("/api/tasks/:id/done", axum::routing::post(done_task))
         .route("/api/tasks/:id/reopen", axum::routing::post(reopen_task))
         .route("/api/agents", get(list_agents))
         .layer(middleware::from_fn(validate_host))
-        .with_state(state)
+        .with_state(state);
+
+    if let Some(dir) = static_dir {
+        app = app.fallback_service(tower_http::services::ServeDir::new(dir));
+    }
+
+    app
 }
 
 #[cfg(test)]
@@ -784,5 +807,53 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
         let json = body_json(response).await;
         assert_eq!(json["status"], "open");
+    }
+
+    #[tokio::test]
+    async fn test_delete_task_removes_it() {
+        let (_dir, state) = make_state();
+        {
+            let mut tf = crate::task::TaskFile::new();
+            tf.tasks.push(crate::task::Task {
+                id: 1, title: "Doomed".to_string(), status: Status::Open, priority: crate::task::Priority::Medium,
+                tags: Vec::new(), created: chrono::Utc::now(), updated: None, description: None,
+                due_date: None, project: None, recurrence: None, notes: Vec::new(), agent: None, effort: None,
+            });
+            db::save(&state.db_path, &tf).unwrap();
+        }
+        let db_path = state.db_path.clone();
+        let app = router(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri("/api/tasks/1")
+                    .header("host", "127.0.0.1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        let tf = db::load(&db_path).unwrap();
+        assert!(tf.tasks.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_delete_task_missing_returns_404() {
+        let (_dir, state) = make_state();
+        let app = router(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri("/api/tasks/999")
+                    .header("host", "127.0.0.1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
     }
 }
