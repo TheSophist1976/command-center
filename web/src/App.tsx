@@ -4,8 +4,9 @@ import { Terminal, Sun, CalendarDays, Settings, Search, PanelLeftClose, PanelLef
 import { Button } from './components/Button';
 import { NewTaskForm } from './components/NewTaskForm';
 import { EditableField, FieldRow } from './components/EditableField';
-import { fetchTasks, fetchAgents, addTask, editTask, markDone, reopenTask, deleteTask } from './api';
-import type { Task, AgentProfile } from './types';
+import { fetchTasks, fetchAgents, addTask, editTask, markDone, reopenTask, deleteTask, fetchTaskNotes, createTaskNote, editNote, unlinkTaskNote } from './api';
+import { NotesSection } from './components/NotesSection';
+import type { Task, AgentProfile, Note } from './types';
 import { countDueWindow, dueMatches, startOfToday, type DueWindow } from './dueWindow';
 import { statusFor, statusColor } from './mockAgentStatus';
 
@@ -87,6 +88,7 @@ export default function App() {
   const [dueFilter, setDueFilter] = useState<DueFilter>('all-tasks');
   const [leftOpen, setLeftOpen] = useState(true);
   const [rightOpen, setRightOpen] = useState(true);
+  const [taskNotes, setTaskNotes] = useState<Note[]>([]);
   const today = useMemo(() => startOfToday(), []);
 
   function selectTask(task: Task) {
@@ -102,6 +104,16 @@ export default function App() {
       })
       .catch((e) => setError(String(e)));
   }, []);
+
+  useEffect(() => {
+    if (!selected) {
+      setTaskNotes([]);
+      return;
+    }
+    fetchTaskNotes(selected.id)
+      .then(setTaskNotes)
+      .catch((e) => setError(String(e)));
+  }, [selected?.id]);
 
   async function handleAddTask(title: string) {
     try {
@@ -151,6 +163,42 @@ export default function App() {
       const updated = await editTask(id, changes);
       setTasks((prev) => prev.map((t) => (t.id === updated.id ? updated : t)));
       setSelected(updated);
+    } catch (e) {
+      setError(String(e));
+    }
+  }
+
+  function updateTaskNoteSlugs(taskId: number, notes: string[]) {
+    setTasks((prev) => prev.map((t) => (t.id === taskId ? { ...t, notes } : t)));
+    setSelected((prev) => (prev && prev.id === taskId ? { ...prev, notes } : prev));
+  }
+
+  async function handleCreateNote(title: string) {
+    if (!selected) return;
+    try {
+      const note = await createTaskNote(selected.id, title);
+      setTaskNotes((prev) => [...prev, note]);
+      updateTaskNoteSlugs(selected.id, [...(selected.notes ?? []), note.slug]);
+    } catch (e) {
+      setError(String(e));
+    }
+  }
+
+  async function handleEditNote(slug: string, changes: { title?: string; body?: string }) {
+    try {
+      const updated = await editNote(slug, changes);
+      setTaskNotes((prev) => prev.map((n) => (n.slug === slug ? updated : n)));
+    } catch (e) {
+      setError(String(e));
+    }
+  }
+
+  async function handleUnlinkNote(slug: string) {
+    if (!selected) return;
+    try {
+      await unlinkTaskNote(selected.id, slug);
+      setTaskNotes((prev) => prev.filter((n) => n.slug !== slug));
+      updateTaskNoteSlugs(selected.id, (selected.notes ?? []).filter((s) => s !== slug));
     } catch (e) {
       setError(String(e));
     }
@@ -431,6 +479,13 @@ export default function App() {
                 />
               </FieldRow>
             </div>
+
+            <NotesSection
+              notes={taskNotes}
+              onCreate={handleCreateNote}
+              onEdit={handleEditNote}
+              onUnlink={handleUnlinkNote}
+            />
 
             {selected.agent && statusFor(selected.agent).state === 'waiting' && (
               <div style={{ marginTop: 'auto', paddingTop: 20, borderTop: '1px solid var(--hairline)' }}>

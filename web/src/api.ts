@@ -1,4 +1,4 @@
-import type { Task, AgentProfile } from './types';
+import type { Task, AgentProfile, Note } from './types';
 
 async function jsonOrThrow<T>(response: Response): Promise<T> {
   if (!response.ok) {
@@ -73,5 +73,36 @@ export async function deleteTask(id: number): Promise<void> {
   const response = await fetch(`/api/tasks/${id}`, { method: 'DELETE' });
   if (!response.ok && response.status !== 204) {
     throw new Error(`Failed to delete task ${id}`);
+  }
+}
+
+export async function fetchTaskNotes(taskId: number): Promise<Note[]> {
+  return jsonOrThrow(await fetch(`/api/tasks/${taskId}/notes`));
+}
+
+export async function createTaskNote(taskId: number, title: string): Promise<Note> {
+  return jsonOrThrow(
+    await fetch(`/api/tasks/${taskId}/notes`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ title }),
+    }),
+  );
+}
+
+export async function editNote(slug: string, changes: Partial<{ title: string; body: string }>): Promise<Note> {
+  return jsonOrThrow(
+    await fetch(`/api/notes/${slug}`, {
+      method: 'PATCH',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(changes),
+    }),
+  );
+}
+
+export async function unlinkTaskNote(taskId: number, slug: string): Promise<void> {
+  const response = await fetch(`/api/tasks/${taskId}/notes/${slug}`, { method: 'DELETE' });
+  if (!response.ok && response.status !== 204) {
+    throw new Error(`Failed to unlink note ${slug}`);
   }
 }

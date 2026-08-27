@@ -356,6 +356,118 @@ async fn list_agents() -> Json<Vec<AgentProfile>> {
     Json(profiles)
 }
 
+fn notes_dir(state: &AppState) -> PathBuf {
+    state
+        .db_path
+        .parent()
+        .unwrap_or(std::path::Path::new("."))
+        .join("Notes")
+}
+
+#[derive(Serialize)]
+pub struct NoteResponse {
+    pub slug: String,
+    pub title: String,
+    pub body: String,
+}
+
+impl From<crate::note::Note> for NoteResponse {
+    fn from(n: crate::note::Note) -> Self {
+        NoteResponse { slug: n.slug, title: n.title, body: n.body }
+    }
+}
+
+async fn list_task_notes(
+    State(state): State<Arc<AppState>>,
+    AxumPath(id): AxumPath<u32>,
+) -> Result<Json<Vec<NoteResponse>>, (StatusCode, Json<serde_json::Value>)> {
+    let task_file = db::load(&state.db_path)
+        .map_err(|e| app_error(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    let task = task_file
+        .find_task(id)
+        .ok_or_else(|| app_error(StatusCode::NOT_FOUND, format!("Task {} not found", id)))?;
+
+    let dir = notes_dir(&state);
+    let notes: Vec<NoteResponse> = task
+        .notes
+        .iter()
+        .filter_map(|slug| crate::note::read_note(&dir.join(format!("{}.md", slug))).ok())
+        .map(NoteResponse::from)
+        .collect();
+    Ok(Json(notes))
+}
+
+#[derive(Deserialize)]
+pub struct CreateNoteRequest {
+    pub title: String,
+}
+
+async fn create_task_note(
+    State(state): State<Arc<AppState>>,
+    AxumPath(id): AxumPath<u32>,
+    Json(req): Json<CreateNoteRequest>,
+) -> Result<Json<NoteResponse>, (StatusCode, Json<serde_json::Value>)> {
+    let _guard = state.write_lock.lock().await;
+    let mut task_file = db::load(&state.db_path)
+        .map_err(|e| app_error(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    if task_file.find_task(id).is_none() {
+        return Err(app_error(StatusCode::NOT_FOUND, format!("Task {} not found", id)));
+    }
+
+    let dir = notes_dir(&state);
+    let base_slug = crate::note::slugify(&req.title);
+    let slug = crate::note::unique_slug(&dir, &base_slug);
+    let note = crate::note::Note { slug: slug.clone(), title: req.title.clone(), body: String::new() };
+    crate::note::write_note(&dir, &note).map_err(|e| app_error(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+
+    let t = task_file.find_task_mut(id).expect("checked above");
+    t.notes.push(slug.clone());
+    db::save(&state.db_path, &task_file).map_err(|e| app_error(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+
+    Ok(Json(NoteResponse::from(note)))
+}
+
+#[derive(Deserialize)]
+pub struct EditNoteRequest {
+    pub title: Option<String>,
+    pub body: Option<String>,
+}
+
+async fn edit_note(
+    State(state): State<Arc<AppState>>,
+    AxumPath(slug): AxumPath<String>,
+    Json(req): Json<EditNoteRequest>,
+) -> Result<Json<NoteResponse>, (StatusCode, Json<serde_json::Value>)> {
+    let _guard = state.write_lock.lock().await;
+    let dir = notes_dir(&state);
+    let path = dir.join(format!("{}.md", slug));
+    let mut note = crate::note::read_note(&path)
+        .map_err(|e| app_error(StatusCode::NOT_FOUND, e))?;
+    if let Some(title) = req.title {
+        note.title = title;
+    }
+    if let Some(body) = req.body {
+        note.body = body;
+    }
+    crate::note::write_note(&dir, &note).map_err(|e| app_error(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    Ok(Json(NoteResponse::from(note)))
+}
+
+async fn unlink_task_note(
+    State(state): State<Arc<AppState>>,
+    AxumPath((id, slug)): AxumPath<(u32, String)>,
+) -> Result<StatusCode, (StatusCode, Json<serde_json::Value>)> {
+    let _guard = state.write_lock.lock().await;
+    let mut task_file = db::load(&state.db_path)
+        .map_err(|e| app_error(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    let t = task_file
+        .find_task_mut(id)
+        .ok_or_else(|| app_error(StatusCode::NOT_FOUND, format!("Task {} not found", id)))?;
+    t.notes.retain(|s| s != &slug);
+    db::save(&state.db_path, &task_file).map_err(|e| app_error(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
 pub fn router(state: AppState) -> Router {
     router_with_static(state, None)
 }
@@ -367,6 +479,9 @@ pub fn router_with_static(state: AppState, static_dir: Option<std::path::PathBuf
         .route("/api/tasks/:id", get(get_task).patch(edit_task).delete(delete_task))
         .route("/api/tasks/:id/done", axum::routing::post(done_task))
         .route("/api/tasks/:id/reopen", axum::routing::post(reopen_task))
+        .route("/api/tasks/:id/notes", get(list_task_notes).post(create_task_note))
+        .route("/api/tasks/:id/notes/:slug", axum::routing::delete(unlink_task_note))
+        .route("/api/notes/:slug", axum::routing::patch(edit_note))
         .route("/api/agents", get(list_agents));
 
     if let Some(dir) = static_dir {

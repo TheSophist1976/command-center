@@ -23,3 +23,9 @@ export interface AgentProfile {
   name: string;
   dir: string;
 }
+
+export interface Note {
+  slug: string;
+  title: string;
+  body: string;
+}
