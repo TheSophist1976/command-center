@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import './tokens.css';
-import { Terminal, Sun, CalendarDays, Settings, Search } from 'lucide-react';
+import { Terminal, Sun, CalendarDays, Settings, Search, PanelLeftClose, PanelLeftOpen, PanelRightClose, PanelRightOpen, X } from 'lucide-react';
 import { Button } from './components/Button';
 import { NewTaskForm } from './components/NewTaskForm';
 import { EditableField, FieldRow } from './components/EditableField';
@@ -85,7 +85,14 @@ export default function App() {
   const [search, setSearch] = useState('');
   const [groupBy, setGroupBy] = useState<GroupBy>('agent');
   const [dueFilter, setDueFilter] = useState<DueFilter>('all-tasks');
+  const [leftOpen, setLeftOpen] = useState(true);
+  const [rightOpen, setRightOpen] = useState(true);
   const today = useMemo(() => startOfToday(), []);
+
+  function selectTask(task: Task) {
+    setSelected(task);
+    setRightOpen(true);
+  }
 
   useEffect(() => {
     Promise.all([fetchTasks(), fetchAgents()])
@@ -165,6 +172,7 @@ export default function App() {
 
   return (
     <div style={{ display: 'flex', height: '100vh', overflow: 'hidden' }}>
+      {leftOpen && (
       <aside
         style={{
           width: 252, flex: 'none', background: 'var(--ink-2)',
@@ -221,13 +229,28 @@ export default function App() {
           <span style={{ flex: 1, fontSize: 14, color: 'var(--fg-3)' }}>Settings</span>
         </div>
       </aside>
+      )}
 
       <main style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column' }}>
         <header style={{ height: 72, flex: 'none', padding: '0 24px', borderBottom: '1px solid var(--hairline)', display: 'flex', alignItems: 'center', gap: 16 }}>
+          <button
+            onClick={() => setLeftOpen((v) => !v)}
+            title={leftOpen ? 'Hide sidebar' : 'Show sidebar'}
+            style={{ background: 'transparent', border: 'none', cursor: 'pointer', display: 'flex', padding: 4 }}
+          >
+            {leftOpen ? <PanelLeftClose size={18} color="var(--fg-4)" /> : <PanelLeftOpen size={18} color="var(--fg-4)" />}
+          </button>
           <span style={{ fontFamily: 'var(--font-display)', fontWeight: 600, fontSize: 22 }}>
             {DUE_WINDOW_ITEMS.find((i) => i.value === dueFilter)?.label ?? 'All tasks'}
           </span>
           <div style={{ flex: 1 }} />
+          <button
+            onClick={() => setRightOpen((v) => !v)}
+            title={rightOpen ? 'Hide inspector' : 'Show inspector'}
+            style={{ background: 'transparent', border: 'none', cursor: 'pointer', display: 'flex', padding: 4 }}
+          >
+            {rightOpen ? <PanelRightClose size={18} color="var(--fg-4)" /> : <PanelRightOpen size={18} color="var(--fg-4)" />}
+          </button>
           <div style={{ display: 'flex', alignItems: 'center', gap: 8, height: 34, padding: '0 12px', border: '1px solid var(--hairline)', borderRadius: 5 }}>
             <span style={{ fontSize: 13, color: 'var(--fg-4)' }}>Group</span>
             <select
@@ -279,7 +302,7 @@ export default function App() {
               {groupTasksList.map((t) => (
                 <div
                   key={t.id}
-                  onClick={() => setSelected(t)}
+                  onClick={() => selectTask(t)}
                   style={{
                     display: 'flex', alignItems: 'center', gap: 16, height: 46, padding: '0 24px',
                     borderBottom: '1px solid var(--hairline-soft)', cursor: 'pointer',
@@ -310,17 +333,27 @@ export default function App() {
         </div>
       </main>
 
+      {rightOpen && (
       <aside style={{ width: 352, flex: 'none', background: 'var(--ink-3)', borderLeft: '1px solid var(--hairline)', display: 'flex', flexDirection: 'column', padding: selected ? '20px 24px' : 0, alignItems: selected ? 'stretch' : 'center', justifyContent: selected ? 'flex-start' : 'center', color: 'var(--fg-5)' }}>
         {selected ? (
           <>
-            <div style={{
-              fontFamily: 'var(--font-display)', fontWeight: 600, fontSize: 20, color: 'var(--fg-1)', marginBottom: 12,
-              textDecoration: selected.status === 'done' ? 'line-through' : 'none',
-            }}>
-              <EditableField
-                value={selected.title}
-                onSave={(v) => v.trim() && handleEditField(selected.id, { title: v.trim() })}
-              />
+            <div style={{ display: 'flex', alignItems: 'flex-start', gap: 8 }}>
+              <div style={{
+                flex: 1, fontFamily: 'var(--font-display)', fontWeight: 600, fontSize: 20, color: 'var(--fg-1)', marginBottom: 12,
+                textDecoration: selected.status === 'done' ? 'line-through' : 'none',
+              }}>
+                <EditableField
+                  value={selected.title}
+                  onSave={(v) => v.trim() && handleEditField(selected.id, { title: v.trim() })}
+                />
+              </div>
+              <button
+                onClick={() => setRightOpen(false)}
+                title="Close inspector"
+                style={{ background: 'transparent', border: 'none', cursor: 'pointer', display: 'flex', padding: 2, flex: 'none' }}
+              >
+                <X size={16} color="var(--fg-4)" />
+              </button>
             </div>
             <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 13, color: 'var(--fg-3)' }}>
               <span>#{selected.id} ·</span>
@@ -417,6 +450,7 @@ export default function App() {
           'Select a task'
         )}
       </aside>
+      )}
     </div>
   );
 }
