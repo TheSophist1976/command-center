@@ -334,7 +334,7 @@ use std::sync::Arc;
 
 use axum::extract::{Path as AxumPath, Query, State};
 use axum::http::StatusCode;
-use axum::response::{IntoResponse, Json};
+use axum::response::Json;
 use axum::routing::get;
 use axum::Router;
 use serde::{Deserialize, Serialize};
@@ -1755,23 +1755,12 @@ export async function deleteTask(id: number): Promise<void> {
 }
 ```
 
-- [ ] **Step 4: Write a due-window bucketing helper and its test**
+- [ ] **Step 4: Write a due-window count helper**
 
-Create `web/src/dueWindow.ts`:
+Create `web/src/dueWindow.ts`. v1's sidebar shows a single "All open" count (matching the simplified single-nav-item sidebar built in Step 5) — this is the only bucket actually wired up in this task; per-window buckets (Today/This week/This month/This year) are a follow-up, not built here:
 
 ```ts
 import type { Task } from './types';
-
-export function countDueWithin(tasks: Task[], days: number | null, today: Date): number {
-  return tasks.filter((t) => {
-    if (t.status === 'done') return false;
-    if (!t.due_date) return false;
-    if (days === null) return true; // "All tasks" bucket still requires a due date? No — see countAll below.
-    const due = new Date(t.due_date + 'T00:00:00');
-    const diffDays = Math.floor((due.getTime() - today.getTime()) / 86400000);
-    return diffDays <= days;
-  }).length;
-}
 
 export function countAllOpen(tasks: Task[]): number {
   return tasks.filter((t) => t.status !== 'done').length;
