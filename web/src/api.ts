@@ -90,14 +90,12 @@ export async function createTaskNote(taskId: number, title: string): Promise<Not
   );
 }
 
-export async function editNote(slug: string, changes: Partial<{ title: string; body: string }>): Promise<Note> {
-  return jsonOrThrow(
-    await fetch(`/api/notes/${slug}`, {
-      method: 'PATCH',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify(changes),
-    }),
-  );
+export async function openNote(slug: string): Promise<void> {
+  const response = await fetch(`/api/notes/${slug}/open`, { method: 'POST' });
+  if (!response.ok && response.status !== 204) {
+    const body = await response.json().catch(() => ({ error: response.statusText }));
+    throw new Error(body.error ?? `Failed to open note ${slug}`);
+  }
 }
 
 export async function unlinkTaskNote(taskId: number, slug: string): Promise<void> {

@@ -4,7 +4,7 @@ import { Terminal, Sun, CalendarDays, Settings, Search, PanelLeftClose, PanelLef
 import { Button } from './components/Button';
 import { NewTaskForm } from './components/NewTaskForm';
 import { EditableField, FieldRow } from './components/EditableField';
-import { fetchTasks, fetchAgents, addTask, editTask, markDone, reopenTask, deleteTask, fetchTaskNotes, createTaskNote, editNote, unlinkTaskNote } from './api';
+import { fetchTasks, fetchAgents, addTask, editTask, markDone, reopenTask, deleteTask, fetchTaskNotes, createTaskNote, openNote, unlinkTaskNote } from './api';
 import { NotesSection } from './components/NotesSection';
 import type { Task, AgentProfile, Note } from './types';
 import { countDueWindow, dueMatches, startOfToday, type DueWindow } from './dueWindow';
@@ -179,15 +179,15 @@ export default function App() {
       const note = await createTaskNote(selected.id, title);
       setTaskNotes((prev) => [...prev, note]);
       updateTaskNoteSlugs(selected.id, [...(selected.notes ?? []), note.slug]);
+      await handleOpenNote(note.slug);
     } catch (e) {
       setError(String(e));
     }
   }
 
-  async function handleEditNote(slug: string, changes: { title?: string; body?: string }) {
+  async function handleOpenNote(slug: string) {
     try {
-      const updated = await editNote(slug, changes);
-      setTaskNotes((prev) => prev.map((n) => (n.slug === slug ? updated : n)));
+      await openNote(slug);
     } catch (e) {
       setError(String(e));
     }
@@ -483,7 +483,7 @@ export default function App() {
             <NotesSection
               notes={taskNotes}
               onCreate={handleCreateNote}
-              onEdit={handleEditNote}
+              onOpen={handleOpenNote}
               onUnlink={handleUnlinkNote}
             />
 

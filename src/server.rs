@@ -435,33 +435,52 @@ async fn create_task_note(
     Ok(Json(NoteResponse::from(note)))
 }
 
-#[derive(Deserialize)]
-pub struct EditNoteRequest {
-    pub title: Option<String>,
-    pub body: Option<String>,
+/// Mirrors tui.rs's `build_obsidian_uri`: an Obsidian deep link when a vault is configured.
+fn build_obsidian_uri(slug: &str) -> Option<String> {
+    let vault = crate::config::read_config_value("obsidian-vault")?;
+    let notes_dir = crate::config::read_config_value("obsidian-notes-dir");
+    let file = match notes_dir {
+        Some(ref dir) => format!("{}/{}", dir, slug),
+        None => slug.to_string(),
+    };
+    Some(format!("obsidian://open?vault={}&file={}", vault, file))
 }
 
-async fn edit_note(
+/// Mirrors tui.rs's `open_note_external`, minus the raw-mode terminal handling that has
+/// no equivalent in a headless server process — every spawn here is fire-and-forget.
+/// Priority: Obsidian (if configured) > $EDITOR/$VISUAL.
+fn open_note_external(note_path: &std::path::Path, slug: &str) -> Result<(), String> {
+    if let Some(uri) = build_obsidian_uri(slug) {
+        std::process::Command::new("open")
+            .arg(&uri)
+            .spawn()
+            .map_err(|e| format!("Failed to open Obsidian: {}", e))?;
+        return Ok(());
+    }
+    let editor = std::env::var("EDITOR").or_else(|_| std::env::var("VISUAL")).ok();
+    match editor {
+        Some(ed) => {
+            std::process::Command::new(&ed)
+                .arg(note_path)
+                .spawn()
+                .map_err(|e| format!("Failed to launch editor '{}': {}", ed, e))?;
+            Ok(())
+        }
+        None => Err("No editor configured. Set $EDITOR or add obsidian-vault to config.".to_string()),
+    }
+}
+
+async fn open_note(
     State(state): State<Arc<AppState>>,
     AxumPath(slug): AxumPath<String>,
-    Json(req): Json<EditNoteRequest>,
-) -> Result<Json<NoteResponse>, (StatusCode, Json<serde_json::Value>)> {
+) -> Result<StatusCode, (StatusCode, Json<serde_json::Value>)> {
     if !is_valid_slug(&slug) {
         return Err(app_error(StatusCode::BAD_REQUEST, "invalid note slug"));
     }
-    let _guard = state.write_lock.lock().await;
     let dir = notes_dir(&state);
-    let path = dir.join(format!("{}.md", slug));
-    let mut note = crate::note::read_note(&path)
-        .map_err(|e| app_error(StatusCode::NOT_FOUND, e))?;
-    if let Some(title) = req.title {
-        note.title = title;
-    }
-    if let Some(body) = req.body {
-        note.body = body;
-    }
-    crate::note::write_note(&dir, &note).map_err(|e| app_error(StatusCode::INTERNAL_SERVER_ERROR, e))?;
-    Ok(Json(NoteResponse::from(note)))
+    let note_path = dir.join(format!("{}.md", slug));
+    open_note_external(&note_path, &slug).map_err(|e| app_error(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 async fn unlink_task_note(
@@ -495,7 +514,7 @@ pub fn router_with_static(state: AppState, static_dir: Option<std::path::PathBuf
         .route("/api/tasks/:id/reopen", axum::routing::post(reopen_task))
         .route("/api/tasks/:id/notes", get(list_task_notes).post(create_task_note))
         .route("/api/tasks/:id/notes/:slug", axum::routing::delete(unlink_task_note))
-        .route("/api/notes/:slug", axum::routing::patch(edit_note))
+        .route("/api/notes/:slug/open", axum::routing::post(open_note))
         .route("/api/agents", get(list_agents));
 
     if let Some(dir) = static_dir {
@@ -1082,18 +1101,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_edit_note_rejects_path_traversal_slug() {
+    async fn test_open_note_rejects_path_traversal_slug() {
         let (_dir, state) = make_state();
         let app = router(state);
-        let body = serde_json::json!({ "body": "pwned" });
         let response = app
             .oneshot(
                 Request::builder()
-                    .method("PATCH")
-                    .uri("/api/notes/..%2f..%2f..%2fetc%2fpasswd")
+                    .method("POST")
+                    .uri("/api/notes/..%2f..%2f..%2fetc%2fpasswd/open")
                     .header("host", "127.0.0.1")
-                    .header("content-type", "application/json")
-                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .body(Body::empty())
                     .unwrap(),
             )
             .await

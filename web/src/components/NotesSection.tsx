@@ -1,20 +1,18 @@
 import { useState } from 'react';
-import { X } from 'lucide-react';
+import { ExternalLink, X } from 'lucide-react';
 import type { Note } from '../types';
-import { EditableField } from './EditableField';
 import { Button } from './Button';
 
 interface NotesSectionProps {
   notes: Note[];
   onCreate: (title: string) => void;
-  onEdit: (slug: string, changes: { title?: string; body?: string }) => void;
+  onOpen: (slug: string) => void;
   onUnlink: (slug: string) => void;
 }
 
-export function NotesSection({ notes, onCreate, onEdit, onUnlink }: NotesSectionProps) {
+export function NotesSection({ notes, onCreate, onOpen, onUnlink }: NotesSectionProps) {
   const [adding, setAdding] = useState(false);
   const [newTitle, setNewTitle] = useState('');
-  const [expanded, setExpanded] = useState<string | null>(null);
 
   function submitNewNote() {
     const title = newTitle.trim();
@@ -44,36 +42,45 @@ export function NotesSection({ notes, onCreate, onEdit, onUnlink }: NotesSection
       )}
 
       {notes.map((n) => (
-        <div key={n.slug} style={{ border: '1px solid var(--hairline)', borderRadius: 6, padding: 10 }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-            <div
-              style={{ flex: 1, cursor: 'pointer' }}
-              onClick={() => setExpanded(expanded === n.slug ? null : n.slug)}
-            >
-              <EditableField
-                value={n.title}
-                onSave={(v) => v.trim() && onEdit(n.slug, { title: v.trim() })}
-                display={<span style={{ fontSize: 13, fontWeight: 600 }}>{n.title}</span>}
-              />
-            </div>
-            <button
-              onClick={() => onUnlink(n.slug)}
-              title="Unlink note"
-              style={{ background: 'transparent', border: 'none', cursor: 'pointer', color: 'var(--fg-5)', padding: 0 }}
-            >
-              <X size={14} />
-            </button>
-          </div>
-          {expanded === n.slug && (
-            <div style={{ marginTop: 8 }}>
-              <EditableField
-                value={n.body}
-                type="textarea"
-                placeholder="Empty"
-                onSave={(v) => onEdit(n.slug, { body: v })}
-              />
-            </div>
-          )}
+        <div
+          key={n.slug}
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: 8,
+            border: '1px solid var(--hairline)',
+            borderRadius: 6,
+            padding: '8px 10px',
+          }}
+        >
+          <button
+            onClick={() => onOpen(n.slug)}
+            title="Open in external editor"
+            style={{
+              flex: 1,
+              display: 'flex',
+              alignItems: 'center',
+              gap: 6,
+              background: 'transparent',
+              border: 'none',
+              cursor: 'pointer',
+              textAlign: 'left',
+              fontSize: 13,
+              fontWeight: 600,
+              color: 'var(--fg-1)',
+              padding: 0,
+            }}
+          >
+            <ExternalLink size={13} style={{ flex: 'none', color: 'var(--fg-5)' }} />
+            {n.title}
+          </button>
+          <button
+            onClick={() => onUnlink(n.slug)}
+            title="Unlink note"
+            style={{ background: 'transparent', border: 'none', cursor: 'pointer', color: 'var(--fg-5)', padding: 0 }}
+          >
+            <X size={14} />
+          </button>
         </div>
       ))}
 
