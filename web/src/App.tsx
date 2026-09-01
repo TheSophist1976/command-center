@@ -117,6 +117,11 @@ export default function App() {
       .catch((e) => setError(String(e)));
   }, [selected?.id]);
 
+  useEffect(() => {
+    if (!selected) return;
+    document.querySelector(`[data-task-row="${selected.id}"]`)?.scrollIntoView({ block: 'nearest' });
+  }, [selected?.id]);
+
   async function handleAddTask(title: string) {
     try {
       const created = await addTask({ title });
@@ -480,11 +485,13 @@ export default function App() {
               {groupTasksList.map((t) => (
                 <div
                   key={t.id}
+                  data-task-row={t.id}
                   onClick={() => selectTask(t)}
                   style={{
-                    display: 'flex', alignItems: 'center', gap: 16, height: 46, padding: '0 24px',
+                    display: 'flex', alignItems: 'center', gap: 16, height: 46, padding: '0 24px 0 21px',
                     borderBottom: '1px solid var(--hairline-soft)', cursor: 'pointer',
-                    background: selected?.id === t.id ? 'rgba(255,0,149,0.08)' : 'transparent',
+                    background: selected?.id === t.id ? 'rgba(255,0,149,0.12)' : 'transparent',
+                    borderLeft: selected?.id === t.id ? '3px solid var(--magenta)' : '3px solid transparent',
                   }}
                 >
                   <span style={{ width: 34, fontFamily: 'var(--font-mono)', fontSize: 12, color: 'var(--fg-5)' }}>{t.id}</span>
