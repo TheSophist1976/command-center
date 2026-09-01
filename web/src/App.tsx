@@ -85,7 +85,7 @@ export default function App() {
   const [showNewTaskForm, setShowNewTaskForm] = useState(false);
   const [search, setSearch] = useState('');
   const [groupBy, setGroupBy] = useState<GroupBy>('agent');
-  const [dueFilter, setDueFilter] = useState<DueFilter>('all-tasks');
+  const [dueFilter, setDueFilter] = useState<DueFilter>('day');
   const [leftOpen, setLeftOpen] = useState(true);
   const [rightOpen, setRightOpen] = useState(true);
   const [taskNotes, setTaskNotes] = useState<Note[]>([]);
