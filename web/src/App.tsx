@@ -262,6 +262,30 @@ export default function App() {
       setGroupBy(GROUP_BY_OPTIONS[next].value);
     }
 
+    function formatLocalDate(d: Date): string {
+      const y = d.getFullYear();
+      const m = String(d.getMonth() + 1).padStart(2, '0');
+      const day = String(d.getDate()).padStart(2, '0');
+      return `${y}-${m}-${day}`;
+    }
+
+    function addDays(d: Date, days: number): Date {
+      const copy = new Date(d);
+      copy.setDate(copy.getDate() + days);
+      return copy;
+    }
+
+    function addMonths(d: Date, months: number): Date {
+      const copy = new Date(d);
+      copy.setMonth(copy.getMonth() + months);
+      return copy;
+    }
+
+    function setQuickDue(offset: Date | null) {
+      if (!selected) return;
+      handleEditField(selected.id, { due: offset ? formatLocalDate(offset) : '' });
+    }
+
     function handleKeyDown(e: KeyboardEvent) {
       if (e.metaKey || e.ctrlKey || e.altKey) return;
       if (isTypingTarget(e.target)) return;
@@ -308,6 +332,27 @@ export default function App() {
           break;
         case 'g':
           if (selected?.notes?.length) handleOpenNote(selected.notes[0]);
+          break;
+        case 'T':
+          if (selected) { e.preventDefault(); setQuickDue(today); }
+          break;
+        case 'N':
+          if (selected) { e.preventDefault(); setQuickDue(addDays(today, 1)); }
+          break;
+        case 'W':
+          if (selected) { e.preventDefault(); setQuickDue(addDays(today, 7)); }
+          break;
+        case 'M':
+          if (selected) { e.preventDefault(); setQuickDue(addMonths(today, 1)); }
+          break;
+        case 'Q':
+          if (selected) { e.preventDefault(); setQuickDue(addMonths(today, 3)); }
+          break;
+        case 'Y':
+          if (selected) { e.preventDefault(); setQuickDue(addMonths(today, 12)); }
+          break;
+        case 'X':
+          if (selected) { e.preventDefault(); setQuickDue(null); }
           break;
         case '/':
           e.preventDefault();
@@ -677,6 +722,13 @@ export default function App() {
                 ['A', 'Edit agent'],
                 ['E', 'Edit effort'],
                 ['g', 'Open first linked note'],
+                ['T', 'Due: today'],
+                ['N', 'Due: tomorrow'],
+                ['W', 'Due: +1 week'],
+                ['M', 'Due: +1 month'],
+                ['Q', 'Due: +1 quarter'],
+                ['Y', 'Due: +1 year'],
+                ['X', 'Clear due date'],
                 ['/', 'Focus search'],
                 ['G', 'Cycle group-by'],
                 ['[ / ]', 'Cycle due window'],

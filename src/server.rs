@@ -207,12 +207,18 @@ async fn edit_task(
         .map(crate::task::Effort::from_str)
         .transpose()
         .map_err(|e| app_error(StatusCode::BAD_REQUEST, e))?;
-    let due_date = req
+    // `due: ""` is an explicit clear, distinct from the field being absent entirely.
+    let due_date: Option<Option<chrono::NaiveDate>> = req
         .due
         .as_deref()
         .map(|d| {
-            crate::parser::parse_due_date_input(d, today)
-                .ok_or_else(|| format!("Invalid due date: '{}'", d))
+            if d.is_empty() {
+                Ok(None)
+            } else {
+                crate::parser::parse_due_date_input(d, today)
+                    .map(Some)
+                    .ok_or_else(|| format!("Invalid due date: '{}'", d))
+            }
         })
         .transpose()
         .map_err(|e| app_error(StatusCode::BAD_REQUEST, e))?;
@@ -233,7 +239,7 @@ async fn edit_task(
             t.priority = p;
         }
         if let Some(d) = due_date {
-            t.due_date = Some(d);
+            t.due_date = d;
         }
         if let Some(p) = req.project {
             t.project = Some(p);
@@ -868,6 +874,38 @@ mod tests {
         assert_eq!(json["title"], "Original");
         assert_eq!(json["priority"], "critical");
         assert!(json["updated"].is_string());
+    }
+
+    #[tokio::test]
+    async fn test_edit_task_empty_due_clears_it() {
+        let (_dir, state) = make_state();
+        {
+            let mut tf = crate::task::TaskFile::new();
+            tf.tasks.push(crate::task::Task {
+                id: 1, title: "Has a due date".to_string(), status: Status::Open, priority: crate::task::Priority::Medium,
+                tags: Vec::new(), created: chrono::Utc::now(), updated: None, description: None,
+                due_date: chrono::NaiveDate::from_ymd_opt(2026, 1, 5), project: None, recurrence: None,
+                notes: Vec::new(), agent: None, effort: None,
+            });
+            db::save(&state.db_path, &tf).unwrap();
+        }
+        let app = router(state);
+        let body = serde_json::json!({ "due": "" });
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("PATCH")
+                    .uri("/api/tasks/1")
+                    .header("host", "127.0.0.1")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let json = body_json(response).await;
+        assert!(json["due_date"].is_null());
     }
 
     #[tokio::test]
