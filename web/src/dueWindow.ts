@@ -6,8 +6,12 @@ export function countAllOpen(tasks: Task[]): number {
   return tasks.filter((t) => t.status !== 'done').length;
 }
 
-function isIncomplete(t: Task): boolean {
+export function isIncomplete(t: Task): boolean {
   return t.status === 'open' && (!t.due_date || !t.agent);
+}
+
+export function isOverdue(t: Task, today: Date): boolean {
+  return t.status === 'open' && !!t.due_date && parseDate(t.due_date) < today;
 }
 
 function parseDate(s: string): Date {
