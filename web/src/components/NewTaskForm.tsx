@@ -21,6 +21,9 @@ export function NewTaskForm({ onSubmit, onCancel }: NewTaskFormProps) {
         autoFocus
         value={title}
         onChange={(e) => setTitle(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === 'Escape') onCancel();
+        }}
         placeholder="Task title"
         style={{
           height: 34,

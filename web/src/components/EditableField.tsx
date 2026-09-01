@@ -12,6 +12,7 @@ interface EditableFieldProps {
   type?: 'text' | 'date' | 'select' | 'textarea';
   options?: SelectOption[];
   placeholder?: string;
+  id?: string;
 }
 
 const inputStyle: CSSProperties = {
@@ -26,7 +27,7 @@ const inputStyle: CSSProperties = {
   boxSizing: 'border-box',
 };
 
-export function EditableField({ value, display, onSave, type = 'text', options, placeholder }: EditableFieldProps) {
+export function EditableField({ value, display, onSave, type = 'text', options, placeholder, id }: EditableFieldProps) {
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(value);
 
@@ -47,7 +48,7 @@ export function EditableField({ value, display, onSave, type = 'text', options, 
 
   if (!editing) {
     return (
-      <div onClick={startEditing} style={{ cursor: 'pointer', minHeight: 20 }} title="Click to edit">
+      <div id={id} onClick={startEditing} style={{ cursor: 'pointer', minHeight: 20 }} title="Click to edit">
         {display ?? (value ? value : <span style={{ color: 'var(--fg-5)' }}>{placeholder ?? '—'}</span>)}
       </div>
     );

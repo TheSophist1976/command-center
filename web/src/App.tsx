@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import './tokens.css';
 import { Terminal, Sun, CalendarDays, Settings, Search, PanelLeftClose, PanelLeftOpen, PanelRightClose, PanelRightOpen, X } from 'lucide-react';
 import { Button } from './components/Button';
@@ -89,7 +89,9 @@ export default function App() {
   const [leftOpen, setLeftOpen] = useState(true);
   const [rightOpen, setRightOpen] = useState(true);
   const [taskNotes, setTaskNotes] = useState<Note[]>([]);
+  const [showShortcuts, setShowShortcuts] = useState(false);
   const today = useMemo(() => startOfToday(), []);
+  const searchInputRef = useRef<HTMLInputElement>(null);
 
   function selectTask(task: Task) {
     setSelected(task);
@@ -217,6 +219,120 @@ export default function App() {
   }, [tasks, dueFilter, search, today]);
 
   const grouped = useMemo(() => groupTasks(filteredTasks, groupBy), [filteredTasks, groupBy]);
+  const flatOrder = useMemo(() => [...grouped.values()].flat(), [grouped]);
+
+  useEffect(() => {
+    function isTypingTarget(target: EventTarget | null): boolean {
+      if (!(target instanceof HTMLElement)) return false;
+      const tag = target.tagName;
+      return tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || target.isContentEditable;
+    }
+
+    function clickField(id: string) {
+      if (!selected || !rightOpen) return;
+      document.getElementById(id)?.click();
+    }
+
+    function moveSelection(delta: number) {
+      if (flatOrder.length === 0) return;
+      const currentIndex = selected ? flatOrder.findIndex((t) => t.id === selected.id) : -1;
+      const nextIndex = currentIndex === -1 ? 0 : Math.min(Math.max(currentIndex + delta, 0), flatOrder.length - 1);
+      selectTask(flatOrder[nextIndex]);
+    }
+
+    function toggleDone(task: Task) {
+      if (task.status === 'done') handleReopen(task);
+      else handleMarkDone(task);
+    }
+
+    function cycleDueFilter(delta: number) {
+      const idx = DUE_WINDOW_ITEMS.findIndex((i) => i.value === dueFilter);
+      const next = (idx + delta + DUE_WINDOW_ITEMS.length) % DUE_WINDOW_ITEMS.length;
+      setDueFilter(DUE_WINDOW_ITEMS[next].value);
+    }
+
+    function cycleGroupBy() {
+      const idx = GROUP_BY_OPTIONS.findIndex((o) => o.value === groupBy);
+      const next = (idx + 1) % GROUP_BY_OPTIONS.length;
+      setGroupBy(GROUP_BY_OPTIONS[next].value);
+    }
+
+    function handleKeyDown(e: KeyboardEvent) {
+      if (e.metaKey || e.ctrlKey || e.altKey) return;
+      if (isTypingTarget(e.target)) return;
+
+      switch (e.key) {
+        case 'j':
+        case 'ArrowDown':
+          e.preventDefault();
+          moveSelection(1);
+          break;
+        case 'k':
+        case 'ArrowUp':
+          e.preventDefault();
+          moveSelection(-1);
+          break;
+        case 'Enter':
+        case ' ':
+          if (selected) {
+            e.preventDefault();
+            toggleDone(selected);
+          }
+          break;
+        case 'a':
+          e.preventDefault();
+          setShowNewTaskForm(true);
+          break;
+        case 'e':
+          clickField('field-title');
+          break;
+        case 'd':
+          clickField('field-due');
+          break;
+        case 'p':
+          clickField('field-priority');
+          break;
+        case 't':
+          clickField('field-tags');
+          break;
+        case 'A':
+          clickField('field-agent');
+          break;
+        case 'E':
+          clickField('field-effort');
+          break;
+        case 'g':
+          if (selected?.notes?.length) handleOpenNote(selected.notes[0]);
+          break;
+        case '/':
+          e.preventDefault();
+          searchInputRef.current?.focus();
+          break;
+        case 'G':
+          e.preventDefault();
+          cycleGroupBy();
+          break;
+        case '[':
+          e.preventDefault();
+          cycleDueFilter(-1);
+          break;
+        case ']':
+          e.preventDefault();
+          cycleDueFilter(1);
+          break;
+        case '?':
+          e.preventDefault();
+          setShowShortcuts((v) => !v);
+          break;
+        case 'Escape':
+          setRightOpen(false);
+          break;
+      }
+    }
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [selected, rightOpen, flatOrder, dueFilter, groupBy]);
 
   return (
     <div style={{ display: 'flex', height: '100vh', overflow: 'hidden' }}>
@@ -299,6 +415,13 @@ export default function App() {
           >
             {rightOpen ? <PanelRightClose size={18} color="var(--fg-4)" /> : <PanelRightOpen size={18} color="var(--fg-4)" />}
           </button>
+          <button
+            onClick={() => setShowShortcuts(true)}
+            title="Keyboard shortcuts (?)"
+            style={{ background: 'transparent', border: '1px solid var(--hairline)', borderRadius: 5, cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', width: 28, height: 28, color: 'var(--fg-4)', fontSize: 13, fontWeight: 700 }}
+          >
+            ?
+          </button>
           <div style={{ display: 'flex', alignItems: 'center', gap: 8, height: 34, padding: '0 12px', border: '1px solid var(--hairline)', borderRadius: 5 }}>
             <span style={{ fontSize: 13, color: 'var(--fg-4)' }}>Group</span>
             <select
@@ -316,8 +439,15 @@ export default function App() {
           <div style={{ display: 'flex', alignItems: 'center', gap: 8, height: 34, padding: '0 12px', border: '1px solid var(--hairline)', borderRadius: 5, background: 'var(--ink-2)', width: 240 }}>
             <Search size={14} color="var(--fg-4)" />
             <input
+              ref={searchInputRef}
               value={search}
               onChange={(e) => setSearch(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Escape') {
+                  setSearch('');
+                  (e.target as HTMLInputElement).blur();
+                }
+              }}
               placeholder="Search tasks…"
               style={{ flex: 1, background: 'transparent', border: 'none', outline: 'none', color: 'var(--fg-1)', fontSize: 13 }}
             />
@@ -391,6 +521,7 @@ export default function App() {
                 textDecoration: selected.status === 'done' ? 'line-through' : 'none',
               }}>
                 <EditableField
+                  id="field-title"
                   value={selected.title}
                   onSave={(v) => v.trim() && handleEditField(selected.id, { title: v.trim() })}
                 />
@@ -406,6 +537,7 @@ export default function App() {
             <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 13, color: 'var(--fg-3)' }}>
               <span>#{selected.id} ·</span>
               <EditableField
+                id="field-priority"
                 value={selected.priority}
                 type="select"
                 options={PRIORITY_OPTIONS}
@@ -430,6 +562,7 @@ export default function App() {
             <div style={{ display: 'flex', flexDirection: 'column', marginBottom: 20 }}>
               <FieldRow label="Due">
                 <EditableField
+                  id="field-due"
                   value={selected.due_date ?? ''}
                   type="date"
                   placeholder="No due date"
@@ -438,6 +571,7 @@ export default function App() {
               </FieldRow>
               <FieldRow label="Effort">
                 <EditableField
+                  id="field-effort"
                   value={selected.effort ?? 'medium'}
                   type="select"
                   options={EFFORT_OPTIONS}
@@ -454,6 +588,7 @@ export default function App() {
               </FieldRow>
               <FieldRow label="Agent">
                 <EditableField
+                  id="field-agent"
                   value={selected.agent ?? ''}
                   placeholder="Unassigned"
                   onSave={(v) => handleEditField(selected.id, { agent: v })}
@@ -461,6 +596,7 @@ export default function App() {
               </FieldRow>
               <FieldRow label="Tags">
                 <EditableField
+                  id="field-tags"
                   value={selected.tags.join(', ')}
                   placeholder="No tags"
                   onSave={(v) => handleEditField(selected.id, { tags: v })}
@@ -505,6 +641,49 @@ export default function App() {
           'Select a task'
         )}
       </aside>
+      )}
+
+      {showShortcuts && (
+        <div
+          onClick={() => setShowShortcuts(false)}
+          style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.5)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 100 }}
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            style={{ background: 'var(--ink-2)', border: '1px solid var(--hairline)', borderRadius: 8, padding: 24, width: 420, color: 'var(--fg-1)' }}
+          >
+            <div style={{ display: 'flex', alignItems: 'center', marginBottom: 16 }}>
+              <span style={{ flex: 1, fontFamily: 'var(--font-display)', fontWeight: 700, fontSize: 16 }}>Keyboard shortcuts</span>
+              <button onClick={() => setShowShortcuts(false)} style={{ background: 'transparent', border: 'none', cursor: 'pointer', display: 'flex' }}>
+                <X size={16} color="var(--fg-4)" />
+              </button>
+            </div>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 6, fontSize: 13 }}>
+              {[
+                ['j / k, ↓ / ↑', 'Move selection'],
+                ['Enter / Space', 'Toggle done'],
+                ['a', 'New task'],
+                ['e', 'Edit title'],
+                ['d', 'Edit due date'],
+                ['p', 'Edit priority'],
+                ['t', 'Edit tags'],
+                ['A', 'Edit agent'],
+                ['E', 'Edit effort'],
+                ['g', 'Open first linked note'],
+                ['/', 'Focus search'],
+                ['G', 'Cycle group-by'],
+                ['[ / ]', 'Cycle due window'],
+                ['Esc', 'Close inspector'],
+                ['?', 'Toggle this help'],
+              ].map(([key, desc]) => (
+                <div key={key} style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+                  <span style={{ width: 130, flex: 'none', fontFamily: 'var(--font-mono)', color: 'var(--magenta)' }}>{key}</span>
+                  <span style={{ color: 'var(--fg-3)' }}>{desc}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
       )}
     </div>
   );
