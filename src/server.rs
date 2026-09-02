@@ -242,13 +242,13 @@ async fn edit_task(
             t.due_date = d;
         }
         if let Some(p) = req.project {
-            t.project = Some(p);
+            t.project = if p.is_empty() { None } else { Some(p) };
         }
         if let Some(tg) = tags {
             t.tags = tg;
         }
         if let Some(a) = req.agent {
-            t.agent = Some(a);
+            t.agent = if a.is_empty() { None } else { Some(a) };
         }
         if let Some(d) = req.description {
             t.description = Some(d);
@@ -906,6 +906,38 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
         let json = body_json(response).await;
         assert!(json["due_date"].is_null());
+    }
+
+    #[tokio::test]
+    async fn test_edit_task_empty_agent_clears_it() {
+        let (_dir, state) = make_state();
+        {
+            let mut tf = crate::task::TaskFile::new();
+            tf.tasks.push(crate::task::Task {
+                id: 1, title: "Has an agent".to_string(), status: Status::Open, priority: crate::task::Priority::Medium,
+                tags: Vec::new(), created: chrono::Utc::now(), updated: None, description: None,
+                due_date: None, project: None, recurrence: None, notes: Vec::new(),
+                agent: Some("bot".to_string()), effort: None,
+            });
+            db::save(&state.db_path, &tf).unwrap();
+        }
+        let app = router(state);
+        let body = serde_json::json!({ "agent": "" });
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("PATCH")
+                    .uri("/api/tasks/1")
+                    .header("host", "127.0.0.1")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let json = body_json(response).await;
+        assert!(json["agent"].is_null());
     }
 
     #[tokio::test]

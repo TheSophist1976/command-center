@@ -114,6 +114,14 @@ export default function App() {
   const [taskNotes, setTaskNotes] = useState<Note[]>([]);
   const [showShortcuts, setShowShortcuts] = useState(false);
   const today = useMemo(() => startOfToday(), []);
+  const agentOptions = useMemo(
+    () => [
+      { value: '', label: 'Unassigned' },
+      ...agents.map((a) => ({ value: a.name, label: a.name })),
+      { value: 'human', label: 'human' },
+    ],
+    [agents],
+  );
   const searchInputRef = useRef<HTMLInputElement>(null);
 
   function selectTask(task: Task) {
@@ -683,6 +691,8 @@ export default function App() {
                 <EditableField
                   id="field-agent"
                   value={selected.agent ?? ''}
+                  type="select"
+                  options={agentOptions}
                   placeholder="Unassigned"
                   onSave={(v) => handleEditField(selected.id, { agent: v })}
                 />
