@@ -1,13 +1,13 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import './tokens.css';
-import { Terminal, Sun, CalendarDays, Settings, Search, PanelLeftClose, PanelLeftOpen, PanelRightClose, PanelRightOpen, X, AlertTriangle, HelpCircle, Repeat } from 'lucide-react';
+import { Terminal, Sun, CalendarDays, Settings, Search, PanelLeftClose, PanelLeftOpen, PanelRightClose, PanelRightOpen, X, AlertTriangle, HelpCircle, Repeat, CalendarOff, UserX } from 'lucide-react';
 import { Button } from './components/Button';
 import { NewTaskForm } from './components/NewTaskForm';
 import { EditableField, FieldRow } from './components/EditableField';
 import { fetchTasks, fetchAgents, addTask, editTask, markDone, reopenTask, deleteTask, fetchTaskNotes, createTaskNote, openNote, unlinkTaskNote } from './api';
 import { NotesSection } from './components/NotesSection';
 import type { Task, AgentProfile, Note } from './types';
-import { countDueWindow, dueMatches, startOfToday, isIncomplete, isOverdue, type DueWindow } from './dueWindow';
+import { countDueWindow, dueMatches, startOfToday, isOverdue, type DueWindow } from './dueWindow';
 import { statusFor, statusColor } from './mockAgentStatus';
 
 type DueFilter = DueWindow | 'no-due-date' | 'recurring' | 'all-tasks';
@@ -28,6 +28,10 @@ function hasNoDueDate(t: Task): boolean {
 
 function isRecurring(t: Task): boolean {
   return t.status === 'open' && !!t.recurrence;
+}
+
+function missingAgent(t: Task): boolean {
+  return t.status === 'open' && !t.agent;
 }
 
 function countForDueFilter(tasks: Task[], today: Date, value: DueFilter): number {
@@ -550,7 +554,7 @@ export default function App() {
         <div style={{ display: 'flex', alignItems: 'center', gap: 16, height: 34, flex: 'none', padding: '0 24px', borderBottom: '1px solid var(--hairline-soft)', fontFamily: 'var(--font-display)', fontSize: 11, fontWeight: 700, letterSpacing: '0.06em', textTransform: 'uppercase', color: 'var(--fg-5)' }}>
           <span style={{ width: 34 }}>ID</span>
           <span style={{ width: 78 }}>Priority</span>
-          <span style={{ width: 46 }}></span>
+          <span style={{ width: 64 }}></span>
           <span style={{ flex: 1 }}>Task</span>
           <span style={{ width: 96 }}>Due</span>
           <span style={{ width: 44 }}>Effort</span>
@@ -582,12 +586,16 @@ export default function App() {
                   <span style={{ width: 78, fontFamily: 'var(--font-display)', fontSize: 11, fontWeight: 700, textTransform: 'uppercase', color: priorityColor[t.priority] }}>
                     {t.priority}
                   </span>
-                  <span style={{ width: 46, display: 'flex', alignItems: 'center', gap: 4 }}>
-                    {isOverdue(t, today) ? (
+                  <span style={{ width: 64, display: 'flex', alignItems: 'center', gap: 4 }}>
+                    {isOverdue(t, today) && (
                       <span title="Overdue" style={{ display: 'flex' }}><AlertTriangle size={13} color="var(--danger)" /></span>
-                    ) : isIncomplete(t) ? (
-                      <span title="Missing due date or agent" style={{ display: 'flex' }}><HelpCircle size={13} color="var(--fg-5)" /></span>
-                    ) : null}
+                    )}
+                    {hasNoDueDate(t) && (
+                      <span title="No due date" style={{ display: 'flex' }}><CalendarOff size={13} color="var(--fg-5)" /></span>
+                    )}
+                    {missingAgent(t) && (
+                      <span title="No agent assigned" style={{ display: 'flex' }}><UserX size={13} color="var(--fg-5)" /></span>
+                    )}
                     {t.recurrence && (
                       <span title="Recurring" style={{ display: 'flex' }}><Repeat size={13} color="var(--fg-4)" /></span>
                     )}
