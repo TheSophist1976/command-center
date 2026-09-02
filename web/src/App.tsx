@@ -6,6 +6,7 @@ import { NewTaskForm } from './components/NewTaskForm';
 import { EditableField, FieldRow } from './components/EditableField';
 import { fetchTasks, fetchAgents, addTask, editTask, markDone, reopenTask, deleteTask, fetchTaskNotes, createTaskNote, openNote, unlinkTaskNote } from './api';
 import { NotesSection } from './components/NotesSection';
+import { AgentPicker } from './components/AgentPicker';
 import type { Task, AgentProfile, Note } from './types';
 import { countDueWindow, dueMatches, startOfToday, isOverdue, type DueWindow } from './dueWindow';
 import { statusFor, statusColor } from './mockAgentStatus';
@@ -364,6 +365,7 @@ export default function App() {
           clickField('field-tags');
           break;
         case 'A':
+          e.preventDefault();
           clickField('field-agent');
           break;
         case 'E':
@@ -696,12 +698,10 @@ export default function App() {
                 />
               </FieldRow>
               <FieldRow label="Agent">
-                <EditableField
+                <AgentPicker
                   id="field-agent"
                   value={selected.agent ?? ''}
-                  type="select"
                   options={agentOptions}
-                  placeholder="Unassigned"
                   onSave={(v) => handleEditField(selected.id, { agent: v })}
                 />
               </FieldRow>
