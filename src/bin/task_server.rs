@@ -3,6 +3,7 @@ use task::server::{router_with_static, AppState};
 #[tokio::main]
 async fn main() {
     let db_path = task::db::resolve_file_path(std::env::args().nth(1).as_deref());
+    task::db::backup_daily(&db_path);
     let port: u16 = std::env::var("TASK_SERVER_PORT")
         .ok()
         .and_then(|s| s.parse().ok())

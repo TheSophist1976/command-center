@@ -10,15 +10,38 @@ import type { Task, AgentProfile, Note } from './types';
 import { countDueWindow, dueMatches, startOfToday, isIncomplete, isOverdue, type DueWindow } from './dueWindow';
 import { statusFor, statusColor } from './mockAgentStatus';
 
-type DueFilter = DueWindow | 'all-tasks';
+type DueFilter = DueWindow | 'no-due-date' | 'recurring' | 'all-tasks';
 
 const DUE_WINDOW_ITEMS: { value: DueFilter; label: string }[] = [
   { value: 'day', label: 'Today' },
   { value: 'week', label: 'This week' },
   { value: 'month', label: 'This month' },
   { value: 'year', label: 'This year' },
+  { value: 'no-due-date', label: 'No due date' },
+  { value: 'recurring', label: 'Recurring' },
   { value: 'all-tasks', label: 'All tasks' },
 ];
+
+function hasNoDueDate(t: Task): boolean {
+  return t.status === 'open' && !t.due_date;
+}
+
+function isRecurring(t: Task): boolean {
+  return t.status === 'open' && !!t.recurrence;
+}
+
+function countForDueFilter(tasks: Task[], today: Date, value: DueFilter): number {
+  switch (value) {
+    case 'all-tasks':
+      return tasks.length;
+    case 'no-due-date':
+      return tasks.filter(hasNoDueDate).length;
+    case 'recurring':
+      return tasks.filter(isRecurring).length;
+    default:
+      return countDueWindow(tasks, today, value);
+  }
+}
 
 const PRIORITY_OPTIONS = [
   { value: 'critical', label: 'Critical' },
@@ -213,7 +236,11 @@ export default function App() {
 
   const filteredTasks = useMemo(() => {
     let result = tasks;
-    if (dueFilter !== 'all-tasks') {
+    if (dueFilter === 'no-due-date') {
+      result = result.filter(hasNoDueDate);
+    } else if (dueFilter === 'recurring') {
+      result = result.filter(isRecurring);
+    } else if (dueFilter !== 'all-tasks') {
       result = result.filter((t) => dueMatches(t, today, dueFilter));
     }
     const q = search.trim().toLowerCase();
@@ -405,8 +432,11 @@ export default function App() {
         <nav style={{ display: 'flex', flexDirection: 'column', padding: '0 10px', gap: 2, marginBottom: 12 }}>
           {DUE_WINDOW_ITEMS.map((item) => {
             const active = dueFilter === item.value;
-            const count = item.value === 'all-tasks' ? tasks.length : countDueWindow(tasks, today, item.value);
-            const Icon = item.value === 'day' ? Sun : CalendarDays;
+            const count = countForDueFilter(tasks, today, item.value);
+            const Icon = item.value === 'day' ? Sun
+              : item.value === 'no-due-date' ? HelpCircle
+              : item.value === 'recurring' ? Repeat
+              : CalendarDays;
             return (
               <div
                 key={item.value}
