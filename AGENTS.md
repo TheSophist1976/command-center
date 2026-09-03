@@ -127,6 +127,20 @@ task edit <id> --priority critical --due 2026-04-01
 
 Only the fields you pass are changed. `updated` is set automatically.
 
+### Reporting your progress
+
+Tasks have a `work_status` field, separate from open/done, so the human can track where you are on a task without you having to mark it done:
+
+```bash
+task edit <id> --work-status in-progress
+```
+
+Valid values: `todo`, `in-progress`, `waiting-for-review`, `complete` (aliases `to-do`, `in_progress`/`inprogress`, `review`, and `done` are also accepted).
+
+**Update this as you work**, not just at the end — set `in-progress` when you start, `waiting-for-review` when you've finished and want the human to check your work before it's truly done.
+
+**`work_status: complete` does NOT mark the task done.** It's purely informational — the human still explicitly runs `task done <id>` to close the task out (see below). Don't skip `task done` because you set `work_status` to `complete`.
+
 ### Completing a task
 
 ```bash
@@ -157,3 +171,4 @@ task show <id>
 
 - **Never guess or hand-construct a task id** — always use the id the CLI reports back to you (from `add`, `list`, or `show`).
 - **Never edit `tasks.db` with a text editor or by hand** — it's a SQLite database, not a text file; use the CLI for every read and write.
+- **Never treat `--work-status complete` as equivalent to `task done`** — they're independent fields. Set `work_status` to keep the human informed; still run `task done <id>` yourself when appropriate, or leave that to the human if that's their preferred workflow.
