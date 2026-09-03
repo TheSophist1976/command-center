@@ -171,6 +171,7 @@ async fn add_task(
         notes: Vec::new(),
         agent: req.agent,
         effort: None,
+        work_status: None,
     };
     task_file.tasks.push(new_task.clone());
     db::save(&state.db_path, &task_file).map_err(|e| app_error(StatusCode::INTERNAL_SERVER_ERROR, e))?;
@@ -187,6 +188,7 @@ pub struct EditTaskRequest {
     pub agent: Option<String>,
     pub description: Option<String>,
     pub effort: Option<String>,
+    pub work_status: Option<String>,
 }
 
 async fn edit_task(
@@ -205,6 +207,19 @@ async fn edit_task(
         .effort
         .as_deref()
         .map(crate::task::Effort::from_str)
+        .transpose()
+        .map_err(|e| app_error(StatusCode::BAD_REQUEST, e))?;
+    // work_status: "" is an explicit clear, same pattern as due/agent.
+    let work_status: Option<Option<crate::task::WorkStatus>> = req
+        .work_status
+        .as_deref()
+        .map(|s| {
+            if s.is_empty() {
+                Ok(None)
+            } else {
+                crate::task::WorkStatus::from_str(s).map(Some)
+            }
+        })
         .transpose()
         .map_err(|e| app_error(StatusCode::BAD_REQUEST, e))?;
     // `due: ""` is an explicit clear, distinct from the field being absent entirely.
@@ -255,6 +270,9 @@ async fn edit_task(
         }
         if let Some(e) = effort {
             t.effort = Some(e);
+        }
+        if let Some(w) = work_status {
+            t.work_status = w;
         }
         t.updated = Some(chrono::Utc::now());
         t.clone()
@@ -311,6 +329,7 @@ async fn done_task(
             notes: parent.notes.clone(),
             agent: parent.agent.clone(),
             effort: parent.effort,
+            work_status: None,
         };
         task_file.tasks.push(new_task.clone());
         spawned = Some(new_task);
@@ -582,6 +601,7 @@ mod tests {
                 notes: Vec::new(),
                 agent: None,
                 effort: None,
+                work_status: None,
             });
             db::save(&state.db_path, &tf).unwrap();
         }
@@ -604,7 +624,7 @@ mod tests {
             let t1 = crate::task::Task {
                 id: 1, title: "Open".to_string(), status: Status::Open, priority: crate::task::Priority::Medium,
                 tags: Vec::new(), created: chrono::Utc::now(), updated: None, description: None,
-                due_date: None, project: None, recurrence: None, notes: Vec::new(), agent: None, effort: None,
+                due_date: None, project: None, recurrence: None, notes: Vec::new(), agent: None, effort: None, work_status: None,
             };
             let mut t2 = t1.clone();
             t2.id = 2; t2.title = "Done".to_string(); t2.status = Status::Done;
@@ -630,7 +650,7 @@ mod tests {
             tf.tasks.push(crate::task::Task {
                 id: 7, title: "Found me".to_string(), status: Status::Open, priority: crate::task::Priority::Medium,
                 tags: Vec::new(), created: chrono::Utc::now(), updated: None, description: None,
-                due_date: None, project: None, recurrence: None, notes: Vec::new(), agent: None, effort: None,
+                due_date: None, project: None, recurrence: None, notes: Vec::new(), agent: None, effort: None, work_status: None,
             });
             db::save(&state.db_path, &tf).unwrap();
         }
@@ -851,7 +871,7 @@ mod tests {
             tf.tasks.push(crate::task::Task {
                 id: 1, title: "Original".to_string(), status: Status::Open, priority: crate::task::Priority::Medium,
                 tags: Vec::new(), created: chrono::Utc::now(), updated: None, description: None,
-                due_date: None, project: None, recurrence: None, notes: Vec::new(), agent: None, effort: None,
+                due_date: None, project: None, recurrence: None, notes: Vec::new(), agent: None, effort: None, work_status: None,
             });
             db::save(&state.db_path, &tf).unwrap();
         }
@@ -885,7 +905,7 @@ mod tests {
                 id: 1, title: "Has a due date".to_string(), status: Status::Open, priority: crate::task::Priority::Medium,
                 tags: Vec::new(), created: chrono::Utc::now(), updated: None, description: None,
                 due_date: chrono::NaiveDate::from_ymd_opt(2026, 1, 5), project: None, recurrence: None,
-                notes: Vec::new(), agent: None, effort: None,
+                notes: Vec::new(), agent: None, effort: None, work_status: None,
             });
             db::save(&state.db_path, &tf).unwrap();
         }
@@ -917,7 +937,7 @@ mod tests {
                 id: 1, title: "Has an agent".to_string(), status: Status::Open, priority: crate::task::Priority::Medium,
                 tags: Vec::new(), created: chrono::Utc::now(), updated: None, description: None,
                 due_date: None, project: None, recurrence: None, notes: Vec::new(),
-                agent: Some("bot".to_string()), effort: None,
+                agent: Some("bot".to_string()), effort: None, work_status: None,
             });
             db::save(&state.db_path, &tf).unwrap();
         }
@@ -938,6 +958,100 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
         let json = body_json(response).await;
         assert!(json["agent"].is_null());
+    }
+
+    #[tokio::test]
+    async fn test_edit_task_sets_work_status() {
+        let (_dir, state) = make_state();
+        {
+            let mut tf = crate::task::TaskFile::new();
+            tf.tasks.push(crate::task::Task {
+                id: 1, title: "Track me".to_string(), status: Status::Open, priority: crate::task::Priority::Medium,
+                tags: Vec::new(), created: chrono::Utc::now(), updated: None, description: None,
+                due_date: None, project: None, recurrence: None, notes: Vec::new(), agent: None, effort: None,
+                work_status: None,
+            });
+            db::save(&state.db_path, &tf).unwrap();
+        }
+        let app = router(state);
+        let body = serde_json::json!({ "work_status": "in-progress" });
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("PATCH")
+                    .uri("/api/tasks/1")
+                    .header("host", "127.0.0.1")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let json = body_json(response).await;
+        assert_eq!(json["work_status"], "in-progress");
+    }
+
+    #[tokio::test]
+    async fn test_edit_task_invalid_work_status_returns_400() {
+        let (_dir, state) = make_state();
+        {
+            let mut tf = crate::task::TaskFile::new();
+            tf.tasks.push(crate::task::Task {
+                id: 1, title: "Track me".to_string(), status: Status::Open, priority: crate::task::Priority::Medium,
+                tags: Vec::new(), created: chrono::Utc::now(), updated: None, description: None,
+                due_date: None, project: None, recurrence: None, notes: Vec::new(), agent: None, effort: None,
+                work_status: None,
+            });
+            db::save(&state.db_path, &tf).unwrap();
+        }
+        let app = router(state);
+        let body = serde_json::json!({ "work_status": "bogus" });
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("PATCH")
+                    .uri("/api/tasks/1")
+                    .header("host", "127.0.0.1")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn test_edit_task_empty_work_status_clears_it() {
+        let (_dir, state) = make_state();
+        {
+            let mut tf = crate::task::TaskFile::new();
+            tf.tasks.push(crate::task::Task {
+                id: 1, title: "Track me".to_string(), status: Status::Open, priority: crate::task::Priority::Medium,
+                tags: Vec::new(), created: chrono::Utc::now(), updated: None, description: None,
+                due_date: None, project: None, recurrence: None, notes: Vec::new(), agent: None, effort: None,
+                work_status: Some(crate::task::WorkStatus::Complete),
+            });
+            db::save(&state.db_path, &tf).unwrap();
+        }
+        let app = router(state);
+        let body = serde_json::json!({ "work_status": "" });
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("PATCH")
+                    .uri("/api/tasks/1")
+                    .header("host", "127.0.0.1")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let json = body_json(response).await;
+        assert!(json["work_status"].is_null());
     }
 
     #[tokio::test]
@@ -968,7 +1082,7 @@ mod tests {
             tf.tasks.push(crate::task::Task {
                 id: 1, title: "Finish me".to_string(), status: Status::Open, priority: crate::task::Priority::Medium,
                 tags: Vec::new(), created: chrono::Utc::now(), updated: None, description: None,
-                due_date: None, project: None, recurrence: None, notes: Vec::new(), agent: None, effort: None,
+                due_date: None, project: None, recurrence: None, notes: Vec::new(), agent: None, effort: None, work_status: None,
             });
             db::save(&state.db_path, &tf).unwrap();
         }
@@ -1000,7 +1114,7 @@ mod tests {
                 tags: Vec::new(), created: chrono::Utc::now(), updated: None, description: None,
                 due_date: chrono::NaiveDate::from_ymd_opt(2026, 1, 5), project: None,
                 recurrence: Some(crate::task::Recurrence::from_str("weekly").unwrap()),
-                notes: Vec::new(), agent: None, effort: None,
+                notes: Vec::new(), agent: None, effort: None, work_status: None,
             });
             db::save(&state.db_path, &tf).unwrap();
         }
@@ -1033,7 +1147,7 @@ mod tests {
                 tags: Vec::new(), created: chrono::Utc::now(), updated: None, description: None,
                 due_date: chrono::NaiveDate::from_ymd_opt(2026, 1, 5), project: None,
                 recurrence: Some(crate::task::Recurrence::from_str("weekly").unwrap()),
-                notes: Vec::new(), agent: None, effort: None,
+                notes: Vec::new(), agent: None, effort: None, work_status: None,
             });
             db::save(&state.db_path, &tf).unwrap();
         }
@@ -1081,7 +1195,7 @@ mod tests {
             tf.tasks.push(crate::task::Task {
                 id: 1, title: "Reopen me".to_string(), status: Status::Done, priority: crate::task::Priority::Medium,
                 tags: Vec::new(), created: chrono::Utc::now(), updated: None, description: None,
-                due_date: None, project: None, recurrence: None, notes: Vec::new(), agent: None, effort: None,
+                due_date: None, project: None, recurrence: None, notes: Vec::new(), agent: None, effort: None, work_status: None,
             });
             db::save(&state.db_path, &tf).unwrap();
         }
@@ -1110,7 +1224,7 @@ mod tests {
             tf.tasks.push(crate::task::Task {
                 id: 1, title: "Doomed".to_string(), status: Status::Open, priority: crate::task::Priority::Medium,
                 tags: Vec::new(), created: chrono::Utc::now(), updated: None, description: None,
-                due_date: None, project: None, recurrence: None, notes: Vec::new(), agent: None, effort: None,
+                due_date: None, project: None, recurrence: None, notes: Vec::new(), agent: None, effort: None, work_status: None,
             });
             db::save(&state.db_path, &tf).unwrap();
         }
@@ -1196,7 +1310,7 @@ mod tests {
             tf.tasks.push(crate::task::Task {
                 id: 1, title: "Has notes".to_string(), status: Status::Open, priority: crate::task::Priority::Medium,
                 tags: Vec::new(), created: chrono::Utc::now(), updated: None, description: None,
-                due_date: None, project: None, recurrence: None, notes: vec!["real-note".to_string()], agent: None, effort: None,
+                due_date: None, project: None, recurrence: None, notes: vec!["real-note".to_string()], agent: None, effort: None, work_status: None,
             });
             db::save(&state.db_path, &tf).unwrap();
         }
