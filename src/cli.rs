@@ -130,6 +130,9 @@ pub enum Command {
 
         #[arg(long)]
         work_status: Option<String>,
+
+        #[arg(long)]
+        recur: Option<String>,
     },
 
     /// Mark a task done

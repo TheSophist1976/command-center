@@ -43,6 +43,7 @@ pub struct EditArgs {
     pub description: Option<String>,
     pub effort: Option<String>,
     pub work_status: Option<String>,
+    pub recur: Option<String>,
 }
 
 pub fn add(path: &Path, args: AddArgs) -> Result<String, (i32, String)> {
@@ -196,6 +197,7 @@ pub fn edit(path: &Path, id: u32, args: EditArgs) -> Result<String, (i32, String
     let priority = args.priority.as_deref().map(Priority::from_str).transpose().map_err(|e| (1, e))?;
     let effort = args.effort.as_deref().map(Effort::from_str).transpose().map_err(|e| (1, e))?;
     let work_status = args.work_status.as_deref().map(crate::task::WorkStatus::from_str).transpose().map_err(|e| (1, e))?;
+    let recur = args.recur.as_deref().map(crate::task::Recurrence::from_str).transpose().map_err(|e| (1, e))?;
     let due_date = args
         .due
         .as_deref()
@@ -232,6 +234,9 @@ pub fn edit(path: &Path, id: u32, args: EditArgs) -> Result<String, (i32, String
     }
     if let Some(w) = work_status {
         t.work_status = Some(w);
+    }
+    if let Some(r) = recur {
+        t.recurrence = Some(r);
     }
     t.updated = Some(Utc::now());
     let title = t.title.clone();
@@ -437,7 +442,7 @@ mod tests {
     fn test_edit_updates_only_given_fields() {
         let (_dir, path) = setup();
         add(&path, AddArgs { title: "Original".to_string(), priority: "medium".to_string(), due: None, project: None, tags: None, agent: None, description: None }).unwrap();
-        edit(&path, 1, EditArgs { title: None, priority: Some("critical".to_string()), due: None, project: None, tags: None, agent: None, description: None, effort: None, work_status: None }).unwrap();
+        edit(&path, 1, EditArgs { title: None, priority: Some("critical".to_string()), due: None, project: None, tags: None, agent: None, description: None, effort: None, work_status: None, recur: None }).unwrap();
 
         let tf = db::load(&path).unwrap();
         assert_eq!(tf.tasks[0].title, "Original");
@@ -448,7 +453,7 @@ mod tests {
     #[test]
     fn test_edit_missing_task_errors() {
         let (_dir, path) = setup();
-        let err = edit(&path, 1, EditArgs { title: Some("x".to_string()), priority: None, due: None, project: None, tags: None, agent: None, description: None, effort: None, work_status: None }).unwrap_err();
+        let err = edit(&path, 1, EditArgs { title: Some("x".to_string()), priority: None, due: None, project: None, tags: None, agent: None, description: None, effort: None, work_status: None, recur: None }).unwrap_err();
         assert_eq!(err.0, 1);
     }
 
@@ -530,7 +535,7 @@ mod tests {
         edit(&path, 1, EditArgs {
             title: None, priority: None, due: None, project: None, tags: None,
             agent: None, description: None, effort: None,
-            work_status: Some("in-progress".to_string()),
+            work_status: Some("in-progress".to_string()), recur: None,
         }).unwrap();
 
         let output = show(&path, 1).unwrap();
@@ -545,7 +550,35 @@ mod tests {
         let result = edit(&path, 1, EditArgs {
             title: None, priority: None, due: None, project: None, tags: None,
             agent: None, description: None, effort: None,
-            work_status: Some("bogus".to_string()),
+            work_status: Some("bogus".to_string()), recur: None,
+        });
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_edit_sets_recurrence_and_show_prints_it() {
+        let (_dir, path) = setup();
+        add(&path, AddArgs { title: "Recur me".to_string(), priority: "medium".to_string(), due: None, project: None, tags: None, agent: None, description: None }).unwrap();
+
+        edit(&path, 1, EditArgs {
+            title: None, priority: None, due: None, project: None, tags: None,
+            agent: None, description: None, effort: None, work_status: None,
+            recur: Some("weekly:fri".to_string()),
+        }).unwrap();
+
+        let output = show(&path, 1).unwrap();
+        assert!(output.contains("recur: weekly:fri"));
+    }
+
+    #[test]
+    fn test_edit_invalid_recurrence_returns_error() {
+        let (_dir, path) = setup();
+        add(&path, AddArgs { title: "Recur me".to_string(), priority: "medium".to_string(), due: None, project: None, tags: None, agent: None, description: None }).unwrap();
+
+        let result = edit(&path, 1, EditArgs {
+            title: None, priority: None, due: None, project: None, tags: None,
+            agent: None, description: None, effort: None, work_status: None,
+            recur: Some("bogus".to_string()),
         });
         assert!(result.is_err());
     }

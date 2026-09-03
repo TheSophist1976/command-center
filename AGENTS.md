@@ -127,6 +127,14 @@ task edit <id> --priority critical --due 2026-04-01
 
 Only the fields you pass are changed. `updated` is set automatically.
 
+**Setting or changing recurrence:**
+
+```bash
+task edit <id> --recur weekly
+```
+
+Valid formats: `daily`, `weekly`, `monthly`, `yearly` (every occurrence); `daily:N`, `weekly:N`, `monthly:N`, `yearly:N` (every N); `weekly:DAY` (e.g. `weekly:fri`); `weekly:N:DAY` (every N weeks on DAY); `monthly:N:DAY` (the Nth DAY of the month, e.g. `monthly:2:mon` for the 2nd Monday). `DAY` is a 3-letter abbreviation (`mon`, `tue`, `wed`, `thu`, `fri`, `sat`, `sun`).
+
 ### Reporting your progress
 
 Tasks have a `work_status` field, separate from open/done, so the human can track where you are on a task without you having to mark it done:

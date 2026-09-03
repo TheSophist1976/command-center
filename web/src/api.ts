@@ -42,7 +42,7 @@ export async function addTask(input: {
 }
 
 export async function editTask(id: number, changes: Partial<{
-  title: string; priority: string; due: string; project: string; tags: string; agent: string; description: string; effort: string; work_status: string;
+  title: string; priority: string; due: string; project: string; tags: string; agent: string; description: string; effort: string; work_status: string; recurrence: string;
 }>): Promise<Task> {
   const task = await jsonOrThrow<Task>(
     await fetch(`/api/tasks/${id}`, {

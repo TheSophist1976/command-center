@@ -766,7 +766,11 @@ export default function App() {
                 />
               </FieldRow>
               <FieldRow label="Recurrence">
-                <span style={{ color: 'var(--fg-4)' }}>{selected.recurrence ?? 'None'}</span>
+                <EditableField
+                  value={selected.recurrence ?? ''}
+                  placeholder="e.g. daily, weekly:2, weekly:fri, monthly:2:fri — empty to clear"
+                  onSave={(v) => handleEditField(selected.id, { recurrence: v })}
+                />
               </FieldRow>
               <FieldRow label="Description">
                 <EditableField

@@ -189,6 +189,7 @@ pub struct EditTaskRequest {
     pub description: Option<String>,
     pub effort: Option<String>,
     pub work_status: Option<String>,
+    pub recurrence: Option<String>,
 }
 
 async fn edit_task(
@@ -237,6 +238,19 @@ async fn edit_task(
         })
         .transpose()
         .map_err(|e| app_error(StatusCode::BAD_REQUEST, e))?;
+    // recurrence: "" is an explicit clear, same pattern as work_status/due/agent.
+    let recurrence: Option<Option<crate::task::Recurrence>> = req
+        .recurrence
+        .as_deref()
+        .map(|s| {
+            if s.is_empty() {
+                Ok(None)
+            } else {
+                crate::task::Recurrence::from_str(s).map(Some)
+            }
+        })
+        .transpose()
+        .map_err(|e| app_error(StatusCode::BAD_REQUEST, e))?;
     let tags = req.tags.as_deref().map(|s| parse_csv(Some(s)));
 
     let _guard = state.write_lock.lock().await;
@@ -273,6 +287,9 @@ async fn edit_task(
         }
         if let Some(w) = work_status {
             t.work_status = w;
+        }
+        if let Some(r) = recurrence {
+            t.recurrence = r;
         }
         t.updated = Some(chrono::Utc::now());
         t.clone()
@@ -1052,6 +1069,101 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
         let json = body_json(response).await;
         assert!(json["work_status"].is_null());
+    }
+
+    #[tokio::test]
+    async fn test_edit_task_sets_recurrence() {
+        let (_dir, state) = make_state();
+        {
+            let mut tf = crate::task::TaskFile::new();
+            tf.tasks.push(crate::task::Task {
+                id: 1, title: "Recur me".to_string(), status: Status::Open, priority: crate::task::Priority::Medium,
+                tags: Vec::new(), created: chrono::Utc::now(), updated: None, description: None,
+                due_date: None, project: None, recurrence: None, notes: Vec::new(), agent: None, effort: None,
+                work_status: None,
+            });
+            db::save(&state.db_path, &tf).unwrap();
+        }
+        let app = router(state);
+        let body = serde_json::json!({ "recurrence": "weekly:fri" });
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("PATCH")
+                    .uri("/api/tasks/1")
+                    .header("host", "127.0.0.1")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let json = body_json(response).await;
+        assert_eq!(json["recurrence"], "weekly:fri");
+    }
+
+    #[tokio::test]
+    async fn test_edit_task_invalid_recurrence_returns_400() {
+        let (_dir, state) = make_state();
+        {
+            let mut tf = crate::task::TaskFile::new();
+            tf.tasks.push(crate::task::Task {
+                id: 1, title: "Recur me".to_string(), status: Status::Open, priority: crate::task::Priority::Medium,
+                tags: Vec::new(), created: chrono::Utc::now(), updated: None, description: None,
+                due_date: None, project: None, recurrence: None, notes: Vec::new(), agent: None, effort: None,
+                work_status: None,
+            });
+            db::save(&state.db_path, &tf).unwrap();
+        }
+        let app = router(state);
+        let body = serde_json::json!({ "recurrence": "bogus" });
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("PATCH")
+                    .uri("/api/tasks/1")
+                    .header("host", "127.0.0.1")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn test_edit_task_empty_recurrence_clears_it() {
+        let (_dir, state) = make_state();
+        {
+            let mut tf = crate::task::TaskFile::new();
+            tf.tasks.push(crate::task::Task {
+                id: 1, title: "Recur me".to_string(), status: Status::Open, priority: crate::task::Priority::Medium,
+                tags: Vec::new(), created: chrono::Utc::now(), updated: None, description: None,
+                due_date: None, project: None,
+                recurrence: Some(crate::task::Recurrence::from_str("weekly").unwrap()),
+                notes: Vec::new(), agent: None, effort: None, work_status: None,
+            });
+            db::save(&state.db_path, &tf).unwrap();
+        }
+        let app = router(state);
+        let body = serde_json::json!({ "recurrence": "" });
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("PATCH")
+                    .uri("/api/tasks/1")
+                    .header("host", "127.0.0.1")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let json = body_json(response).await;
+        assert!(json["recurrence"].is_null());
     }
 
     #[tokio::test]

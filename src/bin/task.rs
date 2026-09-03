@@ -212,9 +212,9 @@ fn run(cli: Cli) -> Result<(), (i32, String)> {
             Ok(())
         }
 
-        Some(Command::Edit { id, title, priority, due, project, tags, agent, description, effort, work_status }) => {
+        Some(Command::Edit { id, title, priority, due, project, tags, agent, description, effort, work_status, recur }) => {
             let msg = task::commands::edit(&path, id, task::commands::EditArgs {
-                title, priority, due, project, tags, agent, description, effort, work_status,
+                title, priority, due, project, tags, agent, description, effort, work_status, recur,
             })?;
             println!("{}", msg);
             Ok(())
