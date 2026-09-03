@@ -7,6 +7,7 @@ import { EditableField, FieldRow } from './components/EditableField';
 import { fetchTasks, fetchAgents, addTask, editTask, markDone, reopenTask, deleteTask, fetchTaskNotes, createTaskNote, openNote, unlinkTaskNote } from './api';
 import { NotesSection } from './components/NotesSection';
 import { AgentPicker } from './components/AgentPicker';
+import { DatePicker } from './components/DatePicker';
 import type { Task, AgentProfile, Note } from './types';
 import { countDueWindow, dueMatches, startOfToday, isOverdue, type DueWindow } from './dueWindow';
 import { statusFor, statusColor } from './mockAgentStatus';
@@ -672,11 +673,9 @@ export default function App() {
 
             <div style={{ display: 'flex', flexDirection: 'column', marginBottom: 20 }}>
               <FieldRow label="Due">
-                <EditableField
+                <DatePicker
                   id="field-due"
                   value={selected.due_date ?? ''}
-                  type="date"
-                  placeholder="No due date"
                   onSave={(v) => handleEditField(selected.id, { due: v })}
                 />
               </FieldRow>
