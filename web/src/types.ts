@@ -17,6 +17,7 @@ export interface Task {
   notes?: string[];
   agent?: string;
   effort?: Effort;
+  work_status?: 'todo' | 'in-progress' | 'waiting-for-review' | 'complete';
 }
 
 export interface AgentProfile {

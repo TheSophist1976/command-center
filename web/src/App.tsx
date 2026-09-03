@@ -62,12 +62,35 @@ const EFFORT_OPTIONS = [
   { value: 'low', label: 'Low' },
 ];
 
-type GroupBy = 'agent' | 'project' | 'priority' | 'none';
+const WORK_STATUS_OPTIONS = [
+  { value: '', label: 'None' },
+  { value: 'todo', label: 'To Do' },
+  { value: 'in-progress', label: 'In Progress' },
+  { value: 'waiting-for-review', label: 'Waiting for Review' },
+  { value: 'complete', label: 'Complete' },
+];
+
+const WORK_STATUS_LABEL: Record<string, string> = {
+  'todo': 'To Do',
+  'in-progress': 'In Progress',
+  'waiting-for-review': 'Waiting for Review',
+  'complete': 'Complete',
+};
+
+const WORK_STATUS_COLOR: Record<string, string> = {
+  'todo': 'var(--fg-4)',
+  'in-progress': 'var(--citrine)',
+  'waiting-for-review': 'var(--cyan)',
+  'complete': 'var(--teal)',
+};
+
+type GroupBy = 'agent' | 'project' | 'priority' | 'work_status' | 'none';
 
 const GROUP_BY_OPTIONS: { value: GroupBy; label: string }[] = [
   { value: 'agent', label: 'Agent' },
   { value: 'project', label: 'Project' },
   { value: 'priority', label: 'Priority' },
+  { value: 'work_status', label: 'Work status' },
   { value: 'none', label: 'None' },
 ];
 
@@ -81,6 +104,8 @@ function groupKey(task: Task, groupBy: GroupBy): string {
       return task.project ?? 'no project';
     case 'priority':
       return task.priority;
+    case 'work_status':
+      return task.work_status ?? 'no status';
     case 'none':
       return '';
   }
@@ -562,6 +587,7 @@ export default function App() {
           <span style={{ width: 34 }}>ID</span>
           <span style={{ width: 78 }}>Priority</span>
           <span style={{ width: 64 }}></span>
+          <span style={{ width: 100 }}>Status</span>
           <span style={{ flex: 1 }}>Task</span>
           <span style={{ width: 96 }}>Due</span>
           <span style={{ width: 44 }}>Effort</span>
@@ -605,6 +631,19 @@ export default function App() {
                     )}
                     {t.recurrence && (
                       <span title="Recurring" style={{ display: 'flex' }}><Repeat size={13} color="var(--fg-4)" /></span>
+                    )}
+                  </span>
+                  <span style={{ width: 100 }}>
+                    {t.work_status && (
+                      <span
+                        style={{
+                          display: 'inline-block', fontSize: 10, fontWeight: 700, textTransform: 'uppercase',
+                          letterSpacing: '0.04em', padding: '2px 8px', borderRadius: 999,
+                          color: 'var(--ink)', background: WORK_STATUS_COLOR[t.work_status],
+                        }}
+                      >
+                        {WORK_STATUS_LABEL[t.work_status]}
+                      </span>
                     )}
                   </span>
                   <span style={{
@@ -691,6 +730,15 @@ export default function App() {
                   options={EFFORT_OPTIONS}
                   onSave={(v) => handleEditField(selected.id, { effort: v })}
                   display={selected.effort ?? '—'}
+                />
+              </FieldRow>
+              <FieldRow label="Work status">
+                <EditableField
+                  value={selected.work_status ?? ''}
+                  type="select"
+                  options={WORK_STATUS_OPTIONS}
+                  onSave={(v) => handleEditField(selected.id, { work_status: v })}
+                  display={selected.work_status ? WORK_STATUS_LABEL[selected.work_status] : undefined}
                 />
               </FieldRow>
               <FieldRow label="Project">
