@@ -42,6 +42,7 @@ pub struct EditArgs {
     pub agent: Option<String>,
     pub description: Option<String>,
     pub effort: Option<String>,
+    pub work_status: Option<String>,
 }
 
 pub fn add(path: &Path, args: AddArgs) -> Result<String, (i32, String)> {
@@ -174,6 +175,9 @@ pub fn show(path: &Path, id: u32) -> Result<String, (i32, String)> {
     if let Some(ref e) = t.effort {
         out.push_str(&format!("effort: {}\n", e));
     }
+    if let Some(ref w) = t.work_status {
+        out.push_str(&format!("work_status: {}\n", w));
+    }
     out.push_str(&format!("created: {}\n", t.created.to_rfc3339()));
     if let Some(u) = t.updated {
         out.push_str(&format!("updated: {}\n", u.to_rfc3339()));
@@ -191,6 +195,7 @@ pub fn edit(path: &Path, id: u32, args: EditArgs) -> Result<String, (i32, String
     let today = chrono::Local::now().date_naive();
     let priority = args.priority.as_deref().map(Priority::from_str).transpose().map_err(|e| (1, e))?;
     let effort = args.effort.as_deref().map(Effort::from_str).transpose().map_err(|e| (1, e))?;
+    let work_status = args.work_status.as_deref().map(crate::task::WorkStatus::from_str).transpose().map_err(|e| (1, e))?;
     let due_date = args
         .due
         .as_deref()
@@ -224,6 +229,9 @@ pub fn edit(path: &Path, id: u32, args: EditArgs) -> Result<String, (i32, String
     }
     if let Some(e) = effort {
         t.effort = Some(e);
+    }
+    if let Some(w) = work_status {
+        t.work_status = Some(w);
     }
     t.updated = Some(Utc::now());
     let title = t.title.clone();
@@ -429,7 +437,7 @@ mod tests {
     fn test_edit_updates_only_given_fields() {
         let (_dir, path) = setup();
         add(&path, AddArgs { title: "Original".to_string(), priority: "medium".to_string(), due: None, project: None, tags: None, agent: None, description: None }).unwrap();
-        edit(&path, 1, EditArgs { title: None, priority: Some("critical".to_string()), due: None, project: None, tags: None, agent: None, description: None, effort: None }).unwrap();
+        edit(&path, 1, EditArgs { title: None, priority: Some("critical".to_string()), due: None, project: None, tags: None, agent: None, description: None, effort: None, work_status: None }).unwrap();
 
         let tf = db::load(&path).unwrap();
         assert_eq!(tf.tasks[0].title, "Original");
@@ -440,7 +448,7 @@ mod tests {
     #[test]
     fn test_edit_missing_task_errors() {
         let (_dir, path) = setup();
-        let err = edit(&path, 1, EditArgs { title: Some("x".to_string()), priority: None, due: None, project: None, tags: None, agent: None, description: None, effort: None }).unwrap_err();
+        let err = edit(&path, 1, EditArgs { title: Some("x".to_string()), priority: None, due: None, project: None, tags: None, agent: None, description: None, effort: None, work_status: None }).unwrap_err();
         assert_eq!(err.0, 1);
     }
 
@@ -512,5 +520,33 @@ mod tests {
         let (_dir, path) = setup();
         let err = rm(&path, 1).unwrap_err();
         assert_eq!(err.0, 1);
+    }
+
+    #[test]
+    fn test_edit_sets_work_status_and_show_prints_it() {
+        let (_dir, path) = setup();
+        add(&path, AddArgs { title: "Track me".to_string(), priority: "medium".to_string(), due: None, project: None, tags: None, agent: None, description: None }).unwrap();
+
+        edit(&path, 1, EditArgs {
+            title: None, priority: None, due: None, project: None, tags: None,
+            agent: None, description: None, effort: None,
+            work_status: Some("in-progress".to_string()),
+        }).unwrap();
+
+        let output = show(&path, 1).unwrap();
+        assert!(output.contains("work_status: in-progress"));
+    }
+
+    #[test]
+    fn test_edit_invalid_work_status_returns_error() {
+        let (_dir, path) = setup();
+        add(&path, AddArgs { title: "Track me".to_string(), priority: "medium".to_string(), due: None, project: None, tags: None, agent: None, description: None }).unwrap();
+
+        let result = edit(&path, 1, EditArgs {
+            title: None, priority: None, due: None, project: None, tags: None,
+            agent: None, description: None, effort: None,
+            work_status: Some("bogus".to_string()),
+        });
+        assert!(result.is_err());
     }
 }

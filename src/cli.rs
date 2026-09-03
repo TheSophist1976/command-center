@@ -127,6 +127,9 @@ pub enum Command {
 
         #[arg(long)]
         effort: Option<String>,
+
+        #[arg(long)]
+        work_status: Option<String>,
     },
 
     /// Mark a task done
