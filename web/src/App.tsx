@@ -171,12 +171,16 @@ export default function App() {
 
   async function handleMarkDone(task: Task) {
     try {
+      const currentIndex = flatOrder.findIndex((t) => t.id === task.id);
       const { completed, spawned } = await markDone(task.id);
       setTasks((prev) => {
         const next = prev.map((t) => (t.id === completed.id ? completed : t));
         return spawned ? [...next, spawned] : next;
       });
-      setSelected(completed);
+      const nextSelection = currentIndex === -1
+        ? completed
+        : flatOrder[currentIndex + 1] ?? flatOrder[currentIndex - 1] ?? completed;
+      selectTask(nextSelection);
     } catch (e) {
       setError(String(e));
     }
