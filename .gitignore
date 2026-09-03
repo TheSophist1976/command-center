@@ -6,3 +6,4 @@
 *.key
 *.pem
 .DS_Store
+.superpowers/
