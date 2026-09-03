@@ -31,6 +31,42 @@ impl std::str::FromStr for Effort {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum WorkStatus {
+    Todo,
+    InProgress,
+    WaitingForReview,
+    Complete,
+}
+
+impl std::fmt::Display for WorkStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            WorkStatus::Todo => write!(f, "todo"),
+            WorkStatus::InProgress => write!(f, "in-progress"),
+            WorkStatus::WaitingForReview => write!(f, "waiting-for-review"),
+            WorkStatus::Complete => write!(f, "complete"),
+        }
+    }
+}
+
+impl std::str::FromStr for WorkStatus {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "todo" | "to-do" => Ok(WorkStatus::Todo),
+            "in-progress" | "in_progress" | "inprogress" => Ok(WorkStatus::InProgress),
+            "waiting-for-review" | "review" => Ok(WorkStatus::WaitingForReview),
+            "complete" | "done" => Ok(WorkStatus::Complete),
+            _ => Err(format!(
+                "Invalid work status: '{}'. Valid values: todo, in-progress, waiting-for-review, complete",
+                s
+            )),
+        }
+    }
+}
+
 // -- Recurrence --
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -306,6 +342,8 @@ pub struct Task {
     pub agent: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub effort: Option<Effort>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub work_status: Option<WorkStatus>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -442,6 +480,7 @@ where
 mod tests {
     use super::*;
     use chrono::TimeZone;
+    use std::str::FromStr;
 
     fn make_task(id: u32, title: &str) -> Task {
         Task {
@@ -459,6 +498,7 @@ mod tests {
             notes: vec![],
             agent: None,
             effort: None,
+            work_status: None,
         }
     }
 
@@ -994,5 +1034,22 @@ mod tests {
         let task = make_task(1, "No recurrence");
         let json = serde_json::to_string(&task).unwrap();
         assert!(!json.contains("\"recurrence\""), "json was: {}", json);
+    }
+
+    #[test]
+    fn test_work_status_from_str_and_display() {
+        assert_eq!(WorkStatus::from_str("todo").unwrap(), WorkStatus::Todo);
+        assert_eq!(WorkStatus::from_str("in-progress").unwrap(), WorkStatus::InProgress);
+        assert_eq!(WorkStatus::from_str("waiting-for-review").unwrap(), WorkStatus::WaitingForReview);
+        assert_eq!(WorkStatus::from_str("complete").unwrap(), WorkStatus::Complete);
+        assert_eq!(WorkStatus::from_str("review").unwrap(), WorkStatus::WaitingForReview);
+        assert!(WorkStatus::from_str("bogus").is_err());
+        assert_eq!(WorkStatus::InProgress.to_string(), "in-progress");
+    }
+
+    #[test]
+    fn test_task_serialize_work_status_kebab_case() {
+        let json = serde_json::to_string(&WorkStatus::WaitingForReview).unwrap();
+        assert_eq!(json, "\"waiting-for-review\"");
     }
 }

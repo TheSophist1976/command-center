@@ -1297,6 +1297,7 @@ fn toggle_task_status(app: &mut App, task_idx: usize) -> Result<(), String> {
                 notes: task.notes.clone(),
                 agent: task.agent.clone(),
                 effort: task.effort,
+                work_status: None,
             };
             app.task_file.tasks.push(new_task);
             app.status_message = Some(format!("Next occurrence: task {}, due {}", new_id, next_due));
@@ -1988,6 +1989,7 @@ fn handle_input(app: &mut App, key: KeyCode, action: InputAction) -> Result<(), 
                                 notes: vec![],
                                 agent: None,
                                 effort: None,
+                                work_status: None,
                             });
                             app.save()?;
                             app.clamp_selection();
@@ -3809,6 +3811,7 @@ mod tests {
             notes: vec![],
             agent: None,
             effort: None,
+            work_status: None,
         }
     }
 
@@ -4627,6 +4630,7 @@ mod tests {
             notes: vec![],
             agent: Some("test".to_string()),
             effort: None,
+            work_status: None,
         };
         make_app_with_tmpfile(vec![task])
     }
@@ -4819,6 +4823,7 @@ mod tests {
             notes: vec![],
             agent: Some("a".to_string()),
             effort: None,
+            work_status: None,
         };
         let mut app = make_app_with_tasks(vec![task]);
         // Due view starts with None

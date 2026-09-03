@@ -4,7 +4,7 @@ use chrono::{DateTime, NaiveDate, Utc};
 use std::str::FromStr;
 use std::fs;
 
-use crate::task::{Effort, Priority, Recurrence, Status, Task, TaskFile};
+use crate::task::{Effort, Priority, Recurrence, Status, Task, TaskFile, WorkStatus};
 
 const SCHEMA_SQL: &str = "
 CREATE TABLE IF NOT EXISTS tasks (
@@ -57,6 +57,13 @@ fn open_conn(path: &Path) -> Result<Connection, String> {
         .map_err(|e| format!("Failed to set busy timeout: {}", e))?;
     conn.execute_batch(SCHEMA_SQL)
         .map_err(|e| format!("Failed to initialize schema: {}", e))?;
+    // ALTER TABLE has no "ADD COLUMN IF NOT EXISTS" — this fails with a
+    // "duplicate column" error on every database that already has the
+    // column, which is the expected, common case. Any other failure here
+    // (locked/corrupt file) will surface immediately on the next query
+    // against `tasks` anyway, so discarding the error is safe.
+    conn.execute("ALTER TABLE tasks ADD COLUMN work_status TEXT", [])
+        .ok();
     Ok(conn)
 }
 
@@ -86,6 +93,7 @@ fn row_to_task(row: &rusqlite::Row) -> rusqlite::Result<Task> {
     let notes_s: String = row.get(11)?;
     let agent: Option<String> = row.get(12)?;
     let effort_s: Option<String> = row.get(13)?;
+    let work_status_s: Option<String> = row.get(14)?;
 
     Ok(Task {
         id,
@@ -106,13 +114,14 @@ fn row_to_task(row: &rusqlite::Row) -> rusqlite::Result<Task> {
         notes: text_to_list(&notes_s),
         agent,
         effort: effort_s.and_then(|s| Effort::from_str(&s).ok()),
+        work_status: work_status_s.and_then(|s| WorkStatus::from_str(&s).ok()),
     })
 }
 
 fn insert_task_row(conn: &Connection, t: &Task) -> Result<(), String> {
     conn.execute(
-        "INSERT INTO tasks (id, title, status, priority, tags, created, updated, description, due_date, project, recurrence, notes, agent, effort)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+        "INSERT INTO tasks (id, title, status, priority, tags, created, updated, description, due_date, project, recurrence, notes, agent, effort, work_status)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
         params![
             t.id,
             t.title,
@@ -128,6 +137,7 @@ fn insert_task_row(conn: &Connection, t: &Task) -> Result<(), String> {
             list_to_text(&t.notes),
             t.agent,
             t.effort.as_ref().map(|e| e.to_string()),
+            t.work_status.as_ref().map(|w| w.to_string()),
         ],
     )
     .map_err(|e| format!("Failed to insert task {}: {}", t.id, e))?;
@@ -167,7 +177,7 @@ pub fn load(path: &Path) -> Result<TaskFile, String> {
     }
 
     let mut stmt = conn
-        .prepare("SELECT id, title, status, priority, tags, created, updated, description, due_date, project, recurrence, notes, agent, effort FROM tasks ORDER BY id")
+        .prepare("SELECT id, title, status, priority, tags, created, updated, description, due_date, project, recurrence, notes, agent, effort, work_status FROM tasks ORDER BY id")
         .map_err(|e| format!("Failed to prepare query: {}", e))?;
     let rows = stmt
         .query_map([], row_to_task)
@@ -268,6 +278,7 @@ mod tests {
             notes: vec![],
             agent: None,
             effort: None,
+            work_status: None,
         }
     }
 
@@ -357,6 +368,7 @@ mod tests {
             notes: vec!["note-a".to_string(), "note-b".to_string()],
             agent: Some("command-center".to_string()),
             effort: Some(Effort::Medium),
+            work_status: Some(WorkStatus::InProgress),
         });
         save(&path, &tf).unwrap();
 
@@ -372,6 +384,7 @@ mod tests {
         assert_eq!(t.notes, vec!["note-a", "note-b"]);
         assert_eq!(t.agent, Some("command-center".to_string()));
         assert_eq!(t.effort, Some(Effort::Medium));
+        assert_eq!(t.work_status, Some(WorkStatus::InProgress));
     }
 
     #[test]
@@ -525,5 +538,57 @@ mod tests {
         assert!(!backup_dir.join("tasks-2025-01-02.db").exists());
         assert!(!backup_dir.join("tasks-2025-01-03.db").exists());
         assert!(backup_dir.join("tasks-2025-01-04.db").exists());
+    }
+
+    #[test]
+    fn test_migration_adds_work_status_column_to_pre_existing_db() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("tasks.db");
+
+        // Simulate a real pre-existing database: create it with the schema
+        // as it existed before this change (no work_status column), and
+        // seed one row, using raw SQL rather than going through db::save
+        // (which would already include the new column).
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE tasks (
+                    id          INTEGER PRIMARY KEY,
+                    title       TEXT NOT NULL,
+                    status      TEXT NOT NULL,
+                    priority    TEXT NOT NULL,
+                    tags        TEXT NOT NULL DEFAULT '',
+                    created     TEXT NOT NULL,
+                    updated     TEXT,
+                    description TEXT,
+                    due_date    TEXT,
+                    project     TEXT,
+                    recurrence  TEXT,
+                    notes       TEXT NOT NULL DEFAULT '',
+                    agent       TEXT,
+                    effort      TEXT
+                );",
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO tasks (id, title, status, priority, tags, created) VALUES (1, 'Pre-existing', 'open', 'medium', '', '2026-01-01T00:00:00+00:00')",
+                [],
+            )
+            .unwrap();
+        }
+
+        // Opening it now (via the normal load path) must not error, must
+        // not lose the existing row, and the new column must be usable.
+        let task_file = load(&path).unwrap();
+        assert_eq!(task_file.tasks.len(), 1);
+        assert_eq!(task_file.tasks[0].title, "Pre-existing");
+        assert_eq!(task_file.tasks[0].work_status, None);
+
+        // And a subsequent save/load round-trip with work_status set works.
+        let mut task_file = task_file;
+        task_file.tasks[0].work_status = Some(WorkStatus::InProgress);
+        save(&path, &task_file).unwrap();
+        let reloaded = load(&path).unwrap();
+        assert_eq!(reloaded.tasks[0].work_status, Some(WorkStatus::InProgress));
     }
 }

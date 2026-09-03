@@ -68,6 +68,7 @@ pub fn add(path: &Path, args: AddArgs) -> Result<String, (i32, String)> {
         notes: Vec::new(),
         agent: args.agent,
         effort: None,
+        work_status: None,
     });
     db::save(path, &task_file).map_err(|e| (1, e))?;
     Ok(format!("Created task {}: {}", id, args.title))
@@ -267,6 +268,7 @@ pub fn done(path: &Path, id: u32) -> Result<String, (i32, String)> {
             notes: parent.notes.clone(),
             agent: parent.agent.clone(),
             effort: parent.effort,
+            work_status: None,
         });
         spawned = Some((new_id, next_due));
     }
@@ -351,6 +353,7 @@ mod tests {
             notes: Vec::new(),
             agent: Some(agent.to_string()),
             effort: None,
+            work_status: None,
         }
     }
 
