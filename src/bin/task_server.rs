@@ -16,8 +16,18 @@ async fn main() {
         println!("task_server: web/dist not found — API only, no static frontend (run `npm run build` in web/ first)");
     }
 
+    let (change_tx, _) = tokio::sync::broadcast::channel(16);
+    // Held for the lifetime of the process — dropping it would stop the watch.
+    let _watcher = match task::watch::spawn(db_path.clone(), change_tx.clone()) {
+        Ok(w) => Some(w),
+        Err(e) => {
+            eprintln!("task_server: failed to watch {} for changes — live updates disabled: {}", db_path.display(), e);
+            None
+        }
+    };
+
     let app = router_with_static(
-        AppState { db_path, write_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())) },
+        AppState { db_path, write_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())), change_tx },
         static_dir,
     );
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", port)).await.unwrap();

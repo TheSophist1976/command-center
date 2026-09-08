@@ -169,6 +169,23 @@ export default function App() {
       .catch((e) => setError(String(e)));
   }, []);
 
+  // Live updates: task_server broadcasts over SSE whenever tasks.db changes
+  // on disk, from any writer (this tab, another tab, the CLI, an agent).
+  // Refetch everything and re-sync `selected` by id rather than trying to
+  // diff/merge — simplest correct approach at this app's scale.
+  useEffect(() => {
+    const source = new EventSource('/api/events');
+    source.onmessage = () => {
+      fetchTasks()
+        .then((t) => {
+          setTasks(t);
+          setSelected((prev) => (prev ? t.find((task) => task.id === prev.id) ?? null : prev));
+        })
+        .catch((e) => setError(String(e)));
+    };
+    return () => source.close();
+  }, []);
+
   useEffect(() => {
     if (!selected) {
       setTaskNotes([]);

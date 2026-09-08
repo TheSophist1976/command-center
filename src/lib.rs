@@ -7,6 +7,7 @@ pub mod note;
 pub mod parser;
 pub mod server;
 pub mod task;
+pub mod watch;
 
 #[cfg(feature = "tui")]
 pub mod claude_session;

@@ -18,6 +18,11 @@ use crate::task::{Status, Task};
 pub struct AppState {
     pub db_path: PathBuf,
     pub write_lock: Arc<tokio::sync::Mutex<()>>,
+    /// Broadcasts a signal whenever tasks.db changes on disk, from any writer
+    /// (this server's own handlers, the CLI, or any other process). Populated
+    /// by `crate::watch::spawn` in the task_server binary; in tests it's just
+    /// an unused channel with no watcher attached.
+    pub change_tx: tokio::sync::broadcast::Sender<()>,
 }
 
 #[derive(Deserialize)]
@@ -398,6 +403,20 @@ async fn list_agents() -> Json<Vec<AgentProfile>> {
     Json(profiles)
 }
 
+/// Server-Sent Events stream that emits one event whenever tasks.db changes
+/// on disk, from any writer — this server's own handlers, the CLI, or any
+/// other process. The event carries no payload; clients are expected to
+/// simply refetch on receipt, same as `AppState::change_tx`'s doc comment.
+async fn task_events(
+    State(state): State<Arc<AppState>>,
+) -> axum::response::sse::Sse<impl futures_core::Stream<Item = Result<axum::response::sse::Event, std::convert::Infallible>>> {
+    use tokio_stream::StreamExt as _;
+    let rx = state.change_tx.subscribe();
+    let stream = tokio_stream::wrappers::BroadcastStream::new(rx)
+        .filter_map(|result| result.ok().map(|_| Ok(axum::response::sse::Event::default().data("changed"))));
+    axum::response::sse::Sse::new(stream).keep_alive(axum::response::sse::KeepAlive::default())
+}
+
 fn notes_dir(state: &AppState) -> PathBuf {
     state
         .db_path
@@ -557,7 +576,8 @@ pub fn router_with_static(state: AppState, static_dir: Option<std::path::PathBuf
         .route("/api/tasks/:id/notes", get(list_task_notes).post(create_task_note))
         .route("/api/tasks/:id/notes/:slug", axum::routing::delete(unlink_task_note))
         .route("/api/notes/:slug/open", axum::routing::post(open_note))
-        .route("/api/agents", get(list_agents));
+        .route("/api/agents", get(list_agents))
+        .route("/api/events", get(task_events));
 
     if let Some(dir) = static_dir {
         app = app.fallback_service(tower_http::services::ServeDir::new(dir));
@@ -577,7 +597,7 @@ mod tests {
     fn make_state() -> (tempfile::TempDir, AppState) {
         let dir = tempdir().unwrap();
         let db_path = dir.path().join("tasks.db");
-        (dir, AppState { db_path, write_lock: Arc::new(tokio::sync::Mutex::new(())) })
+        (dir, AppState { db_path, write_lock: Arc::new(tokio::sync::Mutex::new(())), change_tx: tokio::sync::broadcast::channel(16).0 })
     }
 
     async fn body_json(response: axum::response::Response) -> serde_json::Value {
@@ -837,7 +857,7 @@ mod tests {
         let config_path = dir.path().join("config.md");
         std::fs::write(&config_path, "agent-bot: /code/bot\n").unwrap();
         unsafe { std::env::set_var("TASK_CONFIG_FILE", &config_path) };
-        let app = router(AppState { db_path, write_lock: Arc::new(tokio::sync::Mutex::new(())) });
+        let app = router(AppState { db_path, write_lock: Arc::new(tokio::sync::Mutex::new(())), change_tx: tokio::sync::broadcast::channel(16).0 });
         let response = app
             .oneshot(
                 Request::builder()
@@ -863,6 +883,7 @@ mod tests {
         let state = AppState {
             db_path: dir.path().to_path_buf(),
             write_lock: Arc::new(tokio::sync::Mutex::new(())),
+            change_tx: tokio::sync::broadcast::channel(16).0,
         };
         let app = router(state);
         let response = app
