@@ -4345,6 +4345,21 @@ mod tests {
     }
 
     #[test]
+    fn space_completing_recurring_task_spawns_next_occurrence_with_same_agent() {
+        let mut recurring_task = make_task(NaiveDate::from_ymd_opt(2026, 1, 5));
+        recurring_task.recurrence = Some(<crate::task::Recurrence as std::str::FromStr>::from_str("weekly").unwrap());
+        recurring_task.agent = Some("bot".to_string());
+        let mut app = make_app_with_tmpfile(vec![recurring_task]);
+
+        let _ = handle_normal(&mut app, KeyCode::Char(' '));
+
+        assert_eq!(app.task_file.tasks.len(), 2);
+        assert_eq!(app.task_file.tasks[0].status, Status::Done);
+        assert_eq!(app.task_file.tasks[1].status, Status::Open);
+        assert_eq!(app.task_file.tasks[1].agent, Some("bot".to_string()));
+    }
+
+    #[test]
     fn detail_field_navigation_wraps() {
         let mut app = make_app_with_tasks(vec![make_task(None)]);
         app.show_detail_panel = true;

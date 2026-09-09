@@ -1271,6 +1271,37 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_done_task_recurring_spawn_keeps_same_agent() {
+        let (_dir, state) = make_state();
+        {
+            let mut tf = crate::task::TaskFile::new();
+            tf.tasks.push(crate::task::Task {
+                id: 1, title: "Recurring".to_string(), status: Status::Open, priority: crate::task::Priority::Medium,
+                tags: Vec::new(), created: chrono::Utc::now(), updated: None, description: None,
+                due_date: chrono::NaiveDate::from_ymd_opt(2026, 1, 5), project: None,
+                recurrence: Some(crate::task::Recurrence::from_str("weekly").unwrap()),
+                notes: Vec::new(), agent: Some("bot".to_string()), effort: None, work_status: None,
+            });
+            db::save(&state.db_path, &tf).unwrap();
+        }
+        let app = router(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/tasks/1/done")
+                    .header("host", "127.0.0.1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let json = body_json(response).await;
+        assert_eq!(json["spawned"]["agent"], "bot");
+    }
+
+    #[tokio::test]
     async fn test_done_task_already_done_does_not_spawn_duplicate() {
         let (_dir, state) = make_state();
         {

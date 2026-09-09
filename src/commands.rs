@@ -492,6 +492,27 @@ mod tests {
     }
 
     #[test]
+    fn test_done_recurring_task_spawns_next_occurrence_with_same_agent() {
+        let (_dir, path) = setup();
+        add(&path, AddArgs {
+            title: "Recurring".to_string(), priority: "medium".to_string(),
+            due: Some("2026-01-05".to_string()), project: None, tags: None,
+            agent: Some("bot".to_string()), description: None,
+        }).unwrap();
+        {
+            let mut tf = db::load(&path).unwrap();
+            tf.tasks[0].recurrence = Some(crate::task::Recurrence::from_str("weekly").unwrap());
+            db::save(&path, &tf).unwrap();
+        }
+
+        done(&path, 1).unwrap();
+
+        let tf = db::load(&path).unwrap();
+        let spawned = tf.find_task(2).unwrap();
+        assert_eq!(spawned.agent, Some("bot".to_string()));
+    }
+
+    #[test]
     fn test_done_already_done_is_a_noop_message() {
         let (_dir, path) = setup();
         add(&path, AddArgs { title: "T".to_string(), priority: "medium".to_string(), due: None, project: None, tags: None, agent: None, description: None }).unwrap();
