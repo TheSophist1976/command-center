@@ -8,6 +8,7 @@ import { fetchTasks, fetchAgents, addTask, editTask, markDone, reopenTask, delet
 import { NotesSection } from './components/NotesSection';
 import { AgentPicker } from './components/AgentPicker';
 import { DatePicker } from './components/DatePicker';
+import { Linkify } from './components/Linkify';
 import type { Task, AgentProfile, Note } from './types';
 import { countDueWindow, dueMatches, startOfToday, isOverdue, type DueWindow } from './dueWindow';
 import { statusFor, statusColor } from './mockAgentStatus';
@@ -696,6 +697,7 @@ export default function App() {
                   id="field-title"
                   value={selected.title}
                   onSave={(v) => v.trim() && handleEditField(selected.id, { title: v.trim() })}
+                  display={selected.title ? <Linkify text={selected.title} /> : undefined}
                 />
               </div>
               <button
@@ -795,6 +797,9 @@ export default function App() {
                   type="textarea"
                   placeholder="No description"
                   onSave={(v) => handleEditField(selected.id, { description: v })}
+                  display={selected.description ? (
+                    <span style={{ whiteSpace: 'pre-wrap' }}><Linkify text={selected.description} /></span>
+                  ) : undefined}
                 />
               </FieldRow>
             </div>
