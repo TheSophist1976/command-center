@@ -456,13 +456,22 @@ async fn list_task_notes(
         .ok_or_else(|| app_error(StatusCode::NOT_FOUND, format!("Task {} not found", id)))?;
 
     let dir = notes_dir(&state);
-    let notes: Vec<NoteResponse> = task
+    let mut notes: Vec<(std::time::SystemTime, NoteResponse)> = task
         .notes
         .iter()
         .filter(|slug| is_valid_slug(slug))
-        .filter_map(|slug| crate::note::read_note(&dir.join(format!("{}.md", slug))).ok())
-        .map(NoteResponse::from)
+        .filter_map(|slug| {
+            let path = dir.join(format!("{}.md", slug));
+            let note = crate::note::read_note(&path).ok()?;
+            let modified = std::fs::metadata(&path)
+                .and_then(|m| m.modified())
+                .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+            Some((modified, NoteResponse::from(note)))
+        })
         .collect();
+    // Newest file (by last-modified time) first.
+    notes.sort_by(|a, b| b.0.cmp(&a.0));
+    let notes: Vec<NoteResponse> = notes.into_iter().map(|(_, n)| n).collect();
     Ok(Json(notes))
 }
 
@@ -1446,6 +1455,48 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn test_list_task_notes_orders_newest_file_first() {
+        let (_dir, state) = make_state();
+        {
+            let mut tf = crate::task::TaskFile::new();
+            tf.tasks.push(crate::task::Task {
+                id: 1, title: "Has notes".to_string(), status: Status::Open, priority: crate::task::Priority::Medium,
+                tags: Vec::new(), created: chrono::Utc::now(), updated: None, description: None,
+                due_date: None, project: None, recurrence: None,
+                notes: vec!["oldest".to_string(), "newest".to_string(), "middle".to_string()],
+                agent: None, effort: None, work_status: None,
+            });
+            db::save(&state.db_path, &tf).unwrap();
+        }
+        let notes_dir = notes_dir(&state);
+        std::fs::create_dir_all(&notes_dir).unwrap();
+        // Write in a different order than the link order above, and set
+        // explicit mtimes so the test doesn't depend on write timing.
+        for (slug, offset_secs) in [("middle", 100), ("newest", 200), ("oldest", 0)] {
+            let path = notes_dir.join(format!("{}.md", slug));
+            std::fs::write(&path, format!("# {}\n", slug)).unwrap();
+            let mtime = filetime::FileTime::from_unix_time(1_700_000_000 + offset_secs, 0);
+            filetime::set_file_mtime(&path, mtime).unwrap();
+        }
+
+        let app = router(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/tasks/1/notes")
+                    .header("host", "127.0.0.1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let json = body_json(response).await;
+        let slugs: Vec<&str> = json.as_array().unwrap().iter().map(|n| n["slug"].as_str().unwrap()).collect();
+        assert_eq!(slugs, vec!["newest", "middle", "oldest"]);
     }
 
     #[tokio::test]
