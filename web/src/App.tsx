@@ -112,12 +112,19 @@ function groupKey(task: Task, groupBy: GroupBy): string {
   }
 }
 
+function byPriority(a: Task, b: Task): number {
+  return (PRIORITY_ORDER[a.priority] ?? 99) - (PRIORITY_ORDER[b.priority] ?? 99);
+}
+
 function groupTasks(tasks: Task[], groupBy: GroupBy): Map<string, Task[]> {
   const groups = new Map<string, Task[]>();
   for (const t of tasks) {
     const key = groupKey(t, groupBy);
     if (!groups.has(key)) groups.set(key, []);
     groups.get(key)!.push(t);
+  }
+  for (const group of groups.values()) {
+    group.sort(byPriority);
   }
   if (groupBy === 'priority') {
     return new Map([...groups.entries()].sort((a, b) => (PRIORITY_ORDER[a[0]] ?? 99) - (PRIORITY_ORDER[b[0]] ?? 99)));
