@@ -143,7 +143,9 @@ Tasks have a `work_status` field, separate from open/done, so the human can trac
 task edit <id> --work-status in-progress
 ```
 
-Valid values: `todo`, `in-progress`, `waiting-for-review`, `complete` (aliases `to-do`, `in_progress`/`inprogress`, `review`, and `done` are also accepted).
+Valid values: `todo`, `in-progress`, `waiting-for-review`, `changes-requested`, `complete` (aliases `to-do`, `in_progress`/`inprogress`, `review`, `changes`, and `done` are also accepted).
+
+**`changes-requested`** means the human left feedback and this task needs another round — read the full review thread note (slug `task-<id>-review-thread`) via `task note show task-<id>-review-thread` for the complete history before doing anything, do the requested work, then append your response with `task note append task-<id>-review-thread --body "## Agent response — <YYYY-MM-DD>\n\n<summary>"` and set `--work-status waiting-for-review` again.
 
 **Update this as you work**, not just at the end — set `in-progress` when you start, `waiting-for-review` when you've finished and want the human to check your work before it's truly done.
 
