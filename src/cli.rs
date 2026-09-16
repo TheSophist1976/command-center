@@ -284,6 +284,16 @@ pub enum NoteCommand {
         slug: String,
     },
 
+    /// Append a section to a note's existing body
+    Append {
+        /// Note slug
+        slug: String,
+
+        /// Markdown text to append (including its own header, if any)
+        #[arg(long)]
+        body: String,
+    },
+
     /// Link a note to a task
     Link {
         /// Note slug

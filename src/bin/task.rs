@@ -153,6 +153,12 @@ fn run(cli: Cli) -> Result<(), (i32, String)> {
                     Ok(())
                 }
 
+                NoteCommand::Append { slug, body } => {
+                    let file_path = task::note::append_to_note(&dir, &slug, &body).map_err(|e| (1, e))?;
+                    println!("{}", file_path.display());
+                    Ok(())
+                }
+
                 NoteCommand::Link { slug, task_id } => {
                     let mut task_file = task::db::load(&path).map_err(|e| (1, e))?;
                     match task_file.find_task_mut(task_id) {
