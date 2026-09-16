@@ -111,6 +111,20 @@ pub fn write_note(dir: &Path, note: &Note) -> Result<PathBuf, String> {
     Ok(file_path)
 }
 
+/// Appends a markdown section to an existing note's body, separated from
+/// whatever came before by a blank line. The note must already exist —
+/// this never creates one (mirrors read_note's "must exist" behavior).
+pub fn append_to_note(dir: &Path, slug: &str, section: &str) -> Result<PathBuf, String> {
+    let path = dir.join(format!("{}.md", slug));
+    let mut n = read_note(&path)?;
+    if n.body.trim().is_empty() {
+        n.body = section.to_string();
+    } else {
+        n.body = format!("{}\n\n{}", n.body.trim_end(), section);
+    }
+    write_note(dir, &n)
+}
+
 pub fn discover_notes(dir: &Path, task_filename: &str) -> Vec<Note> {
     let entries = match fs::read_dir(dir) {
         Ok(e) => e,
@@ -252,6 +266,39 @@ mod tests {
 
         let read = read_note(&dir.path().join("multi.md")).unwrap();
         assert_eq!(read.body, "Line 1\nLine 2\nLine 3");
+    }
+
+    // -- append_to_note tests --
+
+    #[test]
+    fn test_append_to_note_on_empty_body() {
+        let dir = tempdir().unwrap();
+        let note = Note { slug: "thread".to_string(), title: "Thread".to_string(), body: String::new() };
+        write_note(dir.path(), &note).unwrap();
+
+        append_to_note(dir.path(), "thread", "## First section\n\nHello.").unwrap();
+
+        let read = read_note(&dir.path().join("thread.md")).unwrap();
+        assert_eq!(read.body, "## First section\n\nHello.");
+    }
+
+    #[test]
+    fn test_append_to_note_on_non_empty_body_adds_blank_line_separator() {
+        let dir = tempdir().unwrap();
+        let note = Note { slug: "thread".to_string(), title: "Thread".to_string(), body: "## First section\n\nHello.".to_string() };
+        write_note(dir.path(), &note).unwrap();
+
+        append_to_note(dir.path(), "thread", "## Second section\n\nMore text.").unwrap();
+
+        let read = read_note(&dir.path().join("thread.md")).unwrap();
+        assert_eq!(read.body, "## First section\n\nHello.\n\n## Second section\n\nMore text.");
+    }
+
+    #[test]
+    fn test_append_to_note_errors_when_note_does_not_exist() {
+        let dir = tempdir().unwrap();
+        let result = append_to_note(dir.path(), "nope", "## Section");
+        assert!(result.is_err());
     }
 
     // -- discover tests --

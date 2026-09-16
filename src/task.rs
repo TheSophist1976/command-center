@@ -37,6 +37,7 @@ pub enum WorkStatus {
     Todo,
     InProgress,
     WaitingForReview,
+    ChangesRequested,
     Complete,
 }
 
@@ -46,6 +47,7 @@ impl std::fmt::Display for WorkStatus {
             WorkStatus::Todo => write!(f, "todo"),
             WorkStatus::InProgress => write!(f, "in-progress"),
             WorkStatus::WaitingForReview => write!(f, "waiting-for-review"),
+            WorkStatus::ChangesRequested => write!(f, "changes-requested"),
             WorkStatus::Complete => write!(f, "complete"),
         }
     }
@@ -58,9 +60,10 @@ impl std::str::FromStr for WorkStatus {
             "todo" | "to-do" => Ok(WorkStatus::Todo),
             "in-progress" | "in_progress" | "inprogress" => Ok(WorkStatus::InProgress),
             "waiting-for-review" | "review" => Ok(WorkStatus::WaitingForReview),
+            "changes-requested" | "changes_requested" | "changesrequested" | "changes" => Ok(WorkStatus::ChangesRequested),
             "complete" | "done" => Ok(WorkStatus::Complete),
             _ => Err(format!(
-                "Invalid work status: '{}'. Valid values: todo, in-progress, waiting-for-review, complete",
+                "Invalid work status: '{}'. Valid values: todo, in-progress, waiting-for-review, changes-requested, complete",
                 s
             )),
         }
@@ -1045,11 +1048,20 @@ mod tests {
         assert_eq!(WorkStatus::from_str("review").unwrap(), WorkStatus::WaitingForReview);
         assert!(WorkStatus::from_str("bogus").is_err());
         assert_eq!(WorkStatus::InProgress.to_string(), "in-progress");
+        assert_eq!(WorkStatus::from_str("changes-requested").unwrap(), WorkStatus::ChangesRequested);
+        assert_eq!(WorkStatus::from_str("changes").unwrap(), WorkStatus::ChangesRequested);
+        assert_eq!(WorkStatus::ChangesRequested.to_string(), "changes-requested");
     }
 
     #[test]
     fn test_task_serialize_work_status_kebab_case() {
         let json = serde_json::to_string(&WorkStatus::WaitingForReview).unwrap();
         assert_eq!(json, "\"waiting-for-review\"");
+    }
+
+    #[test]
+    fn test_task_serialize_changes_requested_kebab_case() {
+        let json = serde_json::to_string(&WorkStatus::ChangesRequested).unwrap();
+        assert_eq!(json, "\"changes-requested\"");
     }
 }
