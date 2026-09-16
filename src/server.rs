@@ -425,6 +425,10 @@ fn notes_dir(state: &AppState) -> PathBuf {
         .join("Notes")
 }
 
+fn review_thread_slug(task_id: u32) -> String {
+    format!("task-{}-review-thread", task_id)
+}
+
 /// Slugs become filenames (`{slug}.md`) joined onto the notes directory. Reject anything
 /// that isn't alphanumeric/hyphen/underscore so a slug can never escape that directory
 /// (e.g. via `..` path segments or an absolute path).
@@ -502,6 +506,81 @@ async fn create_task_note(
     t.notes.push(slug.clone());
     db::save(&state.db_path, &task_file).map_err(|e| app_error(StatusCode::INTERNAL_SERVER_ERROR, e))?;
 
+    Ok(Json(NoteResponse::from(note)))
+}
+
+async fn get_task_review(
+    State(state): State<Arc<AppState>>,
+    AxumPath(id): AxumPath<u32>,
+) -> Result<Json<Option<NoteResponse>>, (StatusCode, Json<serde_json::Value>)> {
+    let task_file = db::load(&state.db_path)
+        .map_err(|e| app_error(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    if task_file.find_task(id).is_none() {
+        return Err(app_error(StatusCode::NOT_FOUND, format!("Task {} not found", id)));
+    }
+    let dir = notes_dir(&state);
+    let slug = review_thread_slug(id);
+    let note = crate::note::read_note(&dir.join(format!("{}.md", slug)))
+        .ok()
+        .map(NoteResponse::from);
+    Ok(Json(note))
+}
+
+#[derive(Deserialize)]
+pub struct FeedbackRequest {
+    pub text: String,
+}
+
+async fn add_task_review_feedback(
+    State(state): State<Arc<AppState>>,
+    AxumPath(id): AxumPath<u32>,
+    Json(req): Json<FeedbackRequest>,
+) -> Result<Json<NoteResponse>, (StatusCode, Json<serde_json::Value>)> {
+    let text = req.text.trim();
+    if text.is_empty() {
+        return Err(app_error(StatusCode::BAD_REQUEST, "feedback text must not be empty"));
+    }
+
+    let _guard = state.write_lock.lock().await;
+    let mut task_file = db::load(&state.db_path)
+        .map_err(|e| app_error(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+
+    let dir = notes_dir(&state);
+    let slug = review_thread_slug(id);
+    let note_path = dir.join(format!("{}.md", slug));
+
+    let task_title = task_file
+        .find_task(id)
+        .ok_or_else(|| app_error(StatusCode::NOT_FOUND, format!("Task {} not found", id)))?
+        .title
+        .clone();
+
+    if !note_path.exists() {
+        crate::note::write_note(
+            &dir,
+            &crate::note::Note { slug: slug.clone(), title: format!("Review — {}", task_title), body: String::new() },
+        )
+        .map_err(|e| app_error(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    }
+
+    let today = chrono::Local::now().date_naive().format("%Y-%m-%d");
+    let section = format!("## Feedback — {}\n\n{}", today, text);
+    crate::note::append_to_note(&dir, &slug, &section)
+        .map_err(|e| app_error(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+
+    {
+        let t = task_file.find_task_mut(id).expect("checked above");
+        if !t.notes.contains(&slug) {
+            t.notes.push(slug.clone());
+        }
+        t.work_status = Some(crate::task::WorkStatus::ChangesRequested);
+        t.updated = Some(chrono::Utc::now());
+    }
+    db::save(&state.db_path, &task_file)
+        .map_err(|e| app_error(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+
+    let note = crate::note::read_note(&note_path)
+        .map_err(|e| app_error(StatusCode::INTERNAL_SERVER_ERROR, e))?;
     Ok(Json(NoteResponse::from(note)))
 }
 
@@ -584,6 +663,7 @@ pub fn router_with_static(state: AppState, static_dir: Option<std::path::PathBuf
         .route("/api/tasks/:id/reopen", axum::routing::post(reopen_task))
         .route("/api/tasks/:id/notes", get(list_task_notes).post(create_task_note))
         .route("/api/tasks/:id/notes/:slug", axum::routing::delete(unlink_task_note))
+        .route("/api/tasks/:id/review", get(get_task_review).post(add_task_review_feedback))
         .route("/api/notes/:slug/open", axum::routing::post(open_note))
         .route("/api/agents", get(list_agents))
         .route("/api/events", get(task_events));
@@ -1542,6 +1622,185 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn test_get_task_review_returns_null_when_no_thread_exists() {
+        let (_dir, state) = make_state();
+        {
+            let mut tf = crate::task::TaskFile::new();
+            tf.tasks.push(crate::task::Task {
+                id: 1, title: "Has no thread yet".to_string(), status: Status::Open, priority: crate::task::Priority::Medium,
+                tags: Vec::new(), created: chrono::Utc::now(), updated: None, description: None,
+                due_date: None, project: None, recurrence: None, notes: Vec::new(), agent: None, effort: None, work_status: None,
+            });
+            db::save(&state.db_path, &tf).unwrap();
+        }
+        let app = router(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/tasks/1/review")
+                    .header("host", "127.0.0.1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let json = body_json(response).await;
+        assert!(json.is_null());
+    }
+
+    #[tokio::test]
+    async fn test_post_task_review_creates_thread_and_sets_changes_requested() {
+        let (_dir, state) = make_state();
+        {
+            let mut tf = crate::task::TaskFile::new();
+            tf.tasks.push(crate::task::Task {
+                id: 1, title: "Waiting on review".to_string(), status: Status::Open, priority: crate::task::Priority::Medium,
+                tags: Vec::new(), created: chrono::Utc::now(), updated: None, description: None,
+                due_date: None, project: None, recurrence: None, notes: Vec::new(), agent: Some("bot".to_string()),
+                effort: None, work_status: Some(crate::task::WorkStatus::WaitingForReview),
+            });
+            db::save(&state.db_path, &tf).unwrap();
+        }
+        let app = router(state.clone());
+        let body = serde_json::json!({ "text": "Please fix the error handling." });
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/tasks/1/review")
+                    .header("host", "127.0.0.1")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let json = body_json(response).await;
+        assert_eq!(json["slug"], "task-1-review-thread");
+        assert!(json["body"].as_str().unwrap().contains("## Feedback —"));
+        assert!(json["body"].as_str().unwrap().contains("Please fix the error handling."));
+
+        let tf = db::load(&state.db_path).unwrap();
+        let task = tf.find_task(1).unwrap();
+        assert_eq!(task.work_status, Some(crate::task::WorkStatus::ChangesRequested));
+    }
+
+    #[tokio::test]
+    async fn test_post_task_review_appends_to_existing_thread() {
+        let (_dir, state) = make_state();
+        {
+            let mut tf = crate::task::TaskFile::new();
+            tf.tasks.push(crate::task::Task {
+                id: 1, title: "Multi-round".to_string(), status: Status::Open, priority: crate::task::Priority::Medium,
+                tags: Vec::new(), created: chrono::Utc::now(), updated: None, description: None,
+                due_date: None, project: None, recurrence: None, notes: Vec::new(), agent: None, effort: None, work_status: None,
+            });
+            db::save(&state.db_path, &tf).unwrap();
+        }
+        let app = router(state.clone());
+        let body1 = serde_json::json!({ "text": "First round of feedback." });
+        app.clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/tasks/1/review")
+                    .header("host", "127.0.0.1")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body1).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        let body2 = serde_json::json!({ "text": "Second round of feedback." });
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/tasks/1/review")
+                    .header("host", "127.0.0.1")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body2).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let json = body_json(response).await;
+        let full_body = json["body"].as_str().unwrap();
+        assert!(full_body.contains("First round of feedback."));
+        assert!(full_body.contains("Second round of feedback."));
+        // First round's text must appear before the second's.
+        let first_pos = full_body.find("First round of feedback.").unwrap();
+        let second_pos = full_body.find("Second round of feedback.").unwrap();
+        assert!(first_pos < second_pos);
+    }
+
+    #[tokio::test]
+    async fn test_post_task_review_empty_text_returns_400() {
+        let (_dir, state) = make_state();
+        {
+            let mut tf = crate::task::TaskFile::new();
+            tf.tasks.push(crate::task::Task {
+                id: 1, title: "T".to_string(), status: Status::Open, priority: crate::task::Priority::Medium,
+                tags: Vec::new(), created: chrono::Utc::now(), updated: None, description: None,
+                due_date: None, project: None, recurrence: None, notes: Vec::new(), agent: None, effort: None, work_status: None,
+            });
+            db::save(&state.db_path, &tf).unwrap();
+        }
+        let app = router(state);
+        let body = serde_json::json!({ "text": "   " });
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/tasks/1/review")
+                    .header("host", "127.0.0.1")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn test_post_task_review_links_note_to_task_without_duplicating() {
+        let (_dir, state) = make_state();
+        {
+            let mut tf = crate::task::TaskFile::new();
+            tf.tasks.push(crate::task::Task {
+                id: 1, title: "T".to_string(), status: Status::Open, priority: crate::task::Priority::Medium,
+                tags: Vec::new(), created: chrono::Utc::now(), updated: None, description: None,
+                due_date: None, project: None, recurrence: None, notes: Vec::new(), agent: None, effort: None, work_status: None,
+            });
+            db::save(&state.db_path, &tf).unwrap();
+        }
+        let app = router(state.clone());
+        for text in ["Round one.", "Round two."] {
+            let body = serde_json::json!({ "text": text });
+            app.clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/api/tasks/1/review")
+                        .header("host", "127.0.0.1")
+                        .header("content-type", "application/json")
+                        .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+        }
+        let tf = db::load(&state.db_path).unwrap();
+        let task = tf.find_task(1).unwrap();
+        let occurrences = task.notes.iter().filter(|s| s.as_str() == "task-1-review-thread").count();
+        assert_eq!(occurrences, 1, "the review-thread slug must be linked exactly once, not duplicated on the second post");
     }
 
     #[tokio::test]
