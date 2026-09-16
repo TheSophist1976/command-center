@@ -4,8 +4,9 @@ import { Terminal, Sun, CalendarDays, Settings, Search, PanelLeftClose, PanelLef
 import { Button } from './components/Button';
 import { NewTaskForm } from './components/NewTaskForm';
 import { EditableField, FieldRow } from './components/EditableField';
-import { fetchTasks, fetchAgents, addTask, editTask, markDone, reopenTask, deleteTask, fetchTaskNotes, createTaskNote, openNote, unlinkTaskNote } from './api';
+import { fetchTasks, fetchAgents, addTask, editTask, markDone, reopenTask, deleteTask, fetchTaskNotes, createTaskNote, openNote, unlinkTaskNote, fetchTaskReview, postTaskFeedback } from './api';
 import { NotesSection } from './components/NotesSection';
+import { ReviewPanel } from './components/ReviewPanel';
 import { AgentPicker } from './components/AgentPicker';
 import { DatePicker } from './components/DatePicker';
 import { Linkify } from './components/Linkify';
@@ -68,6 +69,7 @@ const WORK_STATUS_OPTIONS = [
   { value: 'todo', label: 'To Do' },
   { value: 'in-progress', label: 'In Progress' },
   { value: 'waiting-for-review', label: 'Waiting for Review' },
+  { value: 'changes-requested', label: 'Changes Requested' },
   { value: 'complete', label: 'Complete' },
 ];
 
@@ -75,6 +77,7 @@ const WORK_STATUS_LABEL: Record<string, string> = {
   'todo': 'To Do',
   'in-progress': 'In Progress',
   'waiting-for-review': 'Waiting for Review',
+  'changes-requested': 'Changes Requested',
   'complete': 'Complete',
 };
 
@@ -82,6 +85,7 @@ const WORK_STATUS_COLOR: Record<string, string> = {
   'todo': 'var(--fg-4)',
   'in-progress': 'var(--citrine)',
   'waiting-for-review': 'var(--cyan)',
+  'changes-requested': 'var(--danger)',
   'complete': 'var(--teal)',
 };
 
@@ -151,6 +155,7 @@ export default function App() {
   const [leftOpen, setLeftOpen] = useState(true);
   const [rightOpen, setRightOpen] = useState(true);
   const [taskNotes, setTaskNotes] = useState<Note[]>([]);
+  const [review, setReview] = useState<Note | null>(null);
   const [showShortcuts, setShowShortcuts] = useState(false);
   const today = useMemo(() => startOfToday(), []);
   const agentOptions = useMemo(
@@ -162,6 +167,8 @@ export default function App() {
     [agents],
   );
   const searchInputRef = useRef<HTMLInputElement>(null);
+  const reviewSlug = selected ? `task-${selected.id}-review-thread` : null;
+  const visibleNotes = taskNotes.filter((n) => n.slug !== reviewSlug);
 
   function selectTask(task: Task) {
     setSelected(task);
@@ -201,6 +208,16 @@ export default function App() {
     }
     fetchTaskNotes(selected.id)
       .then(setTaskNotes)
+      .catch((e) => setError(String(e)));
+  }, [selected?.id]);
+
+  useEffect(() => {
+    if (!selected) {
+      setReview(null);
+      return;
+    }
+    fetchTaskReview(selected.id)
+      .then(setReview)
       .catch((e) => setError(String(e)));
   }, [selected?.id]);
 
@@ -297,6 +314,19 @@ export default function App() {
       await unlinkTaskNote(selected.id, slug);
       setTaskNotes((prev) => prev.filter((n) => n.slug !== slug));
       updateTaskNoteSlugs(selected.id, (selected.notes ?? []).filter((s) => s !== slug));
+    } catch (e) {
+      setError(String(e));
+    }
+  }
+
+  async function handleSendFeedback(text: string) {
+    if (!selected) return;
+    try {
+      const note = await postTaskFeedback(selected.id, text);
+      setReview(note);
+      const updated = { ...selected, work_status: 'changes-requested' as const };
+      setSelected(updated);
+      setTasks((prev) => prev.map((t) => (t.id === updated.id ? updated : t)));
     } catch (e) {
       setError(String(e));
     }
@@ -811,8 +841,10 @@ export default function App() {
               </FieldRow>
             </div>
 
+            <ReviewPanel review={review} onSendFeedback={handleSendFeedback} />
+
             <NotesSection
-              notes={taskNotes}
+              notes={visibleNotes}
               onCreate={handleCreateNote}
               onOpen={handleOpenNote}
               onUnlink={handleUnlinkNote}

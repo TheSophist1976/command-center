@@ -104,3 +104,17 @@ export async function unlinkTaskNote(taskId: number, slug: string): Promise<void
     throw new Error(`Failed to unlink note ${slug}`);
   }
 }
+
+export async function fetchTaskReview(taskId: number): Promise<Note | null> {
+  return jsonOrThrow(await fetch(`/api/tasks/${taskId}/review`));
+}
+
+export async function postTaskFeedback(taskId: number, text: string): Promise<Note> {
+  return jsonOrThrow(
+    await fetch(`/api/tasks/${taskId}/review`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ text }),
+    }),
+  );
+}
