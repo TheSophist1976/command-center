@@ -722,7 +722,7 @@ export default function App() {
       </main>
 
       {rightOpen && (
-      <aside style={{ width: 352, flex: 'none', background: 'var(--ink-3)', borderLeft: '1px solid var(--hairline)', display: 'flex', flexDirection: 'column', padding: selected ? '20px 24px' : 0, alignItems: selected ? 'stretch' : 'center', justifyContent: selected ? 'flex-start' : 'center', color: 'var(--fg-5)' }}>
+      <aside style={{ width: 352, flex: 'none', minHeight: 0, overflowY: 'auto', background: 'var(--ink-3)', borderLeft: '1px solid var(--hairline)', display: 'flex', flexDirection: 'column', padding: selected ? '20px 24px' : 0, alignItems: selected ? 'stretch' : 'center', justifyContent: selected ? 'flex-start' : 'center', color: 'var(--fg-5)' }}>
         {selected ? (
           <>
             <div style={{ display: 'flex', alignItems: 'flex-start', gap: 8 }}>
