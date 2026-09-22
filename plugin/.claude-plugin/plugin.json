@@ -1,0 +1,9 @@
+{
+  "name": "command-center-tasks",
+  "description": "Skills for working with the command-center task manager: reading/editing tasks and notes via the `task` CLI, and orchestrating subagents to work assigned tasks (including the changes-requested review-feedback loop).",
+  "author": {
+    "name": "Mark Malool"
+  },
+  "repository": "https://github.com/TheSophist1976/command-center",
+  "keywords": ["task-management", "cli", "orchestration"]
+}
