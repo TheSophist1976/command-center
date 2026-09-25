@@ -329,6 +329,7 @@ export default function App() {
       setTasks((prev) => prev.map((t) => (t.id === updated.id ? updated : t)));
     } catch (e) {
       setError(String(e));
+      throw e;
     }
   }
 
@@ -841,7 +842,14 @@ export default function App() {
               </FieldRow>
             </div>
 
-            <ReviewPanel review={review} onSendFeedback={handleSendFeedback} />
+            {(review || selected.work_status === 'waiting-for-review' || selected.work_status === 'changes-requested') && (
+              <ReviewPanel
+                review={review}
+                workStatus={selected.work_status}
+                accentColor={selected.work_status ? WORK_STATUS_COLOR[selected.work_status] : undefined}
+                onSendFeedback={handleSendFeedback}
+              />
+            )}
 
             <NotesSection
               notes={visibleNotes}

@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use axum::extract::{Path as AxumPath, Query, State};
@@ -441,12 +441,19 @@ pub struct NoteResponse {
     pub slug: String,
     pub title: String,
     pub body: String,
+    /// Last-modified time of the note file, RFC 3339. Empty if it couldn't be read.
+    pub updated: String,
 }
 
-impl From<crate::note::Note> for NoteResponse {
-    fn from(n: crate::note::Note) -> Self {
-        NoteResponse { slug: n.slug, title: n.title, body: n.body }
-    }
+fn note_response(n: crate::note::Note, modified: std::time::SystemTime) -> NoteResponse {
+    let updated = chrono::DateTime::<chrono::Utc>::from(modified).to_rfc3339();
+    NoteResponse { slug: n.slug, title: n.title, body: n.body, updated }
+}
+
+fn modified_time(path: &Path) -> std::time::SystemTime {
+    std::fs::metadata(path)
+        .and_then(|m| m.modified())
+        .unwrap_or(std::time::SystemTime::UNIX_EPOCH)
 }
 
 async fn list_task_notes(
@@ -467,10 +474,8 @@ async fn list_task_notes(
         .filter_map(|slug| {
             let path = dir.join(format!("{}.md", slug));
             let note = crate::note::read_note(&path).ok()?;
-            let modified = std::fs::metadata(&path)
-                .and_then(|m| m.modified())
-                .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
-            Some((modified, NoteResponse::from(note)))
+            let modified = modified_time(&path);
+            Some((modified, note_response(note, modified)))
         })
         .collect();
     // Newest file (by last-modified time) first.
@@ -500,13 +505,14 @@ async fn create_task_note(
     let base_slug = crate::note::slugify(&req.title);
     let slug = crate::note::unique_slug(&dir, &base_slug);
     let note = crate::note::Note { slug: slug.clone(), title: req.title.clone(), body: String::new() };
-    crate::note::write_note(&dir, &note).map_err(|e| app_error(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    let note_path = crate::note::write_note(&dir, &note).map_err(|e| app_error(StatusCode::INTERNAL_SERVER_ERROR, e))?;
 
     let t = task_file.find_task_mut(id).expect("checked above");
     t.notes.push(slug.clone());
     db::save(&state.db_path, &task_file).map_err(|e| app_error(StatusCode::INTERNAL_SERVER_ERROR, e))?;
 
-    Ok(Json(NoteResponse::from(note)))
+    let modified = modified_time(&note_path);
+    Ok(Json(note_response(note, modified)))
 }
 
 async fn get_task_review(
@@ -520,9 +526,10 @@ async fn get_task_review(
     }
     let dir = notes_dir(&state);
     let slug = review_thread_slug(id);
-    let note = crate::note::read_note(&dir.join(format!("{}.md", slug)))
+    let path = dir.join(format!("{}.md", slug));
+    let note = crate::note::read_note(&path)
         .ok()
-        .map(NoteResponse::from);
+        .map(|n| note_response(n, modified_time(&path)));
     Ok(Json(note))
 }
 
@@ -581,7 +588,8 @@ async fn add_task_review_feedback(
 
     let note = crate::note::read_note(&note_path)
         .map_err(|e| app_error(StatusCode::INTERNAL_SERVER_ERROR, e))?;
-    Ok(Json(NoteResponse::from(note)))
+    let modified = modified_time(&note_path);
+    Ok(Json(note_response(note, modified)))
 }
 
 /// Mirrors tui.rs's `build_obsidian_uri`: an Obsidian deep link when a vault is configured.

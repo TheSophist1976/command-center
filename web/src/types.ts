@@ -29,4 +29,5 @@ export interface Note {
   slug: string;
   title: string;
   body: string;
+  updated?: string;
 }
