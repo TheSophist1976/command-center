@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import ReactMarkdown from 'react-markdown';
 import type { Note, Task } from '../types';
 import { Button } from './Button';
@@ -14,15 +14,60 @@ const EMPTY_STATE_COPY: Partial<Record<NonNullable<Task['work_status']>, string>
   'waiting-for-review': 'Waiting on the agent to post their review.',
 };
 
-function formatUpdated(iso: string): string {
-  const date = new Date(iso);
-  if (Number.isNaN(date.getTime())) return '';
-  return date.toLocaleString(undefined, {
-    month: 'short',
-    day: 'numeric',
-    hour: 'numeric',
-    minute: '2-digit',
+interface ChatMessage {
+  sender: 'agent' | 'human';
+  label: string;
+  dateLabel?: string;
+  body: string;
+}
+
+function parseMessages(body: string): ChatMessage[] {
+  const withoutTitle = body.replace(/^#\s+.*(\r?\n)+/, '');
+  const sections = withoutTitle.split(/\n(?=##\s)/g).map((s) => s.trim()).filter(Boolean);
+
+  // No "## " sections at all — treat the whole body as a single agent message
+  // (covers review threads created before this format existed).
+  if (sections.length === 0) {
+    return withoutTitle.trim() ? [{ sender: 'agent', label: 'Agent', body: withoutTitle.trim() }] : [];
+  }
+
+  return sections.map((section) => {
+    const headingMatch = section.match(/^##\s+(.*)$/m);
+    const heading = headingMatch ? headingMatch[1] : '';
+    const text = section.replace(/^##\s+.*$/m, '').trim();
+    const isAgent = /agent/i.test(heading);
+    const dateMatch = heading.match(/[—-]\s*(\S.*)$/);
+    return {
+      sender: isAgent ? 'agent' : 'human',
+      label: isAgent ? 'Agent' : 'Mark',
+      dateLabel: dateMatch ? dateMatch[1].trim() : undefined,
+      body: text || heading,
+    };
   });
+}
+
+function Avatar({ sender, color }: { sender: ChatMessage['sender']; color: string }) {
+  return (
+    <div
+      style={{
+        width: 24,
+        height: 24,
+        borderRadius: '50%',
+        flexShrink: 0,
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        fontFamily: 'var(--font-display)',
+        fontWeight: 700,
+        fontSize: 11,
+        background: sender === 'human' ? color : 'var(--ink-3)',
+        color: sender === 'human' ? 'var(--ink)' : 'var(--fg-3)',
+        border: sender === 'human' ? 'none' : '1px solid var(--hairline)',
+      }}
+    >
+      {sender === 'human' ? 'M' : 'A'}
+    </div>
+  );
 }
 
 export function ReviewPanel({ review, workStatus, accentColor, onSendFeedback }: ReviewPanelProps) {
@@ -30,6 +75,13 @@ export function ReviewPanel({ review, workStatus, accentColor, onSendFeedback }:
   const [sendState, setSendState] = useState<'idle' | 'sending' | 'sent'>('idle');
   const color = accentColor ?? 'var(--fg-5)';
   const trimmed = text.trim();
+  const messages = review ? parseMessages(review.body) : [];
+  const scrollRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
+  }, [review?.body]);
 
   async function submit() {
     if (!trimmed || sendState === 'sending') return;
@@ -41,6 +93,13 @@ export function ReviewPanel({ review, workStatus, accentColor, onSendFeedback }:
       setTimeout(() => setSendState('idle'), 1500);
     } catch {
       setSendState('idle');
+    }
+  }
+
+  function handleKeyDown(e: React.KeyboardEvent<HTMLTextAreaElement>) {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      submit();
     }
   }
 
@@ -62,24 +121,73 @@ export function ReviewPanel({ review, workStatus, accentColor, onSendFeedback }:
         </span>
       </div>
 
-      {review ? (
+      {messages.length > 0 ? (
         <div
+          ref={scrollRef}
           style={{
+            display: 'flex',
+            flexDirection: 'column',
+            gap: 10,
             border: `1px solid ${color}`,
-            borderRadius: 6,
-            padding: '10px 12px',
-            fontSize: 13,
-            color: 'var(--fg-2)',
-            maxHeight: 320,
+            borderRadius: 8,
+            padding: '10px 10px',
+            background: 'var(--ink-2)',
+            maxHeight: 360,
             overflowY: 'auto',
           }}
         >
-          <ReactMarkdown>{review.body}</ReactMarkdown>
-          {review.updated && (
-            <div style={{ marginTop: 8, fontSize: 11, color: 'var(--fg-5)' }}>
-              Updated {formatUpdated(review.updated)}
+          {messages.map((m, i) => (
+            <div
+              key={i}
+              style={{
+                display: 'flex',
+                flexDirection: m.sender === 'human' ? 'row-reverse' : 'row',
+                gap: 8,
+                alignItems: 'flex-start',
+              }}
+            >
+              <Avatar sender={m.sender} color={color} />
+              <div
+                style={{
+                  display: 'flex',
+                  flexDirection: 'column',
+                  alignItems: m.sender === 'human' ? 'flex-end' : 'flex-start',
+                  maxWidth: '78%',
+                }}
+              >
+                <div
+                  style={{
+                    display: 'flex',
+                    gap: 6,
+                    alignItems: 'baseline',
+                    marginBottom: 2,
+                    flexDirection: m.sender === 'human' ? 'row-reverse' : 'row',
+                  }}
+                >
+                  <span style={{ fontSize: 11, fontWeight: 700, color: 'var(--fg-2)' }}>{m.label}</span>
+                  {m.dateLabel && (
+                    <span style={{ fontSize: 10, color: 'var(--fg-5)' }}>{m.dateLabel}</span>
+                  )}
+                </div>
+                <div
+                  style={{
+                    borderRadius: 12,
+                    borderTopLeftRadius: m.sender === 'human' ? 12 : 4,
+                    borderTopRightRadius: m.sender === 'human' ? 4 : 12,
+                    padding: '8px 11px',
+                    fontSize: 13,
+                    lineHeight: 1.4,
+                    color: m.sender === 'human' ? 'var(--ink)' : 'var(--fg-2)',
+                    background: m.sender === 'human' ? color : 'var(--ink-3)',
+                    border: m.sender === 'human' ? 'none' : '1px solid var(--hairline)',
+                    wordBreak: 'break-word',
+                  }}
+                >
+                  <ReactMarkdown>{m.body}</ReactMarkdown>
+                </div>
+              </div>
             </div>
-          )}
+          ))}
         </div>
       ) : (
         <div style={{ fontSize: 13, color: 'var(--fg-5)', fontStyle: 'italic' }}>
@@ -87,31 +195,40 @@ export function ReviewPanel({ review, workStatus, accentColor, onSendFeedback }:
         </div>
       )}
 
-      <textarea
-        value={text}
-        onChange={(e) => setText(e.target.value)}
-        placeholder="Leave feedback for another round…"
-        rows={3}
+      <div
         style={{
-          width: '100%',
+          display: 'flex',
+          alignItems: 'flex-end',
+          gap: 8,
           background: 'var(--ink-2)',
           border: '1px solid var(--hairline)',
-          borderRadius: 4,
-          color: 'var(--fg-1)',
-          fontSize: 13,
-          fontFamily: 'inherit',
-          padding: '6px 8px',
-          resize: 'vertical',
-          boxSizing: 'border-box',
+          borderRadius: 18,
+          padding: '6px 6px 6px 12px',
         }}
-      />
-      <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+      >
+        <textarea
+          value={text}
+          onChange={(e) => setText(e.target.value)}
+          onKeyDown={handleKeyDown}
+          placeholder="Message the agent… (Enter to send, Shift+Enter for a new line)"
+          rows={1}
+          style={{
+            flex: 1,
+            background: 'transparent',
+            border: 'none',
+            outline: 'none',
+            color: 'var(--fg-1)',
+            fontSize: 13,
+            fontFamily: 'inherit',
+            padding: '6px 0',
+            resize: 'none',
+            boxSizing: 'border-box',
+            maxHeight: 120,
+          }}
+        />
         <Button size="sm" onClick={submit} disabled={!trimmed || sendState === 'sending'}>
-          {sendState === 'sending' ? 'Sending…' : 'Send feedback'}
+          {sendState === 'sending' ? '…' : sendState === 'sent' ? 'Sent' : 'Send'}
         </Button>
-        {sendState === 'sent' && (
-          <span style={{ fontSize: 12, color: 'var(--teal)' }}>Sent</span>
-        )}
       </div>
     </div>
   );
