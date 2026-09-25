@@ -20,7 +20,7 @@ Call `mcp__plugin_slack_slack__slack_search_public_and_private` with:
 
 If the response includes a pagination `cursor`, fetch one additional page using it — do not paginate further than that; anything beyond ~40 saved items in one poll will simply be picked up on the next `/loop` firing.
 
-For each result, note: channel ID, message timestamp (`ts`), permalink, author, and message text. If the search result doesn't directly include a permalink, construct one from the channel ID and `ts` using Slack's standard permalink format, or resolve it via `mcp__plugin_slack_slack__slack_read_channel` / `mcp__plugin_slack_slack__slack_read_thread`.
+For each result, note: channel ID, message timestamp (`ts`), permalink, author, and message text. The search result's own `permalink` field is the canonical, required source whenever the search tool provides one — use it as-is. Only when a search result genuinely lacks a permalink should you fall back to constructing one from the channel ID and `ts` using Slack's standard permalink format, or resolving it via `mcp__plugin_slack_slack__slack_read_channel` / `mcp__plugin_slack_slack__slack_read_thread`. Whichever way a permalink is obtained for a given message, that exact string must be used both when storing it in the source note (Step 4) and when checking for it in the dedup grep (Step 3) — never regenerate or reformat it later.
 
 If zero results come back, report "0 new — nothing to capture" and stop here.
 
@@ -42,7 +42,7 @@ For each message that passed Step 3:
 
 1. Create the task:
    ```bash
-   task add --title "<message text, truncated to 120 characters if longer>" --priority medium --description "<full message text, verbatim>"
+   task add "<message text, truncated to 120 characters if longer>" --priority medium --description "<full message text, verbatim>"
    ```
    Note the new task's ID from the CLI's `Created task <id>: ...` output.
 
@@ -50,9 +50,9 @@ For each message that passed Step 3:
    ```bash
    task note add "Slack source: <first 60 characters of message text>" --task <id>
    ```
-   Note the returned note slug.
+   `task note add` prints the file path of the note it created (e.g. `.../Notes/slack-source-abc123.md`), not a bare slug. Extract the bare slug yourself by taking the filename from that path and stripping the trailing `.md` extension (e.g. `.../Notes/slack-source-abc123.md` → `slack-source-abc123`). Use that bare slug — never the full printed path — in the next step; `task note edit` reconstructs the path as `<slug>.md` internally, so passing the full path would produce a broken double-extension path.
 
-3. Fill in the note body with the permalink and metadata (needed for Step 3's dedup check on future runs):
+3. Fill in the note body with the permalink and metadata (needed for Step 3's dedup check on future runs), using the bare slug extracted above:
    ```bash
    task note edit <slug> --body "<permalink>
 
