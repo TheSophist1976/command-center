@@ -205,6 +205,9 @@ export default function App() {
           setSelected((prev) => (prev ? t.find((task) => task.id === prev.id) ?? null : prev));
         })
         .catch((e) => setError(String(e)));
+      fetchAgents()
+        .then(setAgents)
+        .catch((e) => setError(String(e)));
     };
     return () => source.close();
   }, []);
