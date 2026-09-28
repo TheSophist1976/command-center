@@ -8,6 +8,7 @@ import { fetchTasks, fetchAgents, addTask, editTask, markDone, reopenTask, delet
 import { NotesSection } from './components/NotesSection';
 import { ReviewPanel } from './components/ReviewPanel';
 import { AgentPicker } from './components/AgentPicker';
+import { AgentEditor } from './components/AgentEditor';
 import { DatePicker } from './components/DatePicker';
 import { Linkify } from './components/Linkify';
 import type { Task, AgentProfile, Note } from './types';
@@ -157,6 +158,7 @@ export default function App() {
   const [taskNotes, setTaskNotes] = useState<Note[]>([]);
   const [review, setReview] = useState<Note | null>(null);
   const [showShortcuts, setShowShortcuts] = useState(false);
+  const [editingAgent, setEditingAgent] = useState<AgentProfile | null>(null);
   const today = useMemo(() => startOfToday(), []);
   const agentOptions = useMemo(
     () => [
@@ -561,7 +563,12 @@ export default function App() {
           {agents.map((a) => {
             const status = statusFor(a.name);
             return (
-              <div key={a.name} style={{ display: 'flex', alignItems: 'center', gap: 10, height: 28 }}>
+              <div
+                key={a.name}
+                onClick={() => setEditingAgent(a)}
+                title={`Edit ${a.name}`}
+                style={{ display: 'flex', alignItems: 'center', gap: 10, height: 28, cursor: 'pointer', borderRadius: 4 }}
+              >
                 <span style={{ width: 7, height: 7, borderRadius: 999, background: statusColor(status.state) }} />
                 <span style={{ fontFamily: 'var(--font-mono)', fontSize: 12.5, color: 'var(--fg-3)' }}>{a.name}</span>
               </div>
@@ -876,6 +883,10 @@ export default function App() {
           'Select a task'
         )}
       </aside>
+      )}
+
+      {editingAgent && (
+        <AgentEditor agent={editingAgent} onClose={() => setEditingAgent(null)} />
       )}
 
       {showShortcuts && (

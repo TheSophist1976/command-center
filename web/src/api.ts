@@ -22,6 +22,34 @@ export async function fetchAgents(): Promise<AgentProfile[]> {
   return jsonOrThrow(await fetch('/api/agents'));
 }
 
+export async function fetchAgentInstructions(name: string): Promise<Note | null> {
+  return jsonOrThrow(await fetch(`/api/agents/${encodeURIComponent(name)}/instructions`));
+}
+
+export async function saveAgentInstructions(name: string, changes: { title?: string; body?: string }): Promise<Note> {
+  return jsonOrThrow(
+    await fetch(`/api/agents/${encodeURIComponent(name)}/instructions`, {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(changes),
+    }),
+  );
+}
+
+export async function fetchAgentMemory(name: string): Promise<Note | null> {
+  return jsonOrThrow(await fetch(`/api/agents/${encodeURIComponent(name)}/memory`));
+}
+
+export async function saveAgentMemory(name: string, changes: { title?: string; body?: string }): Promise<Note> {
+  return jsonOrThrow(
+    await fetch(`/api/agents/${encodeURIComponent(name)}/memory`, {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(changes),
+    }),
+  );
+}
+
 export async function addTask(input: {
   title: string;
   priority?: string;

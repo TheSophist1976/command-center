@@ -403,6 +403,127 @@ async fn list_agents() -> Json<Vec<AgentProfile>> {
     Json(profiles)
 }
 
+/// Mirrors the CLI's `task agent instructions`/`task agent memory` slug resolution
+/// (src/bin/task.rs), so the web UI edits the exact same files.
+fn agent_notes_dir(state: &AppState, slug: &str) -> PathBuf {
+    state
+        .db_path
+        .parent()
+        .unwrap_or(std::path::Path::new("."))
+        .join("Notes")
+        .join("Agents")
+        .join(slug)
+}
+
+fn agent_exists(name: &str) -> bool {
+    crate::config::list_agent_profiles()
+        .into_iter()
+        .any(|(n, _)| n == name)
+}
+
+fn instructions_slug(name: &str) -> String {
+    crate::config::read_config_value(&format!("agent-{}-instructions", name))
+        .unwrap_or_else(|| crate::note::slugify(name))
+}
+
+async fn get_agent_instructions(
+    State(state): State<Arc<AppState>>,
+    AxumPath(name): AxumPath<String>,
+) -> Result<Json<Option<NoteResponse>>, (StatusCode, Json<serde_json::Value>)> {
+    if !agent_exists(&name) {
+        return Err(app_error(StatusCode::NOT_FOUND, format!("Unknown agent '{}'", name)));
+    }
+    let slug = instructions_slug(&name);
+    let agents_dir = agent_notes_dir(&state, &slug);
+    let note_path = agents_dir.join("instructions.md");
+    let legacy_path = state
+        .db_path
+        .parent()
+        .unwrap_or(std::path::Path::new("."))
+        .join("Notes")
+        .join("Instructions")
+        .join(format!("{}.md", slug));
+    let read_path = if note_path.exists() { &note_path } else { &legacy_path };
+    let note = crate::note::read_note(read_path)
+        .ok()
+        .map(|n| note_response(n, modified_time(read_path)));
+    Ok(Json(note))
+}
+
+async fn edit_agent_instructions(
+    State(state): State<Arc<AppState>>,
+    AxumPath(name): AxumPath<String>,
+    Json(req): Json<EditNoteRequest>,
+) -> Result<Json<NoteResponse>, (StatusCode, Json<serde_json::Value>)> {
+    if !agent_exists(&name) {
+        return Err(app_error(StatusCode::NOT_FOUND, format!("Unknown agent '{}'", name)));
+    }
+    let _guard = state.write_lock.lock().await;
+    let slug = instructions_slug(&name);
+    let agents_dir = agent_notes_dir(&state, &slug);
+    let note_path = agents_dir.join("instructions.md");
+    let legacy_path = state
+        .db_path
+        .parent()
+        .unwrap_or(std::path::Path::new("."))
+        .join("Notes")
+        .join("Instructions")
+        .join(format!("{}.md", slug));
+    let read_path = if note_path.exists() { &note_path } else { &legacy_path };
+    let existing = crate::note::read_note(read_path).ok();
+
+    let title = req
+        .title
+        .unwrap_or_else(|| existing.as_ref().map(|n| n.title.clone()).unwrap_or_else(|| format!("{} Instructions", name)));
+    let body = req.body.unwrap_or_else(|| existing.as_ref().map(|n| n.body.clone()).unwrap_or_default());
+    let note = crate::note::Note { slug: "instructions".to_string(), title, body };
+    let note_path = crate::note::write_note(&agents_dir, &note)
+        .map_err(|e| app_error(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    let modified = modified_time(&note_path);
+    Ok(Json(note_response(note, modified)))
+}
+
+async fn get_agent_memory(
+    State(state): State<Arc<AppState>>,
+    AxumPath(name): AxumPath<String>,
+) -> Result<Json<Option<NoteResponse>>, (StatusCode, Json<serde_json::Value>)> {
+    if !agent_exists(&name) {
+        return Err(app_error(StatusCode::NOT_FOUND, format!("Unknown agent '{}'", name)));
+    }
+    let slug = crate::note::slugify(&name);
+    let agents_dir = agent_notes_dir(&state, &slug);
+    let note_path = agents_dir.join("memory.md");
+    let note = crate::note::read_note(&note_path)
+        .ok()
+        .map(|n| note_response(n, modified_time(&note_path)));
+    Ok(Json(note))
+}
+
+async fn edit_agent_memory(
+    State(state): State<Arc<AppState>>,
+    AxumPath(name): AxumPath<String>,
+    Json(req): Json<EditNoteRequest>,
+) -> Result<Json<NoteResponse>, (StatusCode, Json<serde_json::Value>)> {
+    if !agent_exists(&name) {
+        return Err(app_error(StatusCode::NOT_FOUND, format!("Unknown agent '{}'", name)));
+    }
+    let _guard = state.write_lock.lock().await;
+    let slug = crate::note::slugify(&name);
+    let agents_dir = agent_notes_dir(&state, &slug);
+    let note_path = agents_dir.join("memory.md");
+    let existing = crate::note::read_note(&note_path).ok();
+
+    let title = req
+        .title
+        .unwrap_or_else(|| existing.as_ref().map(|n| n.title.clone()).unwrap_or_else(|| format!("{} Memory", name)));
+    let body = req.body.unwrap_or_else(|| existing.as_ref().map(|n| n.body.clone()).unwrap_or_default());
+    let note = crate::note::Note { slug: "memory".to_string(), title, body };
+    let note_path = crate::note::write_note(&agents_dir, &note)
+        .map_err(|e| app_error(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    let modified = modified_time(&note_path);
+    Ok(Json(note_response(note, modified)))
+}
+
 /// Server-Sent Events stream that emits one event whenever tasks.db changes
 /// on disk, from any writer — this server's own handlers, the CLI, or any
 /// other process. The event carries no payload; clients are expected to
@@ -536,6 +657,12 @@ async fn get_task_review(
 #[derive(Deserialize)]
 pub struct FeedbackRequest {
     pub text: String,
+}
+
+#[derive(Deserialize)]
+pub struct EditNoteRequest {
+    pub title: Option<String>,
+    pub body: Option<String>,
 }
 
 async fn add_task_review_feedback(
@@ -674,6 +801,8 @@ pub fn router_with_static(state: AppState, static_dir: Option<std::path::PathBuf
         .route("/api/tasks/:id/review", get(get_task_review).post(add_task_review_feedback))
         .route("/api/notes/:slug/open", axum::routing::post(open_note))
         .route("/api/agents", get(list_agents))
+        .route("/api/agents/:name/instructions", get(get_agent_instructions).put(edit_agent_instructions))
+        .route("/api/agents/:name/memory", get(get_agent_memory).put(edit_agent_memory))
         .route("/api/events", get(task_events));
 
     if let Some(dir) = static_dir {
@@ -696,6 +825,10 @@ mod tests {
         let db_path = dir.path().join("tasks.db");
         (dir, AppState { db_path, write_lock: Arc::new(tokio::sync::Mutex::new(())), change_tx: tokio::sync::broadcast::channel(16).0 })
     }
+
+    /// `TASK_CONFIG_FILE` is process-global, so tests that set it must not run concurrently
+    /// with each other — guard every such test with this lock for its whole duration.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     async fn body_json(response: axum::response::Response) -> serde_json::Value {
         let bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
@@ -949,6 +1082,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_list_agents_returns_configured_profiles() {
+        let _guard = ENV_LOCK.lock().unwrap();
         let dir = tempdir().unwrap();
         let db_path = dir.path().join("tasks.db");
         let config_path = dir.path().join("config.md");
@@ -970,6 +1104,135 @@ mod tests {
         let json = body_json(response).await;
         assert_eq!(json[0]["name"], "bot");
         assert_eq!(json[0]["dir"], "/code/bot");
+    }
+
+    #[tokio::test]
+    async fn test_agent_instructions_roundtrip_via_api() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("tasks.db");
+        let config_path = dir.path().join("config.md");
+        std::fs::write(&config_path, "agent-bot: /code/bot\n").unwrap();
+        unsafe { std::env::set_var("TASK_CONFIG_FILE", &config_path) };
+        let app = router(AppState { db_path, write_lock: Arc::new(tokio::sync::Mutex::new(())), change_tx: tokio::sync::broadcast::channel(16).0 });
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/agents/bot/instructions")
+                    .header("host", "127.0.0.1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let json = body_json(response).await;
+        assert!(json.is_null());
+
+        let body = serde_json::json!({ "title": "Bot Instructions", "body": "Do the thing." });
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/api/agents/bot/instructions")
+                    .header("host", "127.0.0.1")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let json = body_json(response).await;
+        assert_eq!(json["title"], "Bot Instructions");
+        assert_eq!(json["body"], "Do the thing.");
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/agents/bot/instructions")
+                    .header("host", "127.0.0.1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        unsafe { std::env::remove_var("TASK_CONFIG_FILE") };
+        assert_eq!(response.status(), StatusCode::OK);
+        let json = body_json(response).await;
+        assert_eq!(json["title"], "Bot Instructions");
+        assert_eq!(json["body"], "Do the thing.");
+    }
+
+    #[tokio::test]
+    async fn test_agent_memory_roundtrip_via_api() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("tasks.db");
+        let config_path = dir.path().join("config.md");
+        std::fs::write(&config_path, "agent-bot: /code/bot\n").unwrap();
+        unsafe { std::env::set_var("TASK_CONFIG_FILE", &config_path) };
+        let app = router(AppState { db_path, write_lock: Arc::new(tokio::sync::Mutex::new(())), change_tx: tokio::sync::broadcast::channel(16).0 });
+
+        let body = serde_json::json!({ "body": "Remembered fact." });
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/api/agents/bot/memory")
+                    .header("host", "127.0.0.1")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let json = body_json(response).await;
+        assert_eq!(json["title"], "bot Memory");
+        assert_eq!(json["body"], "Remembered fact.");
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/agents/bot/memory")
+                    .header("host", "127.0.0.1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        unsafe { std::env::remove_var("TASK_CONFIG_FILE") };
+        assert_eq!(response.status(), StatusCode::OK);
+        let json = body_json(response).await;
+        assert_eq!(json["body"], "Remembered fact.");
+    }
+
+    #[tokio::test]
+    async fn test_agent_instructions_unknown_agent_returns_404() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("tasks.db");
+        let config_path = dir.path().join("config.md");
+        std::fs::write(&config_path, "agent-bot: /code/bot\n").unwrap();
+        unsafe { std::env::set_var("TASK_CONFIG_FILE", &config_path) };
+        let app = router(AppState { db_path, write_lock: Arc::new(tokio::sync::Mutex::new(())), change_tx: tokio::sync::broadcast::channel(16).0 });
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/agents/ghost/instructions")
+                    .header("host", "127.0.0.1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        unsafe { std::env::remove_var("TASK_CONFIG_FILE") };
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]
