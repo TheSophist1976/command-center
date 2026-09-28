@@ -15,7 +15,7 @@ const EMPTY_STATE_COPY: Partial<Record<NonNullable<Task['work_status']>, string>
 };
 
 interface ChatMessage {
-  sender: 'agent' | 'human';
+  sender: 'agent' | 'human' | 'system';
   label: string;
   dateLabel?: string;
   body: string;
@@ -35,18 +35,19 @@ function parseMessages(body: string): ChatMessage[] {
     const headingMatch = section.match(/^##\s+(.*)$/m);
     const heading = headingMatch ? headingMatch[1] : '';
     const text = section.replace(/^##\s+.*$/m, '').trim();
+    const isSnapshot = /^snapshot/i.test(heading);
     const isAgent = /agent/i.test(heading);
     const dateMatch = heading.match(/[—-]\s*(\S.*)$/);
     return {
-      sender: isAgent ? 'agent' : 'human',
-      label: isAgent ? 'Agent' : 'Mark',
+      sender: isSnapshot ? 'system' : isAgent ? 'agent' : 'human',
+      label: isSnapshot ? 'Snapshot' : isAgent ? 'Agent' : 'Mark',
       dateLabel: dateMatch ? dateMatch[1].trim() : undefined,
       body: text || heading,
     };
   });
 }
 
-function Avatar({ sender, color }: { sender: ChatMessage['sender']; color: string }) {
+function Avatar({ sender, color }: { sender: 'agent' | 'human'; color: string }) {
   return (
     <div
       style={{
@@ -136,7 +137,24 @@ export function ReviewPanel({ review, workStatus, accentColor, onSendFeedback }:
             overflowY: 'auto',
           }}
         >
-          {messages.map((m, i) => (
+          {messages.map((m, i) =>
+            m.sender === 'system' ? (
+              <div
+                key={i}
+                style={{
+                  fontSize: 11.5,
+                  color: 'var(--fg-4)',
+                  fontFamily: 'var(--font-mono)',
+                  border: '1px dashed var(--hairline)',
+                  borderRadius: 6,
+                  padding: '6px 10px',
+                  alignSelf: 'center',
+                }}
+              >
+                📌 {m.body}
+                {m.dateLabel && <span style={{ marginLeft: 6, color: 'var(--fg-5)' }}>· {m.dateLabel}</span>}
+              </div>
+            ) : (
             <div
               key={i}
               style={{
@@ -187,7 +205,8 @@ export function ReviewPanel({ review, workStatus, accentColor, onSendFeedback }:
                 </div>
               </div>
             </div>
-          ))}
+            ),
+          )}
         </div>
       ) : (
         <div style={{ fontSize: 13, color: 'var(--fg-5)', fontStyle: 'italic' }}>

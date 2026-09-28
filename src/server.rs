@@ -257,12 +257,17 @@ async fn edit_task(
         .transpose()
         .map_err(|e| app_error(StatusCode::BAD_REQUEST, e))?;
     let tags = req.tags.as_deref().map(|s| parse_csv(Some(s)));
+    // Freeze-before-review (task 710): a handoff into waiting-for-review pins the
+    // exact commit being reviewed into the review-thread note, so feedback can cite
+    // "commit <sha>" instead of "the current state of X", which goes stale if the
+    // artifact changes again before it's read.
+    let entering_review = matches!(work_status, Some(Some(crate::task::WorkStatus::WaitingForReview)));
 
     let _guard = state.write_lock.lock().await;
     let mut task_file = db::load(&state.db_path)
         .map_err(|e| app_error(StatusCode::INTERNAL_SERVER_ERROR, e))?;
 
-    let updated_task = {
+    let (updated_task, snapshot_project) = {
         let t = task_file
             .find_task_mut(id)
             .ok_or_else(|| app_error(StatusCode::NOT_FOUND, format!("Task {} not found", id)))?;
@@ -297,11 +302,67 @@ async fn edit_task(
             t.recurrence = r;
         }
         t.updated = Some(chrono::Utc::now());
-        t.clone()
+        (t.clone(), t.project.clone())
     };
 
+    if entering_review {
+        record_review_snapshot(&mut task_file, &state, id, snapshot_project.as_deref())
+            .map_err(|e| app_error(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    }
+
     db::save(&state.db_path, &task_file).map_err(|e| app_error(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    let updated_task = task_file.find_task(id).cloned().unwrap_or(updated_task);
     Ok(Json(updated_task))
+}
+
+/// Captures the project's current git commit (best-effort — silently does nothing if
+/// `project` isn't set, isn't a git repo, or `git` isn't available) and records it in
+/// the task's review-thread note, creating that note if it doesn't exist yet. Links
+/// the note to the task the same way `add_task_review_feedback` does.
+fn record_review_snapshot(
+    task_file: &mut crate::task::TaskFile,
+    state: &AppState,
+    id: u32,
+    project: Option<&str>,
+) -> Result<(), String> {
+    let Some(project) = project else { return Ok(()) };
+    let Some(sha) = git_head_sha(project) else { return Ok(()) };
+
+    let dir = notes_dir(state);
+    let slug = review_thread_slug(id);
+    let note_path = dir.join(format!("{}.md", slug));
+
+    if !note_path.exists() {
+        let task_title = task_file.find_task(id).map(|t| t.title.clone()).unwrap_or_default();
+        crate::note::write_note(
+            &dir,
+            &crate::note::Note { slug: slug.clone(), title: format!("Review — {}", task_title), body: String::new() },
+        )?;
+    }
+
+    let today = chrono::Local::now().date_naive().format("%Y-%m-%d");
+    let section = format!("## Snapshot — {}\n\nPinned for review at commit `{}` in `{}`.", today, sha, project);
+    crate::note::append_to_note(&dir, &slug, &section)?;
+
+    if let Some(t) = task_file.find_task_mut(id) {
+        if !t.notes.contains(&slug) {
+            t.notes.push(slug);
+        }
+    }
+    Ok(())
+}
+
+fn git_head_sha(project: &str) -> Option<String> {
+    let dir = crate::config::expand_tilde(project);
+    let output = std::process::Command::new("git")
+        .args(["-C", &dir.to_string_lossy(), "rev-parse", "--short", "HEAD"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let sha = String::from_utf8(output.stdout).ok()?.trim().to_string();
+    if sha.is_empty() { None } else { Some(sha) }
 }
 
 #[derive(Serialize)]
@@ -1411,6 +1472,94 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
         let json = body_json(response).await;
         assert_eq!(json["work_status"], "in-progress");
+    }
+
+    #[tokio::test]
+    async fn test_edit_task_entering_review_pins_commit_snapshot() {
+        let (_dir, state) = make_state();
+        let repo = tempdir().unwrap();
+        std::process::Command::new("git").args(["init", "-q"]).current_dir(repo.path()).status().unwrap();
+        std::process::Command::new("git").args(["config", "user.email", "a@b.c"]).current_dir(repo.path()).status().unwrap();
+        std::process::Command::new("git").args(["config", "user.name", "Test"]).current_dir(repo.path()).status().unwrap();
+        std::fs::write(repo.path().join("f.txt"), "hi").unwrap();
+        std::process::Command::new("git").args(["add", "."]).current_dir(repo.path()).status().unwrap();
+        std::process::Command::new("git").args(["commit", "-q", "-m", "init"]).current_dir(repo.path()).status().unwrap();
+        let expected_sha = String::from_utf8(
+            std::process::Command::new("git").args(["rev-parse", "--short", "HEAD"]).current_dir(repo.path()).output().unwrap().stdout,
+        )
+        .unwrap()
+        .trim()
+        .to_string();
+
+        {
+            let mut tf = crate::task::TaskFile::new();
+            tf.tasks.push(crate::task::Task {
+                id: 1, title: "Ship it".to_string(), status: Status::Open, priority: crate::task::Priority::Medium,
+                tags: Vec::new(), created: chrono::Utc::now(), updated: None, description: None,
+                due_date: None, project: Some(repo.path().to_string_lossy().to_string()), recurrence: None,
+                notes: Vec::new(), agent: None, effort: None, work_status: None,
+            });
+            db::save(&state.db_path, &tf).unwrap();
+        }
+        let app = router(state.clone());
+        let body = serde_json::json!({ "work_status": "waiting-for-review" });
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("PATCH")
+                    .uri("/api/tasks/1")
+                    .header("host", "127.0.0.1")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let json = body_json(response).await;
+        assert!(json["notes"].as_array().unwrap().iter().any(|n| n == "task-1-review-thread"));
+
+        let tf = db::load(&state.db_path).unwrap();
+        let task = tf.find_task(1).unwrap();
+        assert!(task.notes.contains(&"task-1-review-thread".to_string()));
+
+        let note_path = state.db_path.parent().unwrap().join("Notes").join("task-1-review-thread.md");
+        let note = crate::note::read_note(&note_path).unwrap();
+        assert!(note.body.contains("## Snapshot —"));
+        assert!(note.body.contains(&format!("commit `{}`", expected_sha)));
+    }
+
+    #[tokio::test]
+    async fn test_edit_task_entering_review_without_project_is_a_noop_snapshot() {
+        let (_dir, state) = make_state();
+        {
+            let mut tf = crate::task::TaskFile::new();
+            tf.tasks.push(crate::task::Task {
+                id: 1, title: "No project here".to_string(), status: Status::Open, priority: crate::task::Priority::Medium,
+                tags: Vec::new(), created: chrono::Utc::now(), updated: None, description: None,
+                due_date: None, project: None, recurrence: None, notes: Vec::new(), agent: None, effort: None,
+                work_status: None,
+            });
+            db::save(&state.db_path, &tf).unwrap();
+        }
+        let app = router(state.clone());
+        let body = serde_json::json!({ "work_status": "waiting-for-review" });
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("PATCH")
+                    .uri("/api/tasks/1")
+                    .header("host", "127.0.0.1")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let json = body_json(response).await;
+        assert_eq!(json["work_status"], "waiting-for-review");
+        assert!(json["notes"].as_array().map(|a| a.is_empty()).unwrap_or(true));
     }
 
     #[tokio::test]
