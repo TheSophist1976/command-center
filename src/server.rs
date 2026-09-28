@@ -550,6 +550,10 @@ fn review_thread_slug(task_id: u32) -> String {
     format!("task-{}-review-thread", task_id)
 }
 
+fn question_slug(task_id: u32) -> String {
+    format!("task-{}-question", task_id)
+}
+
 /// Slugs become filenames (`{slug}.md`) joined onto the notes directory. Reject anything
 /// that isn't alphanumeric/hyphen/underscore so a slug can never escape that directory
 /// (e.g. via `..` path segments or an absolute path).
@@ -647,6 +651,24 @@ async fn get_task_review(
     }
     let dir = notes_dir(&state);
     let slug = review_thread_slug(id);
+    let path = dir.join(format!("{}.md", slug));
+    let note = crate::note::read_note(&path)
+        .ok()
+        .map(|n| note_response(n, modified_time(&path)));
+    Ok(Json(note))
+}
+
+async fn get_task_question(
+    State(state): State<Arc<AppState>>,
+    AxumPath(id): AxumPath<u32>,
+) -> Result<Json<Option<NoteResponse>>, (StatusCode, Json<serde_json::Value>)> {
+    let task_file = db::load(&state.db_path)
+        .map_err(|e| app_error(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    if task_file.find_task(id).is_none() {
+        return Err(app_error(StatusCode::NOT_FOUND, format!("Task {} not found", id)));
+    }
+    let dir = notes_dir(&state);
+    let slug = question_slug(id);
     let path = dir.join(format!("{}.md", slug));
     let note = crate::note::read_note(&path)
         .ok()
@@ -799,6 +821,7 @@ pub fn router_with_static(state: AppState, static_dir: Option<std::path::PathBuf
         .route("/api/tasks/:id/notes", get(list_task_notes).post(create_task_note))
         .route("/api/tasks/:id/notes/:slug", axum::routing::delete(unlink_task_note))
         .route("/api/tasks/:id/review", get(get_task_review).post(add_task_review_feedback))
+        .route("/api/tasks/:id/question", get(get_task_question))
         .route("/api/notes/:slug/open", axum::routing::post(open_note))
         .route("/api/agents", get(list_agents))
         .route("/api/agents/:name/instructions", get(get_agent_instructions).put(edit_agent_instructions))
@@ -1921,6 +1944,91 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
         let json = body_json(response).await;
         assert!(json.is_null());
+    }
+
+    #[tokio::test]
+    async fn test_get_task_question_returns_null_when_no_question_exists() {
+        let (_dir, state) = make_state();
+        {
+            let mut tf = crate::task::TaskFile::new();
+            tf.tasks.push(crate::task::Task {
+                id: 1, title: "No question yet".to_string(), status: Status::Open, priority: crate::task::Priority::Medium,
+                tags: Vec::new(), created: chrono::Utc::now(), updated: None, description: None,
+                due_date: None, project: None, recurrence: None, notes: Vec::new(), agent: None, effort: None, work_status: None,
+            });
+            db::save(&state.db_path, &tf).unwrap();
+        }
+        let app = router(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/tasks/1/question")
+                    .header("host", "127.0.0.1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let json = body_json(response).await;
+        assert!(json.is_null());
+    }
+
+    #[tokio::test]
+    async fn test_get_task_question_missing_task_returns_404() {
+        let (_dir, state) = make_state();
+        let app = router(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/tasks/999/question")
+                    .header("host", "127.0.0.1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn test_get_task_question_returns_note_when_it_exists() {
+        let (dir, state) = make_state();
+        {
+            let mut tf = crate::task::TaskFile::new();
+            tf.tasks.push(crate::task::Task {
+                id: 1, title: "Needs input".to_string(), status: Status::Open, priority: crate::task::Priority::Medium,
+                tags: Vec::new(), created: chrono::Utc::now(), updated: None, description: None,
+                due_date: None, project: None, recurrence: None, notes: vec!["task-1-question".to_string()],
+                agent: Some("bot".to_string()), effort: None, work_status: Some(crate::task::WorkStatus::NeedsInput),
+            });
+            db::save(&state.db_path, &tf).unwrap();
+        }
+        let notes_dir = dir.path().join("Notes");
+        crate::note::write_note(
+            &notes_dir,
+            &crate::note::Note {
+                slug: "task-1-question".to_string(),
+                title: "Question — Needs input".to_string(),
+                body: "Which environment should this target, staging or prod?".to_string(),
+            },
+        )
+        .unwrap();
+        let app = router(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/tasks/1/question")
+                    .header("host", "127.0.0.1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let json = body_json(response).await;
+        assert_eq!(json["slug"], "task-1-question");
+        assert_eq!(json["body"], "Which environment should this target, staging or prod?");
     }
 
     #[tokio::test]

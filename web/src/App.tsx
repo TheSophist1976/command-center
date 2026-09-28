@@ -4,9 +4,10 @@ import { Terminal, Sun, CalendarDays, Settings, Search, PanelLeftClose, PanelLef
 import { Button } from './components/Button';
 import { NewTaskForm } from './components/NewTaskForm';
 import { EditableField, FieldRow } from './components/EditableField';
-import { fetchTasks, fetchAgents, addTask, editTask, markDone, reopenTask, deleteTask, fetchTaskNotes, createTaskNote, openNote, unlinkTaskNote, fetchTaskReview, postTaskFeedback } from './api';
+import { fetchTasks, fetchAgents, addTask, editTask, markDone, reopenTask, deleteTask, fetchTaskNotes, createTaskNote, openNote, unlinkTaskNote, fetchTaskReview, postTaskFeedback, fetchTaskQuestion } from './api';
 import { NotesSection } from './components/NotesSection';
 import { ReviewPanel } from './components/ReviewPanel';
+import { QuestionPanel } from './components/QuestionPanel';
 import { AgentPicker } from './components/AgentPicker';
 import { AgentEditor } from './components/AgentEditor';
 import { DatePicker } from './components/DatePicker';
@@ -71,6 +72,7 @@ const WORK_STATUS_OPTIONS = [
   { value: 'in-progress', label: 'In Progress' },
   { value: 'waiting-for-review', label: 'Waiting for Review' },
   { value: 'changes-requested', label: 'Changes Requested' },
+  { value: 'needs-input', label: 'Needs Input' },
   { value: 'complete', label: 'Complete' },
 ];
 
@@ -79,6 +81,7 @@ const WORK_STATUS_LABEL: Record<string, string> = {
   'in-progress': 'In Progress',
   'waiting-for-review': 'Waiting for Review',
   'changes-requested': 'Changes Requested',
+  'needs-input': 'Needs Input',
   'complete': 'Complete',
 };
 
@@ -87,6 +90,7 @@ const WORK_STATUS_COLOR: Record<string, string> = {
   'in-progress': 'var(--citrine)',
   'waiting-for-review': 'var(--cyan)',
   'changes-requested': 'var(--danger)',
+  'needs-input': 'var(--danger)',
   'complete': 'var(--teal)',
 };
 
@@ -157,6 +161,7 @@ export default function App() {
   const [rightOpen, setRightOpen] = useState(true);
   const [taskNotes, setTaskNotes] = useState<Note[]>([]);
   const [review, setReview] = useState<Note | null>(null);
+  const [question, setQuestion] = useState<Note | null>(null);
   const [showShortcuts, setShowShortcuts] = useState(false);
   const [editingAgent, setEditingAgent] = useState<AgentProfile | null>(null);
   const today = useMemo(() => startOfToday(), []);
@@ -170,7 +175,8 @@ export default function App() {
   );
   const searchInputRef = useRef<HTMLInputElement>(null);
   const reviewSlug = selected ? `task-${selected.id}-review-thread` : null;
-  const visibleNotes = taskNotes.filter((n) => n.slug !== reviewSlug);
+  const questionSlug = selected ? `task-${selected.id}-question` : null;
+  const visibleNotes = taskNotes.filter((n) => n.slug !== reviewSlug && n.slug !== questionSlug);
 
   function selectTask(task: Task) {
     setSelected(task);
@@ -220,6 +226,16 @@ export default function App() {
     }
     fetchTaskReview(selected.id)
       .then(setReview)
+      .catch((e) => setError(String(e)));
+  }, [selected?.id]);
+
+  useEffect(() => {
+    if (!selected) {
+      setQuestion(null);
+      return;
+    }
+    fetchTaskQuestion(selected.id)
+      .then(setQuestion)
       .catch((e) => setError(String(e)));
   }, [selected?.id]);
 
@@ -855,6 +871,13 @@ export default function App() {
                 workStatus={selected.work_status}
                 accentColor={selected.work_status ? WORK_STATUS_COLOR[selected.work_status] : undefined}
                 onSendFeedback={handleSendFeedback}
+              />
+            )}
+
+            {(question || selected.work_status === 'needs-input') && (
+              <QuestionPanel
+                question={question}
+                accentColor={selected.work_status ? WORK_STATUS_COLOR[selected.work_status] : undefined}
               />
             )}
 

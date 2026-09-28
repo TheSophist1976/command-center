@@ -143,9 +143,30 @@ Tasks have a `work_status` field, separate from open/done, so the human can trac
 task edit <id> --work-status in-progress
 ```
 
-Valid values: `todo`, `in-progress`, `waiting-for-review`, `changes-requested`, `complete` (aliases `to-do`, `in_progress`/`inprogress`, `review`, `changes`, and `done` are also accepted).
+Valid values: `todo`, `in-progress`, `waiting-for-review`, `changes-requested`, `needs-input`, `complete` (aliases `to-do`, `in_progress`/`inprogress`, `review`, `changes`, `needs_input`, and `done` are also accepted).
 
 **`changes-requested`** means the human left feedback and this task needs another round — read the full review thread note (slug `task-<id>-review-thread`) via `task note show task-<id>-review-thread` for the complete history before doing anything, do the requested work, then append your response with `task note append task-<id>-review-thread --body "## Agent response — <YYYY-MM-DD>\n\n<summary>"` and set `--work-status waiting-for-review` again.
+
+**`needs-input`** signals you've paused a task on a blocking question. Before asking, write the question into a note with slug `task-<id>-question` and set `--work-status needs-input` — this surfaces the question as a badge in the command-center web UI even if the human isn't watching the terminal where you asked:
+
+```bash
+task note show task-<id>-question 2>/dev/null   # check whether it already exists
+```
+
+If that fails (no such note), create it — `task note add`'s slug comes from slugifying the title (there's no `--slug` flag), so the title must be exactly `Task <id> Question` for the slug to come out as `task-<id>-question`:
+
+```bash
+task note add "Task <id> Question" --task <id>
+```
+
+Either way (newly created or already existing), set the actual question text — `edit --body` replaces the whole body, which is correct here since only one question is active at a time:
+
+```bash
+task note edit task-<id>-question --body "<the question>"
+task edit <id> --work-status needs-input
+```
+
+Once you get an answer, set `--work-status` back to `in-progress` (or whatever it was before) and continue.
 
 **Update this as you work**, not just at the end — set `in-progress` when you start, `waiting-for-review` when you've finished and want the human to check your work before it's truly done.
 

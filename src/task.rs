@@ -38,6 +38,7 @@ pub enum WorkStatus {
     InProgress,
     WaitingForReview,
     ChangesRequested,
+    NeedsInput,
     Complete,
 }
 
@@ -48,6 +49,7 @@ impl std::fmt::Display for WorkStatus {
             WorkStatus::InProgress => write!(f, "in-progress"),
             WorkStatus::WaitingForReview => write!(f, "waiting-for-review"),
             WorkStatus::ChangesRequested => write!(f, "changes-requested"),
+            WorkStatus::NeedsInput => write!(f, "needs-input"),
             WorkStatus::Complete => write!(f, "complete"),
         }
     }
@@ -61,9 +63,10 @@ impl std::str::FromStr for WorkStatus {
             "in-progress" | "in_progress" | "inprogress" => Ok(WorkStatus::InProgress),
             "waiting-for-review" | "review" => Ok(WorkStatus::WaitingForReview),
             "changes-requested" | "changes_requested" | "changesrequested" | "changes" => Ok(WorkStatus::ChangesRequested),
+            "needs-input" | "needs_input" | "needsinput" | "needs input" => Ok(WorkStatus::NeedsInput),
             "complete" | "done" => Ok(WorkStatus::Complete),
             _ => Err(format!(
-                "Invalid work status: '{}'. Valid values: todo, in-progress, waiting-for-review, changes-requested, complete",
+                "Invalid work status: '{}'. Valid values: todo, in-progress, waiting-for-review, changes-requested, needs-input, complete",
                 s
             )),
         }
@@ -1051,6 +1054,9 @@ mod tests {
         assert_eq!(WorkStatus::from_str("changes-requested").unwrap(), WorkStatus::ChangesRequested);
         assert_eq!(WorkStatus::from_str("changes").unwrap(), WorkStatus::ChangesRequested);
         assert_eq!(WorkStatus::ChangesRequested.to_string(), "changes-requested");
+        assert_eq!(WorkStatus::from_str("needs-input").unwrap(), WorkStatus::NeedsInput);
+        assert_eq!(WorkStatus::from_str("needs_input").unwrap(), WorkStatus::NeedsInput);
+        assert_eq!(WorkStatus::NeedsInput.to_string(), "needs-input");
     }
 
     #[test]
@@ -1063,5 +1069,11 @@ mod tests {
     fn test_task_serialize_changes_requested_kebab_case() {
         let json = serde_json::to_string(&WorkStatus::ChangesRequested).unwrap();
         assert_eq!(json, "\"changes-requested\"");
+    }
+
+    #[test]
+    fn test_task_serialize_needs_input_kebab_case() {
+        let json = serde_json::to_string(&WorkStatus::NeedsInput).unwrap();
+        assert_eq!(json, "\"needs-input\"");
     }
 }

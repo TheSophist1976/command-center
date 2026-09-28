@@ -146,3 +146,7 @@ export async function postTaskFeedback(taskId: number, text: string): Promise<No
     }),
   );
 }
+
+export async function fetchTaskQuestion(taskId: number): Promise<Note | null> {
+  return jsonOrThrow(await fetch(`/api/tasks/${taskId}/question`));
+}

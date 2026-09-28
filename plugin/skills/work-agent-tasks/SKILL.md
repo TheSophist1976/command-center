@@ -84,7 +84,7 @@ This is a running conversation between you and the human; earlier rounds carry c
 2. Read all notes attached to the task (`notes` field, comma-separated slugs, shown by `task show <id>`). Use `task note show <slug>` to read each one.
    - **Instruction notes first**: notes whose slug or title contains `instructions`, `how-to`, or `steps` must be read before anything else — they contain task-specific guidance that overrides or supplements your agent instructions
    - **Other notes**: read for context after instruction notes
-3. If anything is unclear after reading the task and all its notes, use `AskUserQuestion` to ask the human before proceeding
+3. If anything is unclear after reading the task and all its notes, use `AskUserQuestion` to ask the human before proceeding (see "Any time you have a question" below for the `needs-input` handshake to run alongside it)
 4. Update the task title and description to reflect the clarified scope (`task edit <id> --title "..." --description "..."`)
 5. Mark the task as started: `task edit <id> --work-status in-progress`
 
@@ -97,8 +97,21 @@ This is a running conversation between you and the human; earlier rounds carry c
 Tasks that are overdue (due date before today) come before tasks due today, which come before tasks due in the future.
 
 **Any time you have a question — before starting, or mid-work — ask it and keep going:**
-- Use `AskUserQuestion` immediately, whether the question arises before you start or partway through the work
-- Once answered, continue working the task to completion in the same session — do not stop, park, or hand the task back just because a question came up
+- Before calling `AskUserQuestion`, surface the question in a note so it shows up as a badge in the command-center web UI even if the human isn't watching this terminal:
+  ```bash
+  task note show task-<id>-question 2>/dev/null   # check whether it already exists
+  ```
+  If that fails, create it — `task note add`'s slug comes from slugifying the title (there's no `--slug` flag), so the title must be exactly `Task <id> Question` for the slug to come out as `task-<id>-question`:
+  ```bash
+  task note add "Task <id> Question" --task <id>
+  ```
+  Either way, set the question text (`--body` replaces the whole body, which is correct since only one question is active at a time) and set the status:
+  ```bash
+  task note edit task-<id>-question --body "<the question>"
+  task edit <id> --work-status needs-input
+  ```
+- Then use `AskUserQuestion` immediately, whether the question arises before you start or partway through the work
+- Once answered, set `task edit <id> --work-status in-progress` (or whatever status the task was in before the question) so the `needs-input` badge clears, then continue working the task to completion in the same session — do not stop, park, or hand the task back just because a question came up
 - Never guess at an answer instead of asking, and never silently skip part of a task because something was unclear
 
 **After completing each task, hand it back for review:**
@@ -166,7 +179,7 @@ Memory is free-form markdown — add, edit, or remove sections as needed. Review
 
 All subagents are independent — spawn them all in a single message so they run concurrently. This includes: every per-task Automator subagent (including archive, per the note in Step 4) AND every per-type subagent for other agents. Send one message with all Agent tool calls at once. There is no longer a sequencing requirement for the archive task — each subagent's `task` CLI calls are individually transactional against the SQLite database, so concurrent writes from different subagents can't clobber each other.
 
-Any subagent with a question — at any point in its work, not just at the start — surfaces it via `AskUserQuestion` and keeps working once answered. Batch questions across tasks where possible to avoid repeated interruptions, but never let a question stop a subagent from finishing its task.
+Any subagent with a question — at any point in its work, not just at the start — sets `--work-status needs-input` and writes the question to `task-<id>-question` (see "Any time you have a question" in Step 4 above) before surfacing it via `AskUserQuestion`, then clears back to its prior status and keeps working once answered. Batch questions across tasks where possible to avoid repeated interruptions, but never let a question stop a subagent from finishing its task.
 
 Wait for all subagents to report completion before moving to Step 6 — do not proceed on partial results.
 
@@ -198,6 +211,6 @@ After all subagents complete, summarize to the human:
 | Show memory | `task agent memory <name> show` |
 | Update memory | `task agent memory <name> edit --body "<content>"` |
 | Create note | `task note add "<title>" --task <id>` |
-| Ask a question, any time | `AskUserQuestion` — then keep working the task to completion |
+| Ask a question, any time | write question to `task-<id>-question` note (title exactly `Task <id> Question` if creating) + `--work-status needs-input`, then `AskUserQuestion` — clear back to prior status once answered, then keep working |
 | Hand back for review | `task edit <id> --work-status waiting-for-review` |
 | Timestamp format | ISO 8601 UTC e.g. `2026-05-08T14:00:00+00:00` (set automatically by the CLI) |
