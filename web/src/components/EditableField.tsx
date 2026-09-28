@@ -1,4 +1,4 @@
-import { useState, type CSSProperties, type ReactNode } from 'react';
+import { useEffect, useRef, useState, type CSSProperties, type ReactNode } from 'react';
 
 interface SelectOption {
   value: string;
@@ -77,19 +77,7 @@ export function EditableField({ value, display, onSave, type = 'text', options, 
   }
 
   if (type === 'textarea') {
-    return (
-      <textarea
-        autoFocus
-        value={draft}
-        onChange={(e) => setDraft(e.target.value)}
-        onBlur={commit}
-        onKeyDown={(e) => {
-          if (e.key === 'Escape') cancel();
-        }}
-        rows={3}
-        style={{ ...inputStyle, resize: 'vertical' }}
-      />
-    );
+    return <AutoGrowTextarea draft={draft} setDraft={setDraft} onBlur={commit} onCancel={cancel} />;
   }
 
   return (
@@ -109,10 +97,46 @@ export function EditableField({ value, display, onSave, type = 'text', options, 
   );
 }
 
+function AutoGrowTextarea({
+  draft,
+  setDraft,
+  onBlur,
+  onCancel,
+}: {
+  draft: string;
+  setDraft: (v: string) => void;
+  onBlur: () => void;
+  onCancel: () => void;
+}) {
+  const ref = useRef<HTMLTextAreaElement>(null);
+
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    el.style.height = 'auto';
+    el.style.height = `${el.scrollHeight}px`;
+  }, [draft]);
+
+  return (
+    <textarea
+      ref={ref}
+      autoFocus
+      value={draft}
+      onChange={(e) => setDraft(e.target.value)}
+      onBlur={onBlur}
+      onKeyDown={(e) => {
+        if (e.key === 'Escape') onCancel();
+      }}
+      rows={3}
+      style={{ ...inputStyle, resize: 'vertical', minHeight: 60, overflow: 'hidden' }}
+    />
+  );
+}
+
 export function FieldRow({ label, children }: { label: string; children: ReactNode }) {
   return (
-    <div style={{ display: 'flex', alignItems: 'center', minHeight: 32, borderBottom: '1px solid var(--hairline-soft)', padding: '4px 0' }}>
-      <span style={{ width: 90, flex: 'none', fontSize: 12.5, color: 'var(--fg-4)' }}>{label}</span>
+    <div style={{ display: 'flex', alignItems: 'flex-start', minHeight: 32, borderBottom: '1px solid var(--hairline-soft)', padding: '4px 0' }}>
+      <span style={{ width: 90, flex: 'none', fontSize: 12.5, color: 'var(--fg-4)', paddingTop: 3 }}>{label}</span>
       <div style={{ flex: 1, fontSize: 13, color: 'var(--fg-1)' }}>{children}</div>
     </div>
   );
