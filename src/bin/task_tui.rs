@@ -18,14 +18,38 @@ fn main() {
 }
 
 fn run(cli: Cli) -> Result<(), (i32, String)> {
-    let path = task::db::resolve_file_path(cli.file.as_deref());
-    task::db::backup_daily(&path);
+    let command = match cli.command {
+        Some(Command::Profile { subcommand }) => {
+            let msg = task::workspace::run_profile_command(subcommand, cli.file.as_deref(), cli.profile.as_deref())
+                .map_err(|e| (1, e))?;
+            println!("{}", msg);
+            return Ok(());
+        }
+        other => other,
+    };
+    // Config and auth don't touch the task database, and must keep working
+    // even when the selected profile is misconfigured.
+    let needs_workspace = !matches!(command, Some(Command::Config { .. }) | Some(Command::Auth { .. }));
+    let ws = match task::workspace::resolve(cli.file.as_deref(), cli.profile.as_deref()) {
+        Ok(ws) => ws,
+        Err(_) if !needs_workspace => task::workspace::Workspace::from_db_path("tasks.db".into()),
+        Err(e) => return Err((1, e)),
+    };
+    let path = ws.db_path.clone();
+    if needs_workspace {
+        if let Some(msg) = task::db::prepare(&ws).map_err(|e| (1, e))? {
+            eprintln!("{}", msg);
+        }
+        task::db::backup_daily(&path);
+    }
 
-    match cli.command {
+    match command {
         None | Some(Command::Tui) => {
-            task::tui::run(&path).map_err(|e| (1, e))?;
+            task::tui::run(&ws).map_err(|e| (1, e))?;
             Ok(())
         }
+
+        Some(Command::Profile { .. }) => unreachable!("handled before workspace resolution"),
 
         Some(Command::Auth { subcommand }) => match subcommand {
             AuthCommand::Todoist { token } => {
@@ -71,7 +95,7 @@ fn run(cli: Cli) -> Result<(), (i32, String)> {
         },
 
         Some(Command::Note { subcommand }) => {
-            let dir = path.parent().unwrap_or(std::path::Path::new(".")).to_path_buf().join("Notes");
+            let dir = ws.notes_dir();
             let task_filename = path
                 .file_name()
                 .and_then(|n| n.to_str())
@@ -197,7 +221,7 @@ fn run(cli: Cli) -> Result<(), (i32, String)> {
         }
 
         Some(Command::Agent { subcommand }) => {
-            let task_dir = path.parent().unwrap_or(std::path::Path::new(".")).to_path_buf();
+            let task_dir = ws.task_dir.clone();
 
             match subcommand {
                 AgentCommand::Instructions { name, action } => {

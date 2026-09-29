@@ -8,6 +8,7 @@ pub mod parser;
 pub mod server;
 pub mod task;
 pub mod watch;
+pub mod workspace;
 
 #[cfg(feature = "tui")]
 pub mod claude_session;

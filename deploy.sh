@@ -212,13 +212,50 @@ fi
 CONFIG_FILE="$CONFIG_DIR/config.md"
 
 current_dir=""
+# Notes directories of configured profiles (profile-<name>-dir: <dir>)
+profile_dirs=()
 if [[ -f "$CONFIG_FILE" ]]; then
     current_dir="$(grep '^default-dir:' "$CONFIG_FILE" 2>/dev/null | sed 's/^default-dir:[[:space:]]*//' || true)"
     # Expand leading tilde (stored literally by `task config set`)
     current_dir="${current_dir/#\~/$HOME}"
+    while IFS= read -r line; do
+        pdir="${line#*:}"
+        pdir="${pdir#"${pdir%%[![:space:]]*}"}"
+        profile_dirs+=("${pdir/#\~/$HOME}")
+    done < <(grep -E '^profile-.+-dir:' "$CONFIG_FILE" 2>/dev/null || true)
 fi
 
-if [[ -n "$current_dir" ]]; then
+if [[ ${#profile_dirs[@]} -eq 0 ]] && [[ -z "$current_dir" ]] \
+    && ask_yn "Set up profiles (e.g. separate work/home tasks + notes; databases stay on local disk)?"; then
+    mkdir -p "$CONFIG_DIR"
+    [[ -f "$CONFIG_FILE" ]] || printf "# task-manager config\n\n" > "$CONFIG_FILE"
+    first_profile=""
+    while true; do
+        printf "${BLUE}▸${NC} Profile name (blank to finish): "
+        read -r pname < /dev/tty
+        [[ -z "$pname" ]] && break
+        printf "${BLUE}▸${NC} Notes directory for '%s' (e.g. ~/Documents/Vault/Tasks): " "$pname"
+        read -r pdir < /dev/tty
+        [[ -z "$pdir" ]] && { warn "No directory given — skipped '$pname'"; continue; }
+        pdir="${pdir/#\~/$HOME}"
+        if [[ ! -d "$pdir" ]] && ask_yn "Directory '$pdir' does not exist. Create it?"; then
+            mkdir -p "$pdir"
+        fi
+        echo "profile-$pname-dir: $pdir" >> "$CONFIG_FILE"
+        profile_dirs+=("$pdir")
+        [[ -z "$first_profile" ]] && first_profile="$pname"
+        success "Profile '$pname' → notes in $pdir"
+    done
+    if [[ -n "$first_profile" ]]; then
+        echo "profile: $first_profile" >> "$CONFIG_FILE"
+        success "Default profile: $first_profile (switch with: task profile use <name>)"
+    fi
+fi
+
+if [[ ${#profile_dirs[@]} -gt 0 ]]; then
+    success "Profiles configured (${#profile_dirs[@]}) — see: task profile list"
+    STATUS_CONFIG="profiles → ${profile_dirs[*]}"
+elif [[ -n "$current_dir" ]]; then
     success "default-dir: $current_dir"
     STATUS_CONFIG="configured → $current_dir"
 else
@@ -301,7 +338,19 @@ if [[ -f "$AGENTS_SRC" ]]; then
         task_agents_dir="$current_dir"
     fi
 
-    if [[ -n "$task_agents_dir" ]] && [[ -d "$task_agents_dir" ]]; then
+    if [[ ${#profile_dirs[@]} -gt 0 ]]; then
+        installed=()
+        for pdir in "${profile_dirs[@]}"; do
+            if [[ -d "$pdir" ]]; then
+                cp "$AGENTS_SRC" "$pdir/AGENTS.md"
+                success "Installed AGENTS.md to $pdir/AGENTS.md"
+                installed+=("$pdir/AGENTS.md")
+            else
+                warn "Profile directory $pdir does not exist — skipping AGENTS.md there"
+            fi
+        done
+        STATUS_AGENTS="installed → ${installed[*]:-none}"
+    elif [[ -n "$task_agents_dir" ]] && [[ -d "$task_agents_dir" ]]; then
         cp "$AGENTS_SRC" "$task_agents_dir/AGENTS.md"
         success "Installed AGENTS.md to $task_agents_dir/AGENTS.md"
         STATUS_AGENTS="installed → $task_agents_dir/AGENTS.md"

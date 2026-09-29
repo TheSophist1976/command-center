@@ -59,7 +59,7 @@ task-tui --file ~/projects/tasks.md
 
 ### Notes
 
-Notes are stored in a `Notes/` subdirectory alongside `tasks.db`.
+Notes are stored in a `Notes/` subdirectory of the task directory — alongside `tasks.db`, or in the profile's `dir` when using [profiles](#profiles).
 
 | Command | Description |
 | --- | --- |
@@ -78,6 +78,7 @@ Notes are stored in a `Notes/` subdirectory alongside `tasks.db`.
 | Flag | Description |
 | --- | --- |
 | `--file <path>` | Use a custom task database (default: `tasks.db` in current directory) |
+| `--profile <name>` | Use a configured profile (see [Profiles](#profiles)) |
 
 ## Interactive TUI
 
@@ -254,7 +255,10 @@ Config is stored at `~/Library/Application Support/task-manager/config.md` (macO
 
 | Key | Description |
 | --- | --- |
-| `default-dir` | Default directory for task and note files |
+| `default-dir` | Default directory for task and note files (legacy, single workspace) |
+| `profile` | Default profile (see [Profiles](#profiles)) |
+| `profile-<name>-dir` | Directory holding a profile's `Notes/` folder |
+| `profile-<name>-db` | Optional database path for a profile (default: local data dir) |
 | `default-view` | Starting view: `due`, `no-due-date`, `recurring`, `notes` |
 | `group-by` | Default grouping: `agent`, `project`, `priority`, or `none` |
 | `columns` | Comma-separated column list: `id,status,priority,title,due,agent,tags,project` |
@@ -277,14 +281,32 @@ agent-work: ~/code/work-project
 
 The most specific (longest-matching) directory wins when multiple profiles overlap.
 
+### Profiles
+
+Profiles keep separate workspaces — e.g. `work` and `home` — fully apart: each has its own task database and its own notes. A profile's notes live wherever you point it (such as a synced Obsidian vault), while its database stays on local disk at `<data-dir>/task-manager/<name>/tasks.db` (`~/.local/share/...` on Linux, `~/Library/Application Support/...` on macOS), so SQLite files never go through a sync service.
+
+```sh
+task profile add work --dir ~/Documents/Vault/Tasks
+task profile add home --dir ~/Documents/Vault/Home
+task profile use work              # set the default
+task profile list                  # * marks the default
+task --profile home list           # one-off, or: TASK_PROFILE=home task list
+task profile show                  # resolved profile, db, and notes paths
+```
+
+The first time a profile's local database is opened, it's seeded from the profile's directory if that directory already has a `tasks.db` (copied; the original is left in place) or a legacy `tasks.md` (migrated). Daily backups and Claude session state live next to the local database. `task-tui` shows the active profile in its header, and `D` edits the profile's notes directory.
+
 ## File Path Resolution
 
-The task database is resolved in this order:
+The workspace (task database + notes directory) is resolved in this order:
 
-1. `--file <path>` CLI flag
-2. `TASK_FILE` environment variable
-3. `default-dir` config value → `<dir>/tasks.db`
-4. `tasks.db` in the current directory
+1. `--file <path>` CLI flag — notes in `<path's dir>/Notes`
+2. `TASK_FILE` environment variable — same
+3. `--profile <name>` CLI flag
+4. `TASK_PROFILE` environment variable
+5. `profile` config value
+6. `default-dir` config value → `<dir>/tasks.db`, notes in `<dir>/Notes`
+7. `tasks.db` in the current directory
 
 ## Storage
 
@@ -309,7 +331,7 @@ cd .. && cargo run --release --bin task_server
 # open http://127.0.0.1:4287
 ```
 
-`task_server` resolves the task database the same way the CLI does (`--file`/`TASK_FILE`/`default-dir` config/`./tasks.db`). Override the port with `TASK_SERVER_PORT`. It binds to `127.0.0.1` only and validates the `Host` header on every request (including static file serving) to guard against DNS-rebinding attacks from other sites open in your browser — there's no other authentication, since this is a local, single-user tool.
+`task_server` resolves the workspace the same way the CLI does (see [File Path Resolution](#file-path-resolution)); pass `--profile <name>` or a database path as its argument, e.g. `cargo run --bin task_server -- --profile home`. Override the port with `TASK_SERVER_PORT` (run one server per profile by giving each its own port). It binds to `127.0.0.1` only and validates the `Host` header on every request (including static file serving) to guard against DNS-rebinding attacks from other sites open in your browser — there's no other authentication, since this is a local, single-user tool.
 
 **Known limitation:** `task_server`'s write handlers (add/edit/done/reopen/delete) serialize against each other with an in-process lock, so two browser tabs hitting the same running server can't race each other into a lost write or duplicate id. This does *not* extend across processes — editing the same `tasks.db` with the CLI or TUI while `task_server` is running is still uncoordinated, and whichever process saves last wins, same as before this change.
 

@@ -832,6 +832,9 @@ mod md_style {
 struct App {
     task_file: TaskFile,
     file_path: PathBuf,
+    /// Directory holding `Notes/`; separate from `file_path`'s directory under a profile.
+    task_dir: PathBuf,
+    profile: Option<String>,
     selected: usize,
     filter: Filter,
     view: View,
@@ -870,7 +873,13 @@ struct App {
 }
 
 impl App {
+    #[cfg(test)]
     fn new(path: &Path) -> Result<Self, String> {
+        Self::with_workspace(&crate::workspace::Workspace::from_db_path(path.to_path_buf()))
+    }
+
+    fn with_workspace(ws: &crate::workspace::Workspace) -> Result<Self, String> {
+        let path = ws.db_path.as_path();
         let task_file = db::load(path)?;
         let file_mtime = std::fs::metadata(path).ok().and_then(|m| m.modified().ok());
         let view = config::read_config_value("default-view")
@@ -905,6 +914,8 @@ impl App {
         let mut app = Self {
             task_file,
             file_path: path.to_path_buf(),
+            task_dir: ws.task_dir.clone(),
+            profile: ws.profile.clone(),
             selected: 0,
             filter: Filter::default(),
             view,
@@ -941,7 +952,7 @@ impl App {
         };
         app.table_state.select(Some(0));
         // Load persisted sessions
-        let task_dir = app.task_dir();
+        let task_dir = app.state_dir();
         let loaded = claude_session::load_sessions(&task_dir);
         app.next_session_id = loaded.iter().map(|s| s.id).max().map_or(0, |m| m + 1);
         app.claude_sessions = loaded;
@@ -955,12 +966,13 @@ impl App {
         Ok(app)
     }
 
-    fn task_dir(&self) -> PathBuf {
+    /// Local, machine-specific state (Claude sessions) lives next to the database.
+    fn state_dir(&self) -> PathBuf {
         self.file_path.parent().unwrap_or(Path::new(".")).to_path_buf()
     }
 
     fn notes_dir(&self) -> PathBuf {
-        self.task_dir().join("Notes")
+        self.task_dir.join("Notes")
     }
 
     fn grouping_slot(&self) -> String {
@@ -1146,8 +1158,8 @@ impl App {
 
 // -- Entry point --
 
-pub fn run(path: &Path) -> Result<(), String> {
-    let mut app = App::new(path)?;
+pub fn run(ws: &crate::workspace::Workspace) -> Result<(), String> {
+    let mut app = App::with_workspace(ws)?;
 
     // Install panic hook to restore terminal
     let original_hook = std::panic::take_hook();
@@ -1238,7 +1250,7 @@ fn event_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut A
                 if clear_rx {
                     app.claude_sessions[i].rx = None;
                     app.claude_sessions[i].child = None;
-                    let task_dir = app.task_dir();
+                    let task_dir = app.state_dir();
                     let _ = claude_session::save_session(&task_dir, &app.claude_sessions[i]);
                 }
             }
@@ -1556,7 +1568,11 @@ fn handle_normal(app: &mut App, key: KeyCode) -> Result<bool, String> {
             }
         }
         KeyCode::Char('D') => {
-            app.input_buffer = config::read_config_value("default-dir").unwrap_or_default();
+            app.input_buffer = match &app.profile {
+                Some(p) => config::read_config_value(&format!("profile-{}-dir", p)),
+                None => config::read_config_value("default-dir"),
+            }
+            .unwrap_or_default();
             app.mode = Mode::EditingDefaultDir;
         }
         KeyCode::Char(']') => {
@@ -2037,13 +2053,23 @@ fn handle_input(app: &mut App, key: KeyCode, action: InputAction) -> Result<(), 
                 }
                 InputAction::EditDefaultDir => {
                     let trimmed = input.trim().to_string();
-                    if !trimmed.is_empty() {
+                    if !trimmed.is_empty() && app.profile.is_some() {
+                        // Under a profile the database stays put on local disk;
+                        // only the notes directory moves.
+                        let key = format!("profile-{}-dir", app.profile.as_deref().unwrap_or_default());
+                        config::write_config_value(&key, &trimmed)
+                            .map_err(|e| format!("Failed to save config: {}", e))?;
+                        app.task_dir = config::expand_tilde(&trimmed);
+                        app.refresh_notes();
+                    } else if !trimmed.is_empty() {
                         app.save()?;
                         config::write_config_value("default-dir", &trimmed)
                             .map_err(|e| format!("Failed to save config: {}", e))?;
-                        let new_path = std::path::PathBuf::from(&trimmed).join("tasks.db");
+                        let new_dir = config::expand_tilde(&trimmed);
+                        let new_path = new_dir.join("tasks.db");
                         app.task_file = db::load(&new_path)?;
                         app.file_path = new_path;
+                        app.task_dir = new_dir;
                         app.selected = 0;
                         app.table_state.select(Some(0));
                     }
@@ -2626,6 +2652,10 @@ fn draw_header(frame: &mut Frame, app: &App, area: Rect) {
         format!("Due [{}]", app.due_window.label())
     } else {
         app.view.display_name().to_string()
+    };
+    let view_label = match &app.profile {
+        Some(p) => format!("{} · {}", p, view_label),
+        None => view_label,
     };
     let filter_summary = if app.filter.is_active() {
         Some(app.filter.summary())
@@ -3748,7 +3778,10 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
             format!(" Recurrence (e.g. daily, weekly, every 3rd thu, none): {}_ ", app.input_buffer)
         }
         Mode::EditingDefaultDir => {
-            format!(" Set default directory: {}_ ", app.input_buffer)
+            match &app.profile {
+                Some(p) => format!(" Set notes directory for profile '{}': {}_ ", p, app.input_buffer),
+                None => format!(" Set default directory: {}_ ", app.input_buffer),
+            }
         }
         Mode::EditingDetailPanel => {
             " j/k:field  c/h/m/l:priority  Enter/Space:status  Esc:done ".to_string()
@@ -4076,6 +4109,8 @@ mod tests {
         App {
             task_file,
             file_path: PathBuf::from("/dev/null"),
+            task_dir: PathBuf::from("/dev"),
+            profile: None,
             selected: 0,
             filter: Filter::default(),
             view: View::Due,
@@ -4157,6 +4192,8 @@ mod tests {
         let file_mtime = std::fs::metadata(&path).ok().and_then(|m| m.modified().ok());
         App {
             task_file,
+            task_dir: dir.clone(),
+            profile: None,
             file_path: path,
             selected: 0,
             filter: Filter::default(),

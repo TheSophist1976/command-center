@@ -9,7 +9,7 @@ Turn Slack messages saved to "Later" into command-center tasks, without duplicat
 
 ## Step 1: Find the task database and Notes directory
 
-Read `~/Library/Application Support/task-manager/config.md` (macOS) or `~/.config/task-manager/config.md` (Linux) to confirm the tasks database path (same resolution `AGENTS.md` in the command-center repo describes). The default is `~/Documents/Mark-main/Tasks/tasks.db`; its sibling `Notes/` directory (`~/Documents/Mark-main/Tasks/Notes/`) is where dedup and source notes live.
+Read `~/Library/Application Support/task-manager/config.md` (macOS) or `~/.config/task-manager/config.md` (Linux) to confirm the setup (same resolution `AGENTS.md` in the command-center repo describes). Slack captures belong to the `work` profile: run `task --profile work profile show` for its paths, and pass `--profile work` on every `task` call. The task database is local; the profile's `Notes/` directory (`~/Documents/Mark-main/Tasks/Notes/`) is where dedup and source notes live.
 
 ## Step 2: Search Slack for saved ("Later") messages
 

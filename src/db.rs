@@ -25,27 +25,50 @@ CREATE TABLE IF NOT EXISTS tasks (
 );
 ";
 
+/// Resolve the task database path (legacy helper; see `crate::workspace::resolve`).
 pub fn resolve_file_path(flag: Option<&str>) -> PathBuf {
-    resolve_file_path_inner(flag, crate::config::config_path().as_deref())
+    crate::workspace::resolve(flag, None)
+        .map(|ws| ws.db_path)
+        .unwrap_or_else(|_| PathBuf::from("tasks.db"))
 }
 
-fn resolve_file_path_inner(flag: Option<&str>, config_path: Option<&Path>) -> PathBuf {
-    if let Some(path) = flag {
-        return PathBuf::from(path);
+/// Make a workspace's database ready to open.
+///
+/// Creates the database's parent directory, and when a profile's local
+/// database doesn't exist yet, seeds it from whatever the notes directory
+/// already holds — a `tasks.db` from before the database moved to local
+/// disk, or a legacy `tasks.md`. Returns a message describing any import.
+pub fn prepare(ws: &crate::workspace::Workspace) -> Result<Option<String>, String> {
+    if ws.db_path.exists() {
+        return Ok(None);
     }
-    if let Ok(env_path) = std::env::var("TASK_FILE") {
-        if !env_path.is_empty() {
-            return PathBuf::from(env_path);
+    if let Some(parent) = ws.db_path.parent() {
+        if !parent.as_os_str().is_empty() {
+            fs::create_dir_all(parent)
+                .map_err(|e| format!("Failed to create {}: {}", parent.display(), e))?;
         }
     }
-    if let Some(cfg_path) = config_path {
-        if let Some(default_dir) = crate::config::read_config_value_from(cfg_path, "default-dir") {
-            if !default_dir.is_empty() {
-                return crate::config::expand_tilde(&default_dir).join("tasks.db");
-            }
-        }
+    // Legacy layout: `load` already migrates a sibling tasks.md.
+    if ws.profile.is_none() {
+        return Ok(None);
     }
-    PathBuf::from("tasks.db")
+
+    let old_db = ws.task_dir.join("tasks.db");
+    if old_db.exists() && old_db != ws.db_path {
+        let src = Connection::open_with_flags(&old_db, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .map_err(|e| format!("Failed to open {}: {}", old_db.display(), e))?;
+        src.execute("VACUUM INTO ?1", params![ws.db_path.to_string_lossy()])
+            .map_err(|e| format!("Failed to copy {} to {}: {}", old_db.display(), ws.db_path.display(), e))?;
+        return Ok(Some(format!("Imported tasks from {} into {}", old_db.display(), ws.db_path.display())));
+    }
+
+    let md_path = ws.task_dir.join("tasks.md");
+    if md_path.exists() {
+        let mut conn = open_conn(&ws.db_path)?;
+        migrate_from_markdown(&md_path, &mut conn)?;
+        return Ok(Some(format!("Imported tasks from {} into {}", md_path.display(), ws.db_path.display())));
+    }
+    Ok(None)
 }
 
 fn open_conn(path: &Path) -> Result<Connection, String> {
@@ -144,8 +167,7 @@ fn insert_task_row(conn: &Connection, t: &Task) -> Result<(), String> {
     Ok(())
 }
 
-fn migrate_from_markdown(db_path: &Path, conn: &mut Connection) -> Result<(), String> {
-    let md_path = db_path.with_file_name("tasks.md");
+fn migrate_from_markdown(md_path: &Path, conn: &mut Connection) -> Result<(), String> {
     if !md_path.exists() {
         return Ok(());
     }
@@ -173,7 +195,7 @@ pub fn load(path: &Path) -> Result<TaskFile, String> {
     let needs_migration = !path.exists();
     let mut conn = open_conn(path)?;
     if needs_migration {
-        migrate_from_markdown(path, &mut conn)?;
+        migrate_from_markdown(&path.with_file_name("tasks.md"), &mut conn)?;
     }
 
     let mut stmt = conn
@@ -260,7 +282,6 @@ pub fn backup_daily(path: &Path) {
 mod tests {
     use super::*;
     use tempfile::tempdir;
-    use std::env;
 
     fn sample_task(id: u32, title: &str) -> Task {
         Task {
@@ -288,21 +309,56 @@ mod tests {
         assert_eq!(p, PathBuf::from("/tmp/my-tasks.db"));
     }
 
-    #[test]
-    fn test_resolve_file_path_default() {
-        unsafe { env::remove_var("TASK_FILE") };
-        let p = resolve_file_path_inner(None, None);
-        assert_eq!(p, PathBuf::from("tasks.db"));
+    fn profile_ws(dir: &Path) -> crate::workspace::Workspace {
+        crate::workspace::Workspace {
+            profile: Some("work".to_string()),
+            db_path: dir.join("local").join("work").join("tasks.db"),
+            task_dir: dir.join("vault"),
+        }
     }
 
     #[test]
-    fn test_resolve_file_path_config_default_dir() {
+    fn test_prepare_imports_markdown_from_notes_dir() {
         let dir = tempdir().unwrap();
-        let config_path = dir.path().join("config.md");
-        std::fs::write(&config_path, "default-dir: /my/notes\n").unwrap();
-        unsafe { env::remove_var("TASK_FILE") };
-        let p = resolve_file_path_inner(None, Some(&config_path));
-        assert_eq!(p, PathBuf::from("/my/notes/tasks.db"));
+        let ws = profile_ws(dir.path());
+        std::fs::create_dir_all(&ws.task_dir).unwrap();
+        std::fs::write(
+            ws.task_dir.join("tasks.md"),
+            "<!-- format:2 -->\n<!-- next-id:2 -->\n\n# Tasks\n\n## [ ] Vault task\n<!-- id:1 priority:high created:2025-01-01T00:00:00+00:00 -->\n",
+        )
+        .unwrap();
+        let msg = prepare(&ws).unwrap();
+        assert!(msg.unwrap().contains("tasks.md"));
+        let tf = load(&ws.db_path).unwrap();
+        assert_eq!(tf.tasks.len(), 1);
+        assert_eq!(tf.tasks[0].title, "Vault task");
+        // Idempotent once the local db exists.
+        assert_eq!(prepare(&ws).unwrap(), None);
+    }
+
+    #[test]
+    fn test_prepare_copies_existing_db_from_notes_dir() {
+        let dir = tempdir().unwrap();
+        let ws = profile_ws(dir.path());
+        std::fs::create_dir_all(&ws.task_dir).unwrap();
+        let old_db = ws.task_dir.join("tasks.db");
+        let mut tf = TaskFile::new();
+        tf.tasks.push(sample_task(7, "Old db task"));
+        save(&old_db, &tf).unwrap();
+        prepare(&ws).unwrap();
+        let loaded = load(&ws.db_path).unwrap();
+        assert_eq!(loaded.tasks.len(), 1);
+        assert_eq!(loaded.tasks[0].id, 7);
+        assert!(old_db.exists(), "the vault copy is left in place");
+    }
+
+    #[test]
+    fn test_prepare_empty_profile_just_creates_dir() {
+        let dir = tempdir().unwrap();
+        let ws = profile_ws(dir.path());
+        assert_eq!(prepare(&ws).unwrap(), None);
+        assert!(ws.db_path.parent().unwrap().is_dir());
+        assert!(load(&ws.db_path).unwrap().tasks.is_empty());
     }
 
     #[test]

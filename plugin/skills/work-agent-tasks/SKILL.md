@@ -13,7 +13,7 @@ Read `~/Library/Application Support/task-manager/config.md` (macOS) or `~/.confi
 
 Find all `agent-<name>: <dir>` entries — these are the registered agent types (e.g. `Research`, `Follow-up`, `Writer`, `Reviewer`, `Automator`).
 
-For each agent name, run `task list --agent <name> --status open` **using the exact casing from config.md** (e.g. `Follow-up`, `Automator` — NOT lowercased) against `~/Documents/Mark-main/Tasks/tasks.db` to find its eligible open tasks. The `--agent` filter is a case-sensitive exact match, and tasks are stored with the same casing the `agent-<Name>:` config line uses — `--agent follow-up` silently matches nothing even though `--agent Follow-up` finds real tasks. (This is different from the lowercased/hyphenated convention used for `Notes/Agents/<name>/` file paths in Step 2/3 below — that directory naming is a separate, genuinely-lowercased convention on disk; don't apply it here.) Use `task show <id>` on each to get full detail (description, notes, recurrence, work_status) when building the subagent's task list.
+For each agent name, run `task list --agent <name> --status open` **using the exact casing from config.md** (e.g. `Follow-up`, `Automator` — NOT lowercased) in the `work` profile (`task --profile work list ...`) to find its eligible open tasks. The `--agent` filter is a case-sensitive exact match, and tasks are stored with the same casing the `agent-<Name>:` config line uses — `--agent follow-up` silently matches nothing even though `--agent Follow-up` finds real tasks. (This is different from the lowercased/hyphenated convention used for `Notes/Agents/<name>/` file paths in Step 2/3 below — that directory naming is a separate, genuinely-lowercased convention on disk; don't apply it here.) Use `task show <id>` on each to get full detail (description, notes, recurrence, work_status) when building the subagent's task list.
 
 **Skip the following tasks:**
 - Recurring tasks (a `recur` value shown in `task show <id>`) whose due date is in the future — these are scheduled for a later cycle and should not be worked early
@@ -198,7 +198,7 @@ After all subagents complete, summarize to the human:
 | Action | Location / Command |
 |--------|-------------------|
 | Config file (macOS) | `~/Library/Application Support/task-manager/config.md` |
-| Tasks database | `~/Documents/Mark-main/Tasks/tasks.db` |
+| Tasks database | local, `work` profile — `task --profile work profile show` prints the path |
 | List an agent's open tasks | `task list --agent <name> --status open` |
 | Show full task detail | `task show <id>` |
 | Mark task started | `task edit <id> --work-status in-progress` |

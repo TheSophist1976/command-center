@@ -3,9 +3,13 @@ use clap::{Parser, Subcommand};
 #[derive(Parser)]
 #[command(name = "task", about = "A fast CLI task manager with an interactive TUI", version)]
 pub struct Cli {
-    /// Path to the task file (default: tasks.md)
+    /// Path to the task database (overrides any profile)
     #[arg(long, global = true)]
     pub file: Option<String>,
+
+    /// Profile to use (overrides TASK_PROFILE and the `profile` config key)
+    #[arg(long, global = true)]
+    pub profile: Option<String>,
 
     #[command(subcommand)]
     pub command: Option<Command>,
@@ -32,6 +36,12 @@ pub enum Command {
     Note {
         #[command(subcommand)]
         subcommand: NoteCommand,
+    },
+
+    /// Manage workspace profiles (separate task databases and notes)
+    Profile {
+        #[command(subcommand)]
+        subcommand: ProfileCommand,
     },
 
     /// Manage agent profiles and instructions
@@ -240,6 +250,35 @@ pub enum ConfigCommand {
     Get {
         /// Configuration key (e.g., default-dir)
         key: String,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum ProfileCommand {
+    /// List configured profiles (* marks the default)
+    List,
+
+    /// Show the resolved profile, database, and notes directory
+    Show,
+
+    /// Add or update a profile
+    Add {
+        /// Profile name (e.g. work, home)
+        name: String,
+
+        /// Directory holding this profile's Notes/ folder (e.g. inside a vault)
+        #[arg(long)]
+        dir: String,
+
+        /// Database path (default: <data-dir>/task-manager/<name>/tasks.db, on local disk)
+        #[arg(long)]
+        db: Option<String>,
+    },
+
+    /// Set the default profile
+    Use {
+        /// Profile name
+        name: String,
     },
 }
 

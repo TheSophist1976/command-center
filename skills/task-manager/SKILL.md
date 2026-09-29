@@ -3,11 +3,7 @@ name: task-manager
 description: Read and edit the user's task list. Use this skill when the user wants to list, view, add, edit, complete, reopen, or delete tasks.
 ---
 
-The user's tasks are stored in a SQLite database at:
-
-```
-~/Documents/Mark-main/Tasks/tasks.db
-```
+The user's tasks are stored in a local SQLite database that the `task` CLI resolves from the active profile (`profile` in config — e.g. `work` for work tasks, `home` for personal ones). Run `task profile show` to see the current database and notes paths, and pass `--profile <name>` (or set `TASK_PROFILE`) to act on a non-default profile. Each profile's tasks and notes are separate.
 
 Use the `task` CLI for every task operation — never open or edit `tasks.db` directly, it is a database file, not a text file. For note operations, use the `task note` CLI subcommands documented below.
 
@@ -89,7 +85,7 @@ task rm <id>
 
 ## Notes
 
-Notes are markdown files stored in the same directory as `tasks.db`. Each note has a slug (derived from its title) and is stored as `<slug>.md`. Notes are unaffected by the SQLite migration — they remain plain `.md` files, managed with the `task note` CLI subcommands below.
+Notes are markdown files stored in the active profile's `Notes/` directory (`task profile show` prints it). Each note has a slug (derived from its title) and is stored as `<slug>.md`. Notes are unaffected by the SQLite migration — they remain plain `.md` files, managed with the `task note` CLI subcommands below.
 
 ### Commands
 

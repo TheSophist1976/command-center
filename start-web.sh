@@ -12,6 +12,9 @@ set -euo pipefail
 #   ./start-web.sh --rebuild
 #                           Force a fresh frontend build even if web/dist
 #                           already exists, then serve as above.
+#   ./start-web.sh --profile home
+#                           Serve a specific profile (combines with the above;
+#                           set TASK_SERVER_PORT to run several side by side).
 
 # --- Colors & formatting ---
 GREEN='\033[0;32m'
@@ -29,16 +32,23 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
 MODE="serve"
-case "${1:-}" in
-    --dev) MODE="dev" ;;
-    --rebuild) MODE="rebuild" ;;
-    "") ;;
-    *)
-        echo "Unknown option: $1" >&2
-        echo "Usage: $0 [--dev|--rebuild]" >&2
-        exit 1
-        ;;
-esac
+SERVER_ARGS=()
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --dev) MODE="dev" ;;
+        --rebuild) MODE="rebuild" ;;
+        --profile)
+            [[ -n "${2:-}" ]] || { echo "--profile needs a name" >&2; exit 1; }
+            SERVER_ARGS+=(--profile "$2"); shift ;;
+        *)
+            echo "Unknown option: $1" >&2
+            echo "Usage: $0 [--dev|--rebuild] [--profile NAME]" >&2
+            exit 1
+            ;;
+    esac
+    shift
+done
+PORT="${TASK_SERVER_PORT:-4287}"
 
 if ! command -v cargo &>/dev/null; then
     warn "cargo not found. Install Rust: https://rustup.rs"
@@ -48,8 +58,8 @@ fi
 if [[ "$MODE" == "dev" ]]; then
     header "Command Center Web — dev mode (hot reload)"
 
-    info "Starting task_server on http://127.0.0.1:4287 ..."
-    cargo run --bin task_server &
+    info "Starting task_server on http://127.0.0.1:$PORT ..."
+    cargo run --bin task_server -- "${SERVER_ARGS[@]}" &
     SERVER_PID=$!
     trap 'kill "$SERVER_PID" 2>/dev/null || true' EXIT
 
@@ -77,5 +87,5 @@ else
 fi
 
 header "Command Center Web"
-info "Starting task_server (release) on http://127.0.0.1:4287 ..."
-exec cargo run --release --bin task_server
+info "Starting task_server (release) on http://127.0.0.1:$PORT ..."
+exec cargo run --release --bin task_server -- "${SERVER_ARGS[@]}"

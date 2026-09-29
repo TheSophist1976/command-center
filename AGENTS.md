@@ -37,7 +37,7 @@ Instructions are stored as a markdown note at:
 <task-dir>/Notes/Agents/<your-agent-name>/instructions.md
 ```
 
-Where `<task-dir>` is the directory containing `tasks.md` (resolved via `default-dir` in config or the file's parent directory).
+Where `<task-dir>` is the active profile's `profile-<name>-dir` from config (see [Profiles](#profiles) below), or — without profiles — `default-dir` / the directory containing `tasks.db`. Run `task profile show` to print the exact notes path.
 
 **To read your instructions:**
 ```bash
@@ -101,15 +101,28 @@ When `task-tui` is launched from your project directory, it automatically applie
 
 ## Working with Tasks
 
-Tasks are stored in a SQLite database (`tasks.db` in your task directory), not a text file. Use the `task` CLI for every operation — do not attempt to open or edit `tasks.db` directly.
+Tasks are stored in a SQLite database, not a text file. Use the `task` CLI for every operation — do not attempt to open or edit `tasks.db` directly.
+
+### Profiles
+
+The config may define several workspace profiles (e.g. `work`, `home`), each with its own task database and its own notes:
+
+```
+profile: work
+profile-work-dir: ~/Documents/Vault/Tasks
+profile-home-dir: ~/Documents/Vault/Home
+```
+
+A profile's notes live in `<profile-dir>/Notes/`; its database lives on local disk (`<data-dir>/task-manager/<name>/tasks.db` unless `profile-<name>-db` overrides it) — never look for `tasks.db` next to the notes. The CLI resolves all of this for you: `profile` in config is the default, and `--profile <name>` or `TASK_PROFILE=<name>` selects another. Tasks and notes in one profile are invisible from the others, so use the profile your task belongs to. `task profile show` prints the resolved profile, database, and notes paths.
 
 ### Finding your tasks
 
 ```bash
-task --file <task-dir>/tasks.db list --agent <your-agent-name> --status open
+task list --agent <your-agent-name> --status open
+task --profile home list --agent <your-agent-name> --status open   # a non-default profile
 ```
 
-(Or, if you're running from inside your agent's working directory and it's already configured as `default-dir` for your profile, you can omit `--file`.)
+(Setups without profiles resolve the database from `default-dir`; `--file <path>` targets a specific database directly.)
 
 ### Adding a task
 

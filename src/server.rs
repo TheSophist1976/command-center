@@ -17,6 +17,9 @@ use crate::task::{Status, Task};
 #[derive(Clone)]
 pub struct AppState {
     pub db_path: PathBuf,
+    /// Directory holding `Notes/` — separate from `db_path` when a profile
+    /// keeps the database local and the notes in a vault.
+    pub task_dir: PathBuf,
     pub write_lock: Arc<tokio::sync::Mutex<()>>,
     /// Broadcasts a signal whenever tasks.db changes on disk, from any writer
     /// (this server's own handlers, the CLI, or any other process). Populated
@@ -468,9 +471,7 @@ async fn list_agents() -> Json<Vec<AgentProfile>> {
 /// (src/bin/task.rs), so the web UI edits the exact same files.
 fn agent_notes_dir(state: &AppState, slug: &str) -> PathBuf {
     state
-        .db_path
-        .parent()
-        .unwrap_or(std::path::Path::new("."))
+        .task_dir
         .join("Notes")
         .join("Agents")
         .join(slug)
@@ -498,9 +499,7 @@ async fn get_agent_instructions(
     let agents_dir = agent_notes_dir(&state, &slug);
     let note_path = agents_dir.join("instructions.md");
     let legacy_path = state
-        .db_path
-        .parent()
-        .unwrap_or(std::path::Path::new("."))
+        .task_dir
         .join("Notes")
         .join("Instructions")
         .join(format!("{}.md", slug));
@@ -524,9 +523,7 @@ async fn edit_agent_instructions(
     let agents_dir = agent_notes_dir(&state, &slug);
     let note_path = agents_dir.join("instructions.md");
     let legacy_path = state
-        .db_path
-        .parent()
-        .unwrap_or(std::path::Path::new("."))
+        .task_dir
         .join("Notes")
         .join("Instructions")
         .join(format!("{}.md", slug));
@@ -601,9 +598,7 @@ async fn task_events(
 
 fn notes_dir(state: &AppState) -> PathBuf {
     state
-        .db_path
-        .parent()
-        .unwrap_or(std::path::Path::new("."))
+        .task_dir
         .join("Notes")
 }
 
@@ -907,7 +902,7 @@ mod tests {
     fn make_state() -> (tempfile::TempDir, AppState) {
         let dir = tempdir().unwrap();
         let db_path = dir.path().join("tasks.db");
-        (dir, AppState { db_path, write_lock: Arc::new(tokio::sync::Mutex::new(())), change_tx: tokio::sync::broadcast::channel(16).0 })
+        (dir, AppState { task_dir: db_path.parent().unwrap().to_path_buf(), db_path, write_lock: Arc::new(tokio::sync::Mutex::new(())), change_tx: tokio::sync::broadcast::channel(16).0 })
     }
 
     /// `TASK_CONFIG_FILE` is process-global, so tests that set it must not run concurrently
@@ -1172,7 +1167,7 @@ mod tests {
         let config_path = dir.path().join("config.md");
         std::fs::write(&config_path, "agent-bot: /code/bot\n").unwrap();
         unsafe { std::env::set_var("TASK_CONFIG_FILE", &config_path) };
-        let app = router(AppState { db_path, write_lock: Arc::new(tokio::sync::Mutex::new(())), change_tx: tokio::sync::broadcast::channel(16).0 });
+        let app = router(AppState { task_dir: db_path.parent().unwrap().to_path_buf(), db_path, write_lock: Arc::new(tokio::sync::Mutex::new(())), change_tx: tokio::sync::broadcast::channel(16).0 });
         let response = app
             .oneshot(
                 Request::builder()
@@ -1198,7 +1193,7 @@ mod tests {
         let config_path = dir.path().join("config.md");
         std::fs::write(&config_path, "agent-bot: /code/bot\n").unwrap();
         unsafe { std::env::set_var("TASK_CONFIG_FILE", &config_path) };
-        let app = router(AppState { db_path, write_lock: Arc::new(tokio::sync::Mutex::new(())), change_tx: tokio::sync::broadcast::channel(16).0 });
+        let app = router(AppState { task_dir: db_path.parent().unwrap().to_path_buf(), db_path, write_lock: Arc::new(tokio::sync::Mutex::new(())), change_tx: tokio::sync::broadcast::channel(16).0 });
 
         let response = app
             .clone()
@@ -1259,7 +1254,7 @@ mod tests {
         let config_path = dir.path().join("config.md");
         std::fs::write(&config_path, "agent-bot: /code/bot\n").unwrap();
         unsafe { std::env::set_var("TASK_CONFIG_FILE", &config_path) };
-        let app = router(AppState { db_path, write_lock: Arc::new(tokio::sync::Mutex::new(())), change_tx: tokio::sync::broadcast::channel(16).0 });
+        let app = router(AppState { task_dir: db_path.parent().unwrap().to_path_buf(), db_path, write_lock: Arc::new(tokio::sync::Mutex::new(())), change_tx: tokio::sync::broadcast::channel(16).0 });
 
         let body = serde_json::json!({ "body": "Remembered fact." });
         let response = app
@@ -1304,7 +1299,7 @@ mod tests {
         let config_path = dir.path().join("config.md");
         std::fs::write(&config_path, "agent-bot: /code/bot\n").unwrap();
         unsafe { std::env::set_var("TASK_CONFIG_FILE", &config_path) };
-        let app = router(AppState { db_path, write_lock: Arc::new(tokio::sync::Mutex::new(())), change_tx: tokio::sync::broadcast::channel(16).0 });
+        let app = router(AppState { task_dir: db_path.parent().unwrap().to_path_buf(), db_path, write_lock: Arc::new(tokio::sync::Mutex::new(())), change_tx: tokio::sync::broadcast::channel(16).0 });
         let response = app
             .oneshot(
                 Request::builder()
@@ -1326,6 +1321,7 @@ mod tests {
         // giving us a real internal error whose raw message must not leak to the client.
         let state = AppState {
             db_path: dir.path().to_path_buf(),
+            task_dir: dir.path().to_path_buf(),
             write_lock: Arc::new(tokio::sync::Mutex::new(())),
             change_tx: tokio::sync::broadcast::channel(16).0,
         };
