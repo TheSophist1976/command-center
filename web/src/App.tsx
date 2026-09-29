@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import './tokens.css';
-import { Terminal, Sun, CalendarDays, Settings, Search, PanelLeftClose, PanelLeftOpen, PanelRightClose, PanelRightOpen, X, AlertTriangle, HelpCircle, Repeat, CalendarOff, UserX } from 'lucide-react';
+import './taskPanel.css';
+import { Terminal, Sun, CalendarDays, Settings, Search, PanelLeftClose, PanelLeftOpen, PanelRightClose, PanelRightOpen, X, AlertTriangle, HelpCircle, Repeat, CalendarOff, UserX, Inbox } from 'lucide-react';
 import { Button } from './components/Button';
 import { NewTaskForm } from './components/NewTaskForm';
 import { EditableField, FieldRow } from './components/EditableField';
@@ -16,7 +17,11 @@ import type { Task, AgentProfile, Note } from './types';
 import { countDueWindow, dueMatches, startOfToday, isOverdue, type DueWindow } from './dueWindow';
 import { statusFor, statusColor } from './mockAgentStatus';
 
-type DueFilter = DueWindow | 'no-due-date' | 'recurring' | 'all-tasks';
+type DueFilter = DueWindow | 'no-due-date' | 'recurring' | 'all-tasks' | 'inbox';
+
+const INBOX_ITEMS: { value: DueFilter; label: string }[] = [
+  { value: 'inbox', label: 'Inbox' },
+];
 
 const DUE_WINDOW_ITEMS: { value: DueFilter; label: string }[] = [
   { value: 'day', label: 'Today' },
@@ -27,6 +32,8 @@ const DUE_WINDOW_ITEMS: { value: DueFilter; label: string }[] = [
   { value: 'recurring', label: 'Recurring' },
   { value: 'all-tasks', label: 'All tasks' },
 ];
+
+const ALL_FILTER_ITEMS = [...INBOX_ITEMS, ...DUE_WINDOW_ITEMS];
 
 function hasNoDueDate(t: Task): boolean {
   return t.status === 'open' && !t.due_date;
@@ -40,8 +47,14 @@ function missingAgent(t: Task): boolean {
   return t.status === 'open' && !t.agent;
 }
 
+function isInboxTask(t: Task): boolean {
+  return t.status === 'open' && !t.agent && !t.due_date;
+}
+
 function countForDueFilter(tasks: Task[], today: Date, value: DueFilter): number {
   switch (value) {
+    case 'inbox':
+      return tasks.filter(isInboxTask).length;
     case 'all-tasks':
       return tasks.length;
     case 'no-due-date':
@@ -52,6 +65,10 @@ function countForDueFilter(tasks: Task[], today: Date, value: DueFilter): number
       return countDueWindow(tasks, today, value);
   }
 }
+
+const PANEL_MIN_WIDTH = 352;
+const PANEL_MAX_WIDTH = 880;
+const PANEL_DEFAULT_WIDTH = 440;
 
 const PRIORITY_OPTIONS = [
   { value: 'critical', label: 'Critical' },
@@ -159,6 +176,12 @@ export default function App() {
   const [dueFilter, setDueFilter] = useState<DueFilter>('day');
   const [leftOpen, setLeftOpen] = useState(true);
   const [rightOpen, setRightOpen] = useState(true);
+  const [panelPhase, setPanelPhase] = useState<'closed' | 'entering' | 'open' | 'leaving'>('open');
+  const [panelWidth, setPanelWidth] = useState(() => {
+    const stored = Number(localStorage.getItem('taskPanelWidth'));
+    return Number.isFinite(stored) && stored >= PANEL_MIN_WIDTH && stored <= PANEL_MAX_WIDTH ? stored : PANEL_DEFAULT_WIDTH;
+  });
+  const [isResizingPanel, setIsResizingPanel] = useState(false);
   const [taskNotes, setTaskNotes] = useState<Note[]>([]);
   const [review, setReview] = useState<Note | null>(null);
   const [question, setQuestion] = useState<Note | null>(null);
@@ -174,6 +197,8 @@ export default function App() {
     [agents],
   );
   const searchInputRef = useRef<HTMLInputElement>(null);
+  const panelRaf1 = useRef<number>(0);
+  const panelRaf2 = useRef<number>(0);
   const reviewSlug = selected ? `task-${selected.id}-review-thread` : null;
   const questionSlug = selected ? `task-${selected.id}-question` : null;
   const visibleNotes = taskNotes.filter((n) => n.slug !== reviewSlug && n.slug !== questionSlug);
@@ -356,7 +381,9 @@ export default function App() {
 
   const filteredTasks = useMemo(() => {
     let result = tasks;
-    if (dueFilter === 'no-due-date') {
+    if (dueFilter === 'inbox') {
+      result = result.filter(isInboxTask);
+    } else if (dueFilter === 'no-due-date') {
       result = result.filter(hasNoDueDate);
     } else if (dueFilter === 'recurring') {
       result = result.filter(isRecurring);
@@ -532,6 +559,52 @@ export default function App() {
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [selected, rightOpen, flatOrder, dueFilter, groupBy]);
 
+  useEffect(() => {
+    if (rightOpen) {
+      setPanelPhase('entering');
+      const raf1 = requestAnimationFrame(() => {
+        const raf2 = requestAnimationFrame(() => setPanelPhase('open'));
+        panelRaf2.current = raf2;
+      });
+      panelRaf1.current = raf1;
+      return () => {
+        cancelAnimationFrame(panelRaf1.current);
+        if (panelRaf2.current) cancelAnimationFrame(panelRaf2.current);
+      };
+    }
+    setPanelPhase('leaving');
+    const prefersReducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    const t = window.setTimeout(() => setPanelPhase('closed'), prefersReducedMotion ? 0 : 240);
+    return () => window.clearTimeout(t);
+  }, [rightOpen]);
+
+  useEffect(() => {
+    if (!isResizingPanel) return;
+    const prevCursor = document.body.style.cursor;
+    const prevUserSelect = document.body.style.userSelect;
+    document.body.style.cursor = 'col-resize';
+    document.body.style.userSelect = 'none';
+    function handleMove(e: MouseEvent) {
+      const next = Math.min(PANEL_MAX_WIDTH, Math.max(PANEL_MIN_WIDTH, window.innerWidth - e.clientX));
+      setPanelWidth(next);
+    }
+    function handleUp() {
+      setIsResizingPanel(false);
+    }
+    window.addEventListener('mousemove', handleMove);
+    window.addEventListener('mouseup', handleUp);
+    return () => {
+      window.removeEventListener('mousemove', handleMove);
+      window.removeEventListener('mouseup', handleUp);
+      document.body.style.cursor = prevCursor;
+      document.body.style.userSelect = prevUserSelect;
+    };
+  }, [isResizingPanel]);
+
+  useEffect(() => {
+    localStorage.setItem('taskPanelWidth', String(panelWidth));
+  }, [panelWidth]);
+
   return (
     <div style={{ display: 'flex', height: '100vh', overflow: 'hidden' }}>
       {leftOpen && (
@@ -547,6 +620,30 @@ export default function App() {
           </div>
           <span style={{ fontFamily: 'var(--font-display)', fontWeight: 700, fontSize: 14 }}>command center</span>
         </div>
+        <nav style={{ display: 'flex', flexDirection: 'column', padding: '0 10px', gap: 2, marginBottom: 12 }}>
+          {INBOX_ITEMS.map((item) => {
+            const active = dueFilter === item.value;
+            const count = countForDueFilter(tasks, today, item.value);
+            return (
+              <div
+                key={item.value}
+                onClick={() => setDueFilter(item.value)}
+                style={{
+                  display: 'flex', alignItems: 'center', gap: 10, height: 36, padding: '0 10px',
+                  borderRadius: 5, cursor: 'pointer',
+                  background: active ? 'rgba(255,0,149,0.12)' : 'transparent',
+                  boxShadow: active ? '0 0 0 1px rgba(255,0,149,0.35)' : 'none',
+                }}
+              >
+                <Inbox size={16} color={active ? 'var(--magenta)' : 'var(--fg-4)'} />
+                <span style={{ flex: 1, fontSize: 14, fontWeight: active ? 600 : 400, color: active ? 'var(--fg-1)' : 'var(--fg-3)' }}>
+                  {item.label}
+                </span>
+                <span style={{ fontFamily: 'var(--font-mono)', fontSize: 12, color: active ? 'var(--magenta)' : 'var(--fg-5)' }}>{count}</span>
+              </div>
+            );
+          })}
+        </nav>
         <div style={{ padding: '0 20px 8px', fontFamily: 'var(--font-display)', fontWeight: 700, fontSize: 11, letterSpacing: '0.08em', textTransform: 'uppercase', color: 'var(--fg-5)' }}>
           Due window
         </div>
@@ -611,7 +708,7 @@ export default function App() {
             {leftOpen ? <PanelLeftClose size={18} color="var(--fg-4)" /> : <PanelLeftOpen size={18} color="var(--fg-4)" />}
           </button>
           <span style={{ fontFamily: 'var(--font-display)', fontWeight: 600, fontSize: 22 }}>
-            {DUE_WINDOW_ITEMS.find((i) => i.value === dueFilter)?.label ?? 'All tasks'}
+            {ALL_FILTER_ITEMS.find((i) => i.value === dueFilter)?.label ?? 'All tasks'}
           </span>
           <div style={{ flex: 1 }} />
           <button
@@ -670,6 +767,7 @@ export default function App() {
           <span style={{ width: 78 }}>Priority</span>
           <span style={{ width: 64 }}></span>
           <span style={{ width: 100 }}>Status</span>
+          <span style={{ width: 110 }}>Agent</span>
           <span style={{ flex: 1 }}>Task</span>
           <span style={{ width: 96 }}>Due</span>
           <span style={{ width: 44 }}>Effort</span>
@@ -729,6 +827,12 @@ export default function App() {
                     )}
                   </span>
                   <span style={{
+                    width: 110, fontSize: 12.5, color: t.agent ? 'var(--fg-3)' : 'var(--fg-5)',
+                    whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
+                  }}>
+                    {t.agent ?? '—'}
+                  </span>
+                  <span style={{
                     flex: 1, minWidth: 0, fontSize: 14.5, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
                     textDecoration: t.status === 'done' ? 'line-through' : 'none',
                     color: t.status === 'done' ? 'var(--fg-4)' : 'inherit',
@@ -748,8 +852,25 @@ export default function App() {
         </div>
       </main>
 
-      {rightOpen && (
-      <aside style={{ width: 352, flex: 'none', minHeight: 0, overflowY: 'auto', background: 'var(--ink-3)', borderLeft: '1px solid var(--hairline)', display: 'flex', flexDirection: 'column', padding: selected ? '20px 24px' : 0, alignItems: selected ? 'stretch' : 'center', justifyContent: selected ? 'flex-start' : 'center', color: 'var(--fg-5)' }}>
+      {panelPhase !== 'closed' && (
+      <>
+      <div
+        className={`task-panel-scrim${panelPhase === 'open' ? ' is-open' : ''}`}
+        onClick={() => setRightOpen(false)}
+      />
+      <aside
+        className={`task-panel${panelPhase === 'open' ? ' is-open' : ''}${isResizingPanel ? ' is-resizing' : ''}`}
+        style={{ width: panelWidth }}
+      >
+        <div
+          className="task-panel-resize-handle"
+          onMouseDown={(e) => {
+            e.preventDefault();
+            setIsResizingPanel(true);
+          }}
+          title="Drag to resize"
+        />
+        <div key={selected?.id ?? 'empty'} className={selected ? 'task-panel-content' : 'task-panel-content task-panel-empty'}>
         {selected ? (
           <>
             <div style={{ display: 'flex', alignItems: 'flex-start', gap: 8 }}>
@@ -908,7 +1029,9 @@ export default function App() {
         ) : (
           'Select a task'
         )}
+        </div>
       </aside>
+      </>
       )}
 
       {editingAgent && (
