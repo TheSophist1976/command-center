@@ -71,7 +71,7 @@ fn run(cli: Cli) -> Result<(), (i32, String)> {
         },
 
         Some(Command::Note { subcommand }) => {
-            let dir = path.parent().unwrap_or(std::path::Path::new(".")).to_path_buf().join("Notes");
+            let dir = task::db::resolve_notes_dir(&path);
             let task_filename = path
                 .file_name()
                 .and_then(|n| n.to_str())
@@ -197,7 +197,7 @@ fn run(cli: Cli) -> Result<(), (i32, String)> {
         }
 
         Some(Command::Agent { subcommand }) => {
-            let task_dir = path.parent().unwrap_or(std::path::Path::new(".")).to_path_buf();
+            let notes_dir = task::db::resolve_notes_dir(&path);
 
             match subcommand {
                 AgentCommand::Instructions { name, action } => {
@@ -206,9 +206,9 @@ fn run(cli: Cli) -> Result<(), (i32, String)> {
                     )
                     .unwrap_or_else(|| task::note::slugify(&name));
 
-                    let agents_dir = task_dir.join("Notes").join("Agents").join(&slug);
+                    let agents_dir = notes_dir.join("Agents").join(&slug);
                     let note_path = agents_dir.join("instructions.md");
-                    let legacy_path = task_dir.join("Notes").join("Instructions").join(format!("{}.md", slug));
+                    let legacy_path = notes_dir.join("Instructions").join(format!("{}.md", slug));
 
                     match action {
                         AgentInstructionsCommand::Show => {
@@ -257,7 +257,7 @@ fn run(cli: Cli) -> Result<(), (i32, String)> {
 
                 AgentCommand::Memory { name, action } => {
                     let slug = task::note::slugify(&name);
-                    let agents_dir = task_dir.join("Notes").join("Agents").join(&slug);
+                    let agents_dir = notes_dir.join("Agents").join(&slug);
                     let memory_path = agents_dir.join("memory.md");
 
                     match action {

@@ -960,7 +960,7 @@ impl App {
     }
 
     fn notes_dir(&self) -> PathBuf {
-        self.task_dir().join("Notes")
+        crate::db::resolve_notes_dir(&self.file_path)
     }
 
     fn grouping_slot(&self) -> String {

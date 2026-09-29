@@ -48,6 +48,27 @@ fn resolve_file_path_inner(flag: Option<&str>, config_path: Option<&Path>) -> Pa
     PathBuf::from("tasks.db")
 }
 
+/// Resolves the directory Notes are stored under.
+/// Uses the `notes-dir` config key if set, otherwise falls back to
+/// `Notes/` alongside the resolved tasks.db path.
+pub fn resolve_notes_dir(file_path: &Path) -> PathBuf {
+    resolve_notes_dir_inner(file_path, crate::config::config_path().as_deref())
+}
+
+fn resolve_notes_dir_inner(file_path: &Path, config_path: Option<&Path>) -> PathBuf {
+    if let Some(cfg_path) = config_path {
+        if let Some(notes_dir) = crate::config::read_config_value_from(cfg_path, "notes-dir") {
+            if !notes_dir.is_empty() {
+                return crate::config::expand_tilde(&notes_dir);
+            }
+        }
+    }
+    file_path
+        .parent()
+        .unwrap_or(Path::new("."))
+        .join("Notes")
+}
+
 fn open_conn(path: &Path) -> Result<Connection, String> {
     let conn = Connection::open(path)
         .map_err(|e| format!("Failed to open {}: {}", path.display(), e))?;
@@ -303,6 +324,30 @@ mod tests {
         unsafe { env::remove_var("TASK_FILE") };
         let p = resolve_file_path_inner(None, Some(&config_path));
         assert_eq!(p, PathBuf::from("/my/notes/tasks.db"));
+    }
+
+    #[test]
+    fn test_resolve_notes_dir_default_fallback() {
+        let p = resolve_notes_dir_inner(&PathBuf::from("/my/tasks/tasks.db"), None);
+        assert_eq!(p, PathBuf::from("/my/tasks/Notes"));
+    }
+
+    #[test]
+    fn test_resolve_notes_dir_config_override() {
+        let dir = tempdir().unwrap();
+        let config_path = dir.path().join("config.md");
+        std::fs::write(&config_path, "default-dir: /my/tasks\nnotes-dir: /my/notes\n").unwrap();
+        let p = resolve_notes_dir_inner(&PathBuf::from("/my/tasks/tasks.db"), Some(&config_path));
+        assert_eq!(p, PathBuf::from("/my/notes"));
+    }
+
+    #[test]
+    fn test_resolve_notes_dir_config_without_notes_dir_key() {
+        let dir = tempdir().unwrap();
+        let config_path = dir.path().join("config.md");
+        std::fs::write(&config_path, "default-dir: /my/tasks\n").unwrap();
+        let p = resolve_notes_dir_inner(&PathBuf::from("/my/tasks/tasks.db"), Some(&config_path));
+        assert_eq!(p, PathBuf::from("/my/tasks/Notes"));
     }
 
     #[test]
