@@ -47,14 +47,14 @@ function missingAgent(t: Task): boolean {
   return t.status === 'open' && !t.agent;
 }
 
-function isInboxTask(t: Task): boolean {
-  return t.status === 'open' && !t.agent && !t.due_date;
+function isInboxTask(t: Task, today: Date): boolean {
+  return t.status === 'open' && (!t.agent || !t.due_date || isOverdue(t, today));
 }
 
 function countForDueFilter(tasks: Task[], today: Date, value: DueFilter): number {
   switch (value) {
     case 'inbox':
-      return tasks.filter(isInboxTask).length;
+      return tasks.filter((t) => isInboxTask(t, today)).length;
     case 'all-tasks':
       return tasks.length;
     case 'no-due-date':
@@ -382,7 +382,7 @@ export default function App() {
   const filteredTasks = useMemo(() => {
     let result = tasks;
     if (dueFilter === 'inbox') {
-      result = result.filter(isInboxTask);
+      result = result.filter((t) => isInboxTask(t, today));
     } else if (dueFilter === 'no-due-date') {
       result = result.filter(hasNoDueDate);
     } else if (dueFilter === 'recurring') {
