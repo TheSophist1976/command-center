@@ -4,6 +4,7 @@ use task::server::{router_with_static, AppState};
 async fn main() {
     let db_path = task::db::resolve_file_path(std::env::args().nth(1).as_deref());
     task::db::backup_daily(&db_path);
+    let notes_dir = task::db::resolve_notes_dir(&db_path);
     let port: u16 = std::env::var("TASK_SERVER_PORT")
         .ok()
         .and_then(|s| s.parse().ok())
@@ -27,7 +28,7 @@ async fn main() {
     };
 
     let app = router_with_static(
-        AppState { db_path, write_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())), change_tx },
+        AppState { notes_dir, db_path, write_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())), change_tx },
         static_dir,
     );
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", port)).await.unwrap();

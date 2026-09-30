@@ -17,6 +17,9 @@ use crate::task::{Status, Task};
 #[derive(Clone)]
 pub struct AppState {
     pub db_path: PathBuf,
+    /// Where Notes live. Resolved once at startup (see `db::resolve_notes_dir`) so
+    /// the `notes-dir` config key is honored the same way the CLI and TUI honor it.
+    pub notes_dir: PathBuf,
     pub write_lock: Arc<tokio::sync::Mutex<()>>,
     /// Broadcasts a signal whenever tasks.db changes on disk, from any writer
     /// (this server's own handlers, the CLI, or any other process). Populated
@@ -600,11 +603,7 @@ async fn task_events(
 }
 
 fn notes_dir(state: &AppState) -> PathBuf {
-    state
-        .db_path
-        .parent()
-        .unwrap_or(std::path::Path::new("."))
-        .join("Notes")
+    state.notes_dir.clone()
 }
 
 fn review_thread_slug(task_id: u32) -> String {
@@ -907,7 +906,8 @@ mod tests {
     fn make_state() -> (tempfile::TempDir, AppState) {
         let dir = tempdir().unwrap();
         let db_path = dir.path().join("tasks.db");
-        (dir, AppState { db_path, write_lock: Arc::new(tokio::sync::Mutex::new(())), change_tx: tokio::sync::broadcast::channel(16).0 })
+        let notes_dir = dir.path().join("Notes");
+        (dir, AppState { db_path, notes_dir, write_lock: Arc::new(tokio::sync::Mutex::new(())), change_tx: tokio::sync::broadcast::channel(16).0 })
     }
 
     /// `TASK_CONFIG_FILE` is process-global, so tests that set it must not run concurrently
@@ -1172,7 +1172,7 @@ mod tests {
         let config_path = dir.path().join("config.md");
         std::fs::write(&config_path, "agent-bot: /code/bot\n").unwrap();
         unsafe { std::env::set_var("TASK_CONFIG_FILE", &config_path) };
-        let app = router(AppState { db_path, write_lock: Arc::new(tokio::sync::Mutex::new(())), change_tx: tokio::sync::broadcast::channel(16).0 });
+        let app = router(AppState { notes_dir: dir.path().join("Notes"), db_path, write_lock: Arc::new(tokio::sync::Mutex::new(())), change_tx: tokio::sync::broadcast::channel(16).0 });
         let response = app
             .oneshot(
                 Request::builder()
@@ -1198,7 +1198,7 @@ mod tests {
         let config_path = dir.path().join("config.md");
         std::fs::write(&config_path, "agent-bot: /code/bot\n").unwrap();
         unsafe { std::env::set_var("TASK_CONFIG_FILE", &config_path) };
-        let app = router(AppState { db_path, write_lock: Arc::new(tokio::sync::Mutex::new(())), change_tx: tokio::sync::broadcast::channel(16).0 });
+        let app = router(AppState { notes_dir: dir.path().join("Notes"), db_path, write_lock: Arc::new(tokio::sync::Mutex::new(())), change_tx: tokio::sync::broadcast::channel(16).0 });
 
         let response = app
             .clone()
@@ -1259,7 +1259,7 @@ mod tests {
         let config_path = dir.path().join("config.md");
         std::fs::write(&config_path, "agent-bot: /code/bot\n").unwrap();
         unsafe { std::env::set_var("TASK_CONFIG_FILE", &config_path) };
-        let app = router(AppState { db_path, write_lock: Arc::new(tokio::sync::Mutex::new(())), change_tx: tokio::sync::broadcast::channel(16).0 });
+        let app = router(AppState { notes_dir: dir.path().join("Notes"), db_path, write_lock: Arc::new(tokio::sync::Mutex::new(())), change_tx: tokio::sync::broadcast::channel(16).0 });
 
         let body = serde_json::json!({ "body": "Remembered fact." });
         let response = app
@@ -1304,7 +1304,7 @@ mod tests {
         let config_path = dir.path().join("config.md");
         std::fs::write(&config_path, "agent-bot: /code/bot\n").unwrap();
         unsafe { std::env::set_var("TASK_CONFIG_FILE", &config_path) };
-        let app = router(AppState { db_path, write_lock: Arc::new(tokio::sync::Mutex::new(())), change_tx: tokio::sync::broadcast::channel(16).0 });
+        let app = router(AppState { notes_dir: dir.path().join("Notes"), db_path, write_lock: Arc::new(tokio::sync::Mutex::new(())), change_tx: tokio::sync::broadcast::channel(16).0 });
         let response = app
             .oneshot(
                 Request::builder()
@@ -1326,6 +1326,7 @@ mod tests {
         // giving us a real internal error whose raw message must not leak to the client.
         let state = AppState {
             db_path: dir.path().to_path_buf(),
+            notes_dir: dir.path().join("Notes"),
             write_lock: Arc::new(tokio::sync::Mutex::new(())),
             change_tx: tokio::sync::broadcast::channel(16).0,
         };
@@ -2020,6 +2021,40 @@ mod tests {
         let json = body_json(response).await;
         let slugs: Vec<&str> = json.as_array().unwrap().iter().map(|n| n["slug"].as_str().unwrap()).collect();
         assert_eq!(slugs, vec!["newest", "middle", "oldest"]);
+    }
+
+    #[tokio::test]
+    async fn test_task_notes_read_from_configured_notes_dir() {
+        let (dir, mut state) = make_state();
+        let custom = dir.path().join("vault").join("Notes");
+        std::fs::create_dir_all(&custom).unwrap();
+        std::fs::write(custom.join("linked.md"), "# Linked\n").unwrap();
+        state.notes_dir = custom;
+        let mut tf = crate::task::TaskFile::new();
+        tf.tasks.push(crate::task::Task {
+            id: 1, title: "Has note".to_string(), status: Status::Open, priority: crate::task::Priority::Medium,
+            tags: Vec::new(), created: chrono::Utc::now(), updated: None, description: None,
+            due_date: None, project: None, recurrence: None,
+            notes: vec!["linked".to_string()],
+            agent: None, effort: None, work_status: None,
+        });
+        db::save(&state.db_path, &tf).unwrap();
+
+        let app = router(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/tasks/1/notes")
+                    .header("host", "127.0.0.1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let json = body_json(response).await;
+        let slugs: Vec<&str> = json.as_array().unwrap().iter().map(|n| n["slug"].as_str().unwrap()).collect();
+        assert_eq!(slugs, vec!["linked"]);
     }
 
     #[tokio::test]
