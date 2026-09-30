@@ -161,10 +161,40 @@ pub fn delete_note(dir: &Path, slug: &str) -> Result<(), String> {
     fs::remove_file(&path).map_err(|e| format!("Failed to delete note {}: {}", slug, e))
 }
 
+/// Percent-encodes everything except RFC 3986 unreserved characters, as Obsidian's
+/// `obsidian://open?path=` parameter requires (including `/`, spaces and parentheses).
+fn obsidian_path_uri(note_path: &Path) -> String {
+    let mut out = String::from("obsidian://open?path=");
+    for b in note_path.to_string_lossy().bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => out.push(b as char),
+            _ => out.push_str(&format!("%{:02X}", b)),
+        }
+    }
+    out
+}
+
+/// An Obsidian deep link to the note file, when `obsidian-vault` is configured.
+/// Uses the file's absolute path so Obsidian resolves the vault itself, which keeps
+/// the link correct wherever `notes-dir` points.
+pub fn obsidian_uri(note_path: &Path) -> Option<String> {
+    crate::config::read_config_value("obsidian-vault")?;
+    Some(obsidian_path_uri(note_path))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use tempfile::tempdir;
+
+    #[test]
+    fn test_obsidian_path_uri_encodes_spaces_and_parens() {
+        let p = Path::new("/Users/me/Mark-main/Command-Center (Work)/Notes/tpm-guide.md");
+        assert_eq!(
+            obsidian_path_uri(p),
+            "obsidian://open?path=%2FUsers%2Fme%2FMark-main%2FCommand-Center%20%28Work%29%2FNotes%2Ftpm-guide.md"
+        );
+    }
 
     // -- slugify tests --
 

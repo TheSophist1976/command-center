@@ -801,22 +801,11 @@ async fn add_task_review_feedback(
     Ok(Json(note_response(note, modified)))
 }
 
-/// Mirrors tui.rs's `build_obsidian_uri`: an Obsidian deep link when a vault is configured.
-fn build_obsidian_uri(slug: &str) -> Option<String> {
-    let vault = crate::config::read_config_value("obsidian-vault")?;
-    let notes_dir = crate::config::read_config_value("obsidian-notes-dir");
-    let file = match notes_dir {
-        Some(ref dir) => format!("{}/{}", dir, slug),
-        None => slug.to_string(),
-    };
-    Some(format!("obsidian://open?vault={}&file={}", vault, file))
-}
-
 /// Mirrors tui.rs's `open_note_external`, minus the raw-mode terminal handling that has
 /// no equivalent in a headless server process — every spawn here is fire-and-forget.
 /// Priority: Obsidian (if configured) > $EDITOR/$VISUAL.
-fn open_note_external(note_path: &std::path::Path, slug: &str) -> Result<(), String> {
-    if let Some(uri) = build_obsidian_uri(slug) {
+fn open_note_external(note_path: &std::path::Path) -> Result<(), String> {
+    if let Some(uri) = crate::note::obsidian_uri(note_path) {
         std::process::Command::new("open")
             .arg(&uri)
             .spawn()
@@ -845,7 +834,7 @@ async fn open_note(
     }
     let dir = notes_dir(&state);
     let note_path = dir.join(format!("{}.md", slug));
-    open_note_external(&note_path, &slug).map_err(|e| app_error(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    open_note_external(&note_path).map_err(|e| app_error(StatusCode::INTERNAL_SERVER_ERROR, e))?;
     Ok(StatusCode::NO_CONTENT)
 }
 

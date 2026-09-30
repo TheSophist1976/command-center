@@ -2410,22 +2410,12 @@ fn handle_detail_confirm(app: &mut App, key: KeyCode) -> Result<(), String> {
 
 // -- External note open helpers --
 
-fn build_obsidian_uri(slug: &str) -> Option<String> {
-    let vault = crate::config::read_config_value("obsidian-vault")?;
-    let notes_dir = crate::config::read_config_value("obsidian-notes-dir");
-    let file = match notes_dir {
-        Some(ref dir) => format!("{}/{}", dir, slug),
-        None => slug.to_string(),
-    };
-    Some(format!("obsidian://open?vault={}&file={}", vault, file))
-}
-
 /// Open a note for editing. Priority: Obsidian (if configured) > $EDITOR.
 /// For Obsidian: spawns `open` asynchronously without suspending the TUI.
 /// For $EDITOR: suspends TUI raw mode, waits for editor to exit, resumes.
-fn open_note_external(note_path: &std::path::Path, slug: &str) -> Result<(), String> {
+fn open_note_external(note_path: &std::path::Path, _slug: &str) -> Result<(), String> {
     // 1. Obsidian
-    if let Some(uri) = build_obsidian_uri(slug) {
+    if let Some(uri) = crate::note::obsidian_uri(note_path) {
         std::process::Command::new("open")
             .arg(&uri)
             .spawn()
