@@ -1,0 +1,119 @@
+name: release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+env:
+  RELEASES_REPO: TheSophist1976/command-center-releases
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Tag must equal Cargo.toml version
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          cargo_version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)
+          [ "$tag" = "$cargo_version" ] || { echo "tag $tag != Cargo.toml $cargo_version"; exit 1; }
+      - uses: actions/setup-node@v4
+        with: { node-version: 20, cache: npm, cache-dependency-path: web/package-lock.json }
+      - run: npm ci && npm run build
+        working-directory: web
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test
+      - run: shellcheck install.sh tests/install_sh_test.sh
+      - run: sh tests/install_sh_test.sh
+
+  build:
+    needs: verify
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          # Verify these runner labels still exist when you cut the first release.
+          - { target: aarch64-apple-darwin, os: macos-14 }
+          - { target: x86_64-apple-darwin, os: macos-13 }
+          - { target: x86_64-unknown-linux-gnu, os: ubuntu-22.04 }
+          - { target: aarch64-unknown-linux-gnu, os: ubuntu-22.04-arm }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 20, cache: npm, cache-dependency-path: web/package-lock.json }
+      - run: npm ci && npm run build
+        working-directory: web
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release --features tui
+      - name: Package
+        run: |
+          name="task-${GITHUB_REF_NAME}-${{ matrix.target }}"
+          mkdir stage
+          cp target/release/task target/release/task-tui stage/
+          tar -czf "$name.tar.gz" -C stage task task-tui
+      - uses: actions/upload-artifact@v4
+        with:
+          name: archive-${{ matrix.target }}
+          path: task-*.tar.gz
+
+  checksums:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with: { pattern: 'archive-*', path: dist, merge-multiple: true }
+      - name: SHA256SUMS
+        run: cd dist && sha256sum task-*.tar.gz > SHA256SUMS && cat SHA256SUMS
+      - uses: actions/upload-artifact@v4
+        with: { name: release-files, path: dist/* }
+
+  smoke:
+    needs: checksums
+    strategy:
+      matrix:
+        os: [macos-14, ubuntu-22.04]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with: { name: release-files, path: dist }
+      - name: Install the just-built artifact on a clean runner
+        run: |
+          INSTALL_DIR="$RUNNER_TEMP/bin" \
+          RELEASE_TAG="$GITHUB_REF_NAME" \
+          RELEASE_BASE_URL="file://$PWD/dist" \
+          sh install.sh
+          "$RUNNER_TEMP/bin/task" --version | tee /dev/stderr | grep -F "${GITHUB_REF_NAME#v}"
+
+  publish:
+    needs: [checksums, smoke]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with: { name: release-files, path: dist }
+      - name: Publish install.sh to the releases repo
+        env:
+          TOKEN: ${{ secrets.RELEASES_REPO_TOKEN }}
+        run: |
+          git clone "https://x-access-token:${TOKEN}@github.com/${RELEASES_REPO}.git" releases
+          cp install.sh releases/install.sh
+          cd releases
+          git config user.name "release-bot"
+          git config user.email "release-bot@users.noreply.github.com"
+          if ! git diff --quiet || [ -n "$(git status --porcelain)" ]; then
+            git add install.sh && git commit -m "install.sh for ${GITHUB_REF_NAME}" && git push
+          fi
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ secrets.RELEASES_REPO_TOKEN }}
+        run: |
+          flag=""
+          case "$GITHUB_REF_NAME" in *-*) flag="--prerelease" ;; esac
+          gh release create "$GITHUB_REF_NAME" dist/* --repo "$RELEASES_REPO" --title "$GITHUB_REF_NAME" --generate-notes $flag
