@@ -29,13 +29,36 @@ fn run(cli: Cli) -> Result<(), (i32, String)> {
                 .map_err(|e| (1, e.to_string()))?;
             return runtime.block_on(task::server::serve(path)).map_err(|e| (1, e));
         }
+        Some(Command::Setup) => {
+            let config = task::config::config_path().ok_or((1, "Config directory unavailable on this platform".to_string()))?;
+            let home = dirs::home_dir().ok_or((1, "Home directory unavailable".to_string()))?;
+            let report = task::setup::run_setup(&config, &home, &mut task::prompt::StdioPrompter).map_err(|e| (1, e))?;
+            println!(
+                "Setup complete. Installed {} file(s); {} unchanged; {} left as edited.",
+                report.installed.len(),
+                report.unchanged.len(),
+                report.skipped_edited.len()
+            );
+            return Ok(());
+        }
+        Some(Command::RefreshFiles { skip_edited }) => {
+            let config = task::config::config_path().ok_or((1, "Config directory unavailable on this platform".to_string()))?;
+            let home = dirs::home_dir().ok_or((1, "Home directory unavailable".to_string()))?;
+            let mut stdio = task::prompt::StdioPrompter;
+            let mut policy = if *skip_edited { task::managed::EditedPolicy::Skip } else { task::managed::EditedPolicy::Ask(&mut stdio) };
+            let report = task::managed::refresh(&config, &home, &mut policy).map_err(|e| (1, e))?;
+            for p in &report.skipped_edited {
+                println!("skipped-edited: {}", p.display());
+            }
+            return Ok(());
+        }
         _ => {}
     }
 
     task::db::backup_daily(&path);
 
     match cli.command {
-        Some(Command::Serve) => unreachable!("handled above"),
+        Some(Command::Serve | Command::Setup | Command::RefreshFiles { .. }) => unreachable!("handled above"),
 
         None | Some(Command::Tui) => {
             eprintln!("Use task-tui to launch the interactive terminal UI.");

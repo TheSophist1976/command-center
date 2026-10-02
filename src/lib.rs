@@ -9,6 +9,7 @@ pub mod note;
 pub mod parser;
 pub mod prompt;
 pub mod server;
+pub mod setup;
 pub mod task;
 pub mod watch;
 
