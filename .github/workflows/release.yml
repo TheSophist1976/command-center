@@ -27,7 +27,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --features tui
-      - run: shellcheck install.sh tests/install_sh_test.sh
+      - run: shellcheck -x install.sh tests/install_sh_test.sh
       - run: sh tests/install_sh_test.sh
 
   build:
@@ -36,9 +36,10 @@ jobs:
       fail-fast: true
       matrix:
         include:
-          # Verify these runner labels still exist when you cut the first release.
+          # Labels checked against GitHub's runner docs on 2026-10-02 (macos-13 is retired; the
+          # Intel runner is macos-15-intel). Re-check them if a job sits "waiting for a runner".
           - { target: aarch64-apple-darwin, os: macos-14 }
-          - { target: x86_64-apple-darwin, os: macos-13 }
+          - { target: x86_64-apple-darwin, os: macos-15-intel }
           - { target: x86_64-unknown-linux-gnu, os: ubuntu-22.04 }
           - { target: aarch64-unknown-linux-gnu, os: ubuntu-22.04-arm }
     runs-on: ${{ matrix.os }}
