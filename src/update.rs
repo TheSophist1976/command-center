@@ -76,7 +76,7 @@ pub fn parse_version(tag: &str) -> Result<Version, UpdateError> {
 }
 
 pub fn is_newer(current: &Version, latest: &Version) -> bool {
-    latest > current
+    latest.cmp_precedence(current) == std::cmp::Ordering::Greater
 }
 
 pub fn target_for(os: &str, arch: &str) -> Result<&'static str, UpdateError> {
@@ -337,6 +337,13 @@ mod tests {
     fn parse_version_rejects_junk_with_typed_error() {
         assert!(matches!(parse_version("nightly"), Err(UpdateError::BadRelease(_))));
         assert!(matches!(parse_version(""), Err(UpdateError::BadRelease(_))));
+    }
+
+    #[test]
+    fn build_metadata_is_ignored_when_comparing_versions() {
+        let with_build = parse_version("4.1.0+build5").unwrap();
+        assert!(!is_newer(&parse_version("4.1.0").unwrap(), &with_build));
+        assert!(is_newer(&with_build, &parse_version("4.1.1").unwrap()));
     }
 
     #[test]
