@@ -82,12 +82,12 @@ This is a running conversation between you and the human; earlier rounds carry c
 **If a `changes-requested` task has a `task-<id>-question` note ending in an `## Answer — <date>` section**, the human answered your `needs-input` question from the web UI instead of the terminal. Read the question note (`task note show task-<id>-question`), treat that answer as the response to your question, set `--work-status in-progress`, and continue the task — do not ask the question again.
 
 **For each task, before doing any work:**
-1. Read the task title and description carefully
+1. Read the task title and description carefully, **and the task's own instructions**: run `task show <id>` and read the `## Instructions` section if it has one. These are what the human wants done for this specific task and they supplement your agent instructions. Never rewrite them yourself — if they are unclear or conflict with your agent instructions, ask (step 3)
 2. Read all notes attached to the task (`notes` field, comma-separated slugs, shown by `task show <id>`). Use `task note show <slug>` to read each one.
    - **Instruction notes first**: notes whose slug or title contains `instructions`, `how-to`, or `steps` must be read before anything else — they contain task-specific guidance that overrides or supplements your agent instructions
    - **Other notes**: read for context after instruction notes
 3. If anything is unclear after reading the task and all its notes, use `AskUserQuestion` to ask the human before proceeding (see "Any time you have a question" below for the `needs-input` handshake to run alongside it)
-4. Update the task title and description to reflect the clarified scope (`task edit <id> --title "..." --description "..."`)
+4. Update the task title and description to reflect the clarified scope (`task edit <id> --title "..." --description "..."`); leave `--instructions` as the human wrote it
 5. Mark the task as started: `task edit <id> --work-status in-progress`
 
 **While working, keep `work_status` current** — it's how the human tracks your progress without you having to mark the task done. If a task genuinely spans multiple distinct phases and you want to signal that, update it again mid-task (e.g. back to `in-progress` after a pause); otherwise setting it once at the start is enough until handback.
@@ -202,7 +202,7 @@ After all subagents complete, summarize to the human:
 | Config file (macOS) | `~/Library/Application Support/task-manager/config.md` |
 | Tasks database | `~/Documents/Mark-main/Tasks/tasks.db` |
 | List an agent's open tasks | `task list --agent <name> --status open` |
-| Show full task detail | `task show <id>` |
+| Show full task detail (incl. the task's `## Instructions`) | `task show <id>` |
 | Mark task started | `task edit <id> --work-status in-progress` |
 | Read a review thread in full | `task note show task-<id>-review-thread` |
 | Respond to feedback | `task note append task-<id>-review-thread --body "## Agent response — <date>\n\n<summary>"` |

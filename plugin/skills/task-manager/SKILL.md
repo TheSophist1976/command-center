@@ -37,27 +37,29 @@ With no flags, lists all tasks. Output is one line per task: status, id, priorit
 task show <id>
 ```
 
-Prints full detail: title, priority, tags, due date, project, recurrence, notes, agent, effort, created/updated timestamps, and description.
+Prints full detail: title, priority, tags, due date, project, recurrence, notes, agent, effort, created/updated timestamps, and description, followed by a `## Instructions` section when the task has instructions.
 
 ## Adding a Task
 
 ```
-task add "<title>" [--priority critical|high|medium|low] [--due <YYYY-MM-DD or weekday>] [--project <name>] [--tags <a,b,c>] [--agent <name>] [--description "<text>"]
+task add "<title>" [--priority critical|high|medium|low] [--due <YYYY-MM-DD or weekday>] [--project <name>] [--tags <a,b,c>] [--agent <name>] [--description "<text>"] [--instructions "<text>"]
 ```
 
 Only `<title>` is required; `--priority` defaults to `medium`. The id is assigned automatically and printed in the output (`Created task 12: <title>`).
 
+`--instructions` is what an agent or person should do for this task, kept separate from `--description` (what the task is about).
+
 ## Editing a Task
 
 ```
-task edit <id> [--title "<new title>"] [--priority <p>] [--due <date>] [--project <name>] [--tags <a,b,c>] [--agent <name>] [--description "<text>"] [--effort high|medium|low] [--work-status <status>] [--recur <pattern>]
+task edit <id> [--title "<new title>"] [--priority <p>] [--due <date>] [--project <name>] [--tags <a,b,c>] [--agent <name>] [--description "<text>"] [--instructions "<text>"] [--effort high|medium|low] [--work-status <status>] [--recur <pattern>]
 ```
 
-Only the fields you pass are changed; `updated` is set automatically.
+Only the fields you pass are changed; `updated` is set automatically. `--instructions "<text>"` replaces the task's instructions; `--instructions ""` clears them.
 
 **`--work-status`** is separate from open/done status (see "Reporting Progress" below) — it does not mark the task done and does not affect `task done`/`task reopen`.
 
-**`--recur`** sets or changes the task's recurrence pattern (see "Recurrence" under Valid Field Values below). When a recurring task is completed via `task done`, the newly spawned occurrence inherits the same `agent` as the completed task.
+**`--recur`** sets or changes the task's recurrence pattern (see "Recurrence" under Valid Field Values below). When a recurring task is completed via `task done`, the newly spawned occurrence inherits the same `agent` and `instructions` as the completed task.
 
 ## Reporting Progress
 
