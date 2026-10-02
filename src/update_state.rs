@@ -90,12 +90,12 @@ impl UpdateState {
     }
 
     pub fn status(&self) -> StatusSnapshot {
-        self.status.lock().unwrap().clone()
+        self.status.lock().unwrap_or_else(|e| e.into_inner()).clone()
     }
 
     /// Claims the single update slot. False if an update is already in flight.
     pub fn try_begin(&self) -> bool {
-        let mut s = self.status.lock().unwrap();
+        let mut s = self.status.lock().unwrap_or_else(|e| e.into_inner());
         if matches!(s.phase, Phase::Downloading | Phase::Verifying | Phase::Installing | Phase::Restarting) {
             return false;
         }
@@ -104,23 +104,37 @@ impl UpdateState {
     }
 
     pub fn set_phase(&self, phase: Phase) {
-        self.status.lock().unwrap().phase = phase;
+        self.status.lock().unwrap_or_else(|e| e.into_inner()).phase = phase;
     }
 
     pub fn set_skipped(&self, files: Vec<String>) {
-        self.status.lock().unwrap().skipped_files = files;
+        self.status.lock().unwrap_or_else(|e| e.into_inner()).skipped_files = files;
     }
 
     pub fn fail(&self, error: &UpdateError) {
-        let mut s = self.status.lock().unwrap();
+        let mut s = self.status.lock().unwrap_or_else(|e| e.into_inner());
         s.phase = Phase::Failed;
         s.error = Some(ErrorInfo { kind: error.kind().to_string(), message: error.to_string() });
+    }
+}
+
+/// Ends the update job in a terminal state even if the job thread panics.
+struct JobGuard<'a>(&'a UpdateState);
+
+impl Drop for JobGuard<'_> {
+    fn drop(&mut self) {
+        // Restarting is excluded: after it we exec and never return.
+        let in_progress = matches!(self.0.status().phase, Phase::Downloading | Phase::Verifying | Phase::Installing);
+        if in_progress {
+            self.0.fail(&UpdateError::Install("update job ended unexpectedly".to_string()));
+        }
     }
 }
 
 /// Runs the whole update on a background thread: install, refresh managed files with the
 /// new binary, then re-exec it as `task serve`.
 pub fn run_update_job(update: &UpdateState, db_path: &Path) {
+    let _guard = JobGuard(update);
     let Some(install_dir) = update.exe.parent().map(|d| d.to_path_buf()) else {
         update.fail(&UpdateError::Install("cannot locate the install directory".to_string()));
         return;
@@ -195,6 +209,48 @@ mod tests {
         assert_eq!(snap.error.unwrap().kind, "checksum_mismatch");
         assert!(s.try_begin(), "a failed update must not block the next attempt");
         assert!(s.status().error.is_none());
+    }
+
+    #[test]
+    fn job_guard_fails_a_job_left_in_progress() {
+        let s = UpdateState::for_tests("http://127.0.0.1:1", true);
+        assert!(s.try_begin());
+        drop(JobGuard(&s));
+        let snap = s.status();
+        assert_eq!(snap.phase, crate::update::Phase::Failed);
+        assert_eq!(snap.error.unwrap().kind, "install");
+        assert!(s.try_begin());
+    }
+
+    #[test]
+    fn job_guard_leaves_terminal_phases_alone() {
+        let s = UpdateState::for_tests("http://127.0.0.1:1", true);
+        assert!(s.try_begin());
+        s.set_phase(crate::update::Phase::Idle);
+        drop(JobGuard(&s));
+        assert_eq!(s.status().phase, crate::update::Phase::Idle);
+        assert!(s.status().error.is_none());
+
+        assert!(s.try_begin());
+        s.fail(&crate::update::UpdateError::ChecksumMismatch("x".into()));
+        drop(JobGuard(&s));
+        assert_eq!(s.status().error.unwrap().kind, "checksum_mismatch");
+    }
+
+    #[test]
+    fn job_guard_recovers_from_a_panicking_job_thread() {
+        let s = std::sync::Arc::new(UpdateState::for_tests("http://127.0.0.1:1", true));
+        assert!(s.try_begin());
+        let s2 = s.clone();
+        let joined = std::thread::spawn(move || {
+            let _guard = JobGuard(&s2);
+            s2.set_phase(crate::update::Phase::Installing);
+            panic!("boom");
+        })
+        .join();
+        assert!(joined.is_err());
+        assert_eq!(s.status().phase, crate::update::Phase::Failed);
+        assert!(s.try_begin());
     }
 
     #[test]
