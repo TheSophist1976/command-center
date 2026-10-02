@@ -113,10 +113,16 @@ task --file <task-dir>/tasks.db list --agent <your-agent-name> --status open
 
 (Or, if you're running from inside your agent's working directory and it's already configured as `default-dir` for your profile, you can omit `--file`.)
 
+### Reading a task's instructions
+
+A task can carry its own **instructions**: what an agent or person should actually do for this task, kept separate from the `description` (which says what the task is about). **Before doing any work on a task, run `task show <id>` and read both the description and the `## Instructions` section** (it is printed only when the task has instructions). Task instructions are specific to that one task and supplement your agent instructions (see "Reading Your Instructions" above — that is a different thing: a standing note per agent, not a field on a task).
+
+Do not rewrite a task's instructions yourself — the human owns them. If they are unclear or contradict your agent instructions, ask rather than guess (see the `needs-input` flow below).
+
 ### Adding a task
 
 ```bash
-task add "Task title" --priority high --due 2026-03-15 --project Work --tags frontend,auth --agent command-center --description "Optional longer description"
+task add "Task title" --priority high --due 2026-03-15 --project Work --tags frontend,auth --agent command-center --description "Optional longer description" --instructions "Optional: what to do for this task"
 ```
 
 Only `title` is required; `--priority` defaults to `medium`. The id is assigned automatically — it will be printed in the output (`Created task 12: Task title`).
@@ -128,6 +134,8 @@ task edit <id> --priority critical --due 2026-04-01
 ```
 
 Only the fields you pass are changed. `updated` is set automatically.
+
+`--instructions "<text>"` replaces the task's instructions; pass an empty string (`--instructions ""`) to clear them.
 
 **Setting or changing recurrence:**
 
@@ -182,7 +190,7 @@ The human can also answer from the web UI. That appends an `## Answer — <YYYY-
 task done <id>
 ```
 
-If the task has a recurrence set, completing it automatically creates the next occurrence as a new open task and reports its id.
+If the task has a recurrence set, completing it automatically creates the next occurrence as a new open task and reports its id. The new occurrence keeps the task's `instructions`.
 
 ### Reopening a task
 
@@ -201,6 +209,8 @@ task rm <id>
 ```bash
 task show <id>
 ```
+
+This prints the task's metadata, its description, and — if it has any — a `## Instructions` section.
 
 ### Rules to Never Break
 

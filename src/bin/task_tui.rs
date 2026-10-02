@@ -303,9 +303,9 @@ fn run(cli: Cli) -> Result<(), (i32, String)> {
             }
         }
 
-        Some(Command::Add { title, priority, due, project, tags, agent, description }) => {
+        Some(Command::Add { title, priority, due, project, tags, agent, description, instructions }) => {
             let msg = task::commands::add(&path, task::commands::AddArgs {
-                title, priority, due, project, tags, agent, description,
+                title, priority, due, project, tags, agent, description, instructions,
             })?;
             println!("{}", msg);
             Ok(())
@@ -324,9 +324,9 @@ fn run(cli: Cli) -> Result<(), (i32, String)> {
             Ok(())
         }
 
-        Some(Command::Edit { id, title, priority, due, project, tags, agent, description, effort, work_status, recur }) => {
+        Some(Command::Edit { id, title, priority, due, project, tags, agent, description, instructions, effort, work_status, recur }) => {
             let msg = task::commands::edit(&path, id, task::commands::EditArgs {
-                title, priority, due, project, tags, agent, description, effort, work_status, recur,
+                title, priority, due, project, tags, agent, description, instructions, effort, work_status, recur,
             })?;
             println!("{}", msg);
             Ok(())

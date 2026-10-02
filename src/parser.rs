@@ -88,6 +88,7 @@ pub fn parse(content: &str, strict: bool) -> Result<TaskFile, Vec<ParseError>> {
                         created: metadata.created,
                         updated: metadata.updated,
                         description,
+                        instructions: None,
                         due_date: metadata.due_date,
                         project: metadata.project,
                         recurrence: metadata.recurrence,

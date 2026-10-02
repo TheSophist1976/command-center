@@ -199,6 +199,7 @@ pub fn map_task(t: &TodoistTask, project_map: &HashMap<String, String>) -> Task 
         agent: None,
         effort: None,
         work_status: None,
+        instructions: None,
     }
 }
 

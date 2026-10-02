@@ -336,6 +336,8 @@ pub struct Task {
     pub updated: Option<DateTime<Utc>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub instructions: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none", serialize_with = "serialize_option_date")]
     pub due_date: Option<NaiveDate>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -497,7 +499,7 @@ mod tests {
             tags: Vec::new(),
             created: Utc.with_ymd_and_hms(2025, 1, 1, 0, 0, 0).unwrap(),
             updated: None,
-            description: None,
+            description: None, instructions: None,
             due_date: None,
             project: None,
             recurrence: None,

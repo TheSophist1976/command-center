@@ -126,6 +126,7 @@ pub struct AddTaskRequest {
     pub tags: Option<String>,
     pub agent: Option<String>,
     pub description: Option<String>,
+    pub instructions: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -175,6 +176,7 @@ async fn add_task(
         created: chrono::Utc::now(),
         updated: None,
         description: req.description,
+        instructions: req.instructions,
         due_date,
         project: req.project,
         recurrence: None,
@@ -197,6 +199,7 @@ pub struct EditTaskRequest {
     pub tags: Option<String>,
     pub agent: Option<String>,
     pub description: Option<String>,
+    pub instructions: Option<String>,
     pub effort: Option<String>,
     pub work_status: Option<String>,
     pub recurrence: Option<String>,
@@ -296,6 +299,9 @@ async fn edit_task(
         }
         if let Some(d) = req.description {
             t.description = Some(d);
+        }
+        if let Some(i) = req.instructions {
+            t.instructions = if i.is_empty() { None } else { Some(i) };
         }
         if let Some(e) = effort {
             t.effort = Some(e);
@@ -411,6 +417,7 @@ async fn done_task(
             created: chrono::Utc::now(),
             updated: None,
             description: parent.description.clone(),
+            instructions: parent.instructions.clone(),
             due_date: Some(next_due),
             project: parent.project.clone(),
             recurrence: Some(recur),
@@ -1093,7 +1100,7 @@ mod tests {
                 tags: vec!["x".to_string()],
                 created: chrono::Utc::now(),
                 updated: None,
-                description: None,
+                description: None, instructions: None,
                 due_date: None,
                 project: None,
                 recurrence: None,
@@ -1122,7 +1129,7 @@ mod tests {
             let mut tf = crate::task::TaskFile::new();
             let t1 = crate::task::Task {
                 id: 1, title: "Open".to_string(), status: Status::Open, priority: crate::task::Priority::Medium,
-                tags: Vec::new(), created: chrono::Utc::now(), updated: None, description: None,
+                tags: Vec::new(), created: chrono::Utc::now(), updated: None, description: None, instructions: None,
                 due_date: None, project: None, recurrence: None, notes: Vec::new(), agent: None, effort: None, work_status: None,
             };
             let mut t2 = t1.clone();
@@ -1148,7 +1155,7 @@ mod tests {
             let mut tf = crate::task::TaskFile::new();
             tf.tasks.push(crate::task::Task {
                 id: 7, title: "Found me".to_string(), status: Status::Open, priority: crate::task::Priority::Medium,
-                tags: Vec::new(), created: chrono::Utc::now(), updated: None, description: None,
+                tags: Vec::new(), created: chrono::Utc::now(), updated: None, description: None, instructions: None,
                 due_date: None, project: None, recurrence: None, notes: Vec::new(), agent: None, effort: None, work_status: None,
             });
             db::save(&state.db_path, &tf).unwrap();
@@ -1502,7 +1509,7 @@ mod tests {
             let mut tf = crate::task::TaskFile::new();
             tf.tasks.push(crate::task::Task {
                 id: 1, title: "Original".to_string(), status: Status::Open, priority: crate::task::Priority::Medium,
-                tags: Vec::new(), created: chrono::Utc::now(), updated: None, description: None,
+                tags: Vec::new(), created: chrono::Utc::now(), updated: None, description: None, instructions: None,
                 due_date: None, project: None, recurrence: None, notes: Vec::new(), agent: None, effort: None, work_status: None,
             });
             db::save(&state.db_path, &tf).unwrap();
@@ -1535,7 +1542,7 @@ mod tests {
             let mut tf = crate::task::TaskFile::new();
             tf.tasks.push(crate::task::Task {
                 id: 1, title: "Has a due date".to_string(), status: Status::Open, priority: crate::task::Priority::Medium,
-                tags: Vec::new(), created: chrono::Utc::now(), updated: None, description: None,
+                tags: Vec::new(), created: chrono::Utc::now(), updated: None, description: None, instructions: None,
                 due_date: chrono::NaiveDate::from_ymd_opt(2026, 1, 5), project: None, recurrence: None,
                 notes: Vec::new(), agent: None, effort: None, work_status: None,
             });
@@ -1567,7 +1574,7 @@ mod tests {
             let mut tf = crate::task::TaskFile::new();
             tf.tasks.push(crate::task::Task {
                 id: 1, title: "Has an agent".to_string(), status: Status::Open, priority: crate::task::Priority::Medium,
-                tags: Vec::new(), created: chrono::Utc::now(), updated: None, description: None,
+                tags: Vec::new(), created: chrono::Utc::now(), updated: None, description: None, instructions: None,
                 due_date: None, project: None, recurrence: None, notes: Vec::new(),
                 agent: Some("bot".to_string()), effort: None, work_status: None,
             });
@@ -1599,7 +1606,7 @@ mod tests {
             let mut tf = crate::task::TaskFile::new();
             tf.tasks.push(crate::task::Task {
                 id: 1, title: "Track me".to_string(), status: Status::Open, priority: crate::task::Priority::Medium,
-                tags: Vec::new(), created: chrono::Utc::now(), updated: None, description: None,
+                tags: Vec::new(), created: chrono::Utc::now(), updated: None, description: None, instructions: None,
                 due_date: None, project: None, recurrence: None, notes: Vec::new(), agent: None, effort: None,
                 work_status: None,
             });
@@ -1645,7 +1652,7 @@ mod tests {
             let mut tf = crate::task::TaskFile::new();
             tf.tasks.push(crate::task::Task {
                 id: 1, title: "Ship it".to_string(), status: Status::Open, priority: crate::task::Priority::Medium,
-                tags: Vec::new(), created: chrono::Utc::now(), updated: None, description: None,
+                tags: Vec::new(), created: chrono::Utc::now(), updated: None, description: None, instructions: None,
                 due_date: None, project: Some(repo.path().to_string_lossy().to_string()), recurrence: None,
                 notes: Vec::new(), agent: None, effort: None, work_status: None,
             });
@@ -1686,7 +1693,7 @@ mod tests {
             let mut tf = crate::task::TaskFile::new();
             tf.tasks.push(crate::task::Task {
                 id: 1, title: "No project here".to_string(), status: Status::Open, priority: crate::task::Priority::Medium,
-                tags: Vec::new(), created: chrono::Utc::now(), updated: None, description: None,
+                tags: Vec::new(), created: chrono::Utc::now(), updated: None, description: None, instructions: None,
                 due_date: None, project: None, recurrence: None, notes: Vec::new(), agent: None, effort: None,
                 work_status: None,
             });
@@ -1719,7 +1726,7 @@ mod tests {
             let mut tf = crate::task::TaskFile::new();
             tf.tasks.push(crate::task::Task {
                 id: 1, title: "Track me".to_string(), status: Status::Open, priority: crate::task::Priority::Medium,
-                tags: Vec::new(), created: chrono::Utc::now(), updated: None, description: None,
+                tags: Vec::new(), created: chrono::Utc::now(), updated: None, description: None, instructions: None,
                 due_date: None, project: None, recurrence: None, notes: Vec::new(), agent: None, effort: None,
                 work_status: None,
             });
@@ -1749,7 +1756,7 @@ mod tests {
             let mut tf = crate::task::TaskFile::new();
             tf.tasks.push(crate::task::Task {
                 id: 1, title: "Track me".to_string(), status: Status::Open, priority: crate::task::Priority::Medium,
-                tags: Vec::new(), created: chrono::Utc::now(), updated: None, description: None,
+                tags: Vec::new(), created: chrono::Utc::now(), updated: None, description: None, instructions: None,
                 due_date: None, project: None, recurrence: None, notes: Vec::new(), agent: None, effort: None,
                 work_status: Some(crate::task::WorkStatus::Complete),
             });
@@ -1781,7 +1788,7 @@ mod tests {
             let mut tf = crate::task::TaskFile::new();
             tf.tasks.push(crate::task::Task {
                 id: 1, title: "Recur me".to_string(), status: Status::Open, priority: crate::task::Priority::Medium,
-                tags: Vec::new(), created: chrono::Utc::now(), updated: None, description: None,
+                tags: Vec::new(), created: chrono::Utc::now(), updated: None, description: None, instructions: None,
                 due_date: None, project: None, recurrence: None, notes: Vec::new(), agent: None, effort: None,
                 work_status: None,
             });
@@ -1813,7 +1820,7 @@ mod tests {
             let mut tf = crate::task::TaskFile::new();
             tf.tasks.push(crate::task::Task {
                 id: 1, title: "Recur me".to_string(), status: Status::Open, priority: crate::task::Priority::Medium,
-                tags: Vec::new(), created: chrono::Utc::now(), updated: None, description: None,
+                tags: Vec::new(), created: chrono::Utc::now(), updated: None, description: None, instructions: None,
                 due_date: None, project: None, recurrence: None, notes: Vec::new(), agent: None, effort: None,
                 work_status: None,
             });
@@ -1843,7 +1850,7 @@ mod tests {
             let mut tf = crate::task::TaskFile::new();
             tf.tasks.push(crate::task::Task {
                 id: 1, title: "Recur me".to_string(), status: Status::Open, priority: crate::task::Priority::Medium,
-                tags: Vec::new(), created: chrono::Utc::now(), updated: None, description: None,
+                tags: Vec::new(), created: chrono::Utc::now(), updated: None, description: None, instructions: None,
                 due_date: None, project: None,
                 recurrence: Some(crate::task::Recurrence::from_str("weekly").unwrap()),
                 notes: Vec::new(), agent: None, effort: None, work_status: None,
@@ -1896,7 +1903,7 @@ mod tests {
             let mut tf = crate::task::TaskFile::new();
             tf.tasks.push(crate::task::Task {
                 id: 1, title: "Finish me".to_string(), status: Status::Open, priority: crate::task::Priority::Medium,
-                tags: Vec::new(), created: chrono::Utc::now(), updated: None, description: None,
+                tags: Vec::new(), created: chrono::Utc::now(), updated: None, description: None, instructions: None,
                 due_date: None, project: None, recurrence: None, notes: Vec::new(), agent: None, effort: None, work_status: None,
             });
             db::save(&state.db_path, &tf).unwrap();
@@ -1926,7 +1933,7 @@ mod tests {
             let mut tf = crate::task::TaskFile::new();
             tf.tasks.push(crate::task::Task {
                 id: 1, title: "Recurring".to_string(), status: Status::Open, priority: crate::task::Priority::Medium,
-                tags: Vec::new(), created: chrono::Utc::now(), updated: None, description: None,
+                tags: Vec::new(), created: chrono::Utc::now(), updated: None, description: None, instructions: None,
                 due_date: chrono::NaiveDate::from_ymd_opt(2026, 1, 5), project: None,
                 recurrence: Some(crate::task::Recurrence::from_str("weekly").unwrap()),
                 notes: Vec::new(), agent: None, effort: None, work_status: None,
@@ -1959,7 +1966,7 @@ mod tests {
             let mut tf = crate::task::TaskFile::new();
             tf.tasks.push(crate::task::Task {
                 id: 1, title: "Recurring".to_string(), status: Status::Open, priority: crate::task::Priority::Medium,
-                tags: Vec::new(), created: chrono::Utc::now(), updated: None, description: None,
+                tags: Vec::new(), created: chrono::Utc::now(), updated: None, description: None, instructions: None,
                 due_date: chrono::NaiveDate::from_ymd_opt(2026, 1, 5), project: None,
                 recurrence: Some(crate::task::Recurrence::from_str("weekly").unwrap()),
                 notes: Vec::new(), agent: Some("bot".to_string()), effort: None, work_status: None,
@@ -1990,7 +1997,7 @@ mod tests {
             let mut tf = crate::task::TaskFile::new();
             tf.tasks.push(crate::task::Task {
                 id: 1, title: "Recurring".to_string(), status: Status::Open, priority: crate::task::Priority::Medium,
-                tags: Vec::new(), created: chrono::Utc::now(), updated: None, description: None,
+                tags: Vec::new(), created: chrono::Utc::now(), updated: None, description: None, instructions: None,
                 due_date: chrono::NaiveDate::from_ymd_opt(2026, 1, 5), project: None,
                 recurrence: Some(crate::task::Recurrence::from_str("weekly").unwrap()),
                 notes: Vec::new(), agent: None, effort: None, work_status: None,
@@ -2040,7 +2047,7 @@ mod tests {
             let mut tf = crate::task::TaskFile::new();
             tf.tasks.push(crate::task::Task {
                 id: 1, title: "Reopen me".to_string(), status: Status::Done, priority: crate::task::Priority::Medium,
-                tags: Vec::new(), created: chrono::Utc::now(), updated: None, description: None,
+                tags: Vec::new(), created: chrono::Utc::now(), updated: None, description: None, instructions: None,
                 due_date: None, project: None, recurrence: None, notes: Vec::new(), agent: None, effort: None, work_status: None,
             });
             db::save(&state.db_path, &tf).unwrap();
@@ -2069,7 +2076,7 @@ mod tests {
             let mut tf = crate::task::TaskFile::new();
             tf.tasks.push(crate::task::Task {
                 id: 1, title: "Doomed".to_string(), status: Status::Open, priority: crate::task::Priority::Medium,
-                tags: Vec::new(), created: chrono::Utc::now(), updated: None, description: None,
+                tags: Vec::new(), created: chrono::Utc::now(), updated: None, description: None, instructions: None,
                 due_date: None, project: None, recurrence: None, notes: Vec::new(), agent: None, effort: None, work_status: None,
             });
             db::save(&state.db_path, &tf).unwrap();
@@ -2137,7 +2144,7 @@ mod tests {
             let mut tf = crate::task::TaskFile::new();
             tf.tasks.push(crate::task::Task {
                 id: 1, title: "Has notes".to_string(), status: Status::Open, priority: crate::task::Priority::Medium,
-                tags: Vec::new(), created: chrono::Utc::now(), updated: None, description: None,
+                tags: Vec::new(), created: chrono::Utc::now(), updated: None, description: None, instructions: None,
                 due_date: None, project: None, recurrence: None,
                 notes: vec!["oldest".to_string(), "newest".to_string(), "middle".to_string()],
                 agent: None, effort: None, work_status: None,
@@ -2182,7 +2189,7 @@ mod tests {
         let mut tf = crate::task::TaskFile::new();
         tf.tasks.push(crate::task::Task {
             id: 1, title: "Has note".to_string(), status: Status::Open, priority: crate::task::Priority::Medium,
-            tags: Vec::new(), created: chrono::Utc::now(), updated: None, description: None,
+            tags: Vec::new(), created: chrono::Utc::now(), updated: None, description: None, instructions: None,
             due_date: None, project: None, recurrence: None,
             notes: vec!["linked".to_string()],
             agent: None, effort: None, work_status: None,
@@ -2231,7 +2238,7 @@ mod tests {
             let mut tf = crate::task::TaskFile::new();
             tf.tasks.push(crate::task::Task {
                 id: 1, title: "Has notes".to_string(), status: Status::Open, priority: crate::task::Priority::Medium,
-                tags: Vec::new(), created: chrono::Utc::now(), updated: None, description: None,
+                tags: Vec::new(), created: chrono::Utc::now(), updated: None, description: None, instructions: None,
                 due_date: None, project: None, recurrence: None, notes: vec!["real-note".to_string()], agent: None, effort: None, work_status: None,
             });
             db::save(&state.db_path, &tf).unwrap();
@@ -2258,7 +2265,7 @@ mod tests {
             let mut tf = crate::task::TaskFile::new();
             tf.tasks.push(crate::task::Task {
                 id: 1, title: "Has no thread yet".to_string(), status: Status::Open, priority: crate::task::Priority::Medium,
-                tags: Vec::new(), created: chrono::Utc::now(), updated: None, description: None,
+                tags: Vec::new(), created: chrono::Utc::now(), updated: None, description: None, instructions: None,
                 due_date: None, project: None, recurrence: None, notes: Vec::new(), agent: None, effort: None, work_status: None,
             });
             db::save(&state.db_path, &tf).unwrap();
@@ -2286,7 +2293,7 @@ mod tests {
             let mut tf = crate::task::TaskFile::new();
             tf.tasks.push(crate::task::Task {
                 id: 1, title: "No question yet".to_string(), status: Status::Open, priority: crate::task::Priority::Medium,
-                tags: Vec::new(), created: chrono::Utc::now(), updated: None, description: None,
+                tags: Vec::new(), created: chrono::Utc::now(), updated: None, description: None, instructions: None,
                 due_date: None, project: None, recurrence: None, notes: Vec::new(), agent: None, effort: None, work_status: None,
             });
             db::save(&state.db_path, &tf).unwrap();
@@ -2331,7 +2338,7 @@ mod tests {
             let mut tf = crate::task::TaskFile::new();
             tf.tasks.push(crate::task::Task {
                 id: 1, title: "Needs input".to_string(), status: Status::Open, priority: crate::task::Priority::Medium,
-                tags: Vec::new(), created: chrono::Utc::now(), updated: None, description: None,
+                tags: Vec::new(), created: chrono::Utc::now(), updated: None, description: None, instructions: None,
                 due_date: None, project: None, recurrence: None, notes: vec!["task-1-question".to_string()],
                 agent: Some("bot".to_string()), effort: None, work_status: Some(crate::task::WorkStatus::NeedsInput),
             });
@@ -2367,7 +2374,7 @@ mod tests {
     fn needs_input_task() -> crate::task::Task {
         crate::task::Task {
             id: 1, title: "Blocked".to_string(), status: Status::Open, priority: crate::task::Priority::Medium,
-            tags: Vec::new(), created: chrono::Utc::now(), updated: None, description: None,
+            tags: Vec::new(), created: chrono::Utc::now(), updated: None, description: None, instructions: None,
             due_date: None, project: None, recurrence: None, notes: vec!["task-1-question".to_string()],
             agent: Some("bot".to_string()), effort: None, work_status: Some(crate::task::WorkStatus::NeedsInput),
         }
@@ -2439,7 +2446,7 @@ mod tests {
             let mut tf = crate::task::TaskFile::new();
             tf.tasks.push(crate::task::Task {
                 id: 1, title: "Waiting on review".to_string(), status: Status::Open, priority: crate::task::Priority::Medium,
-                tags: Vec::new(), created: chrono::Utc::now(), updated: None, description: None,
+                tags: Vec::new(), created: chrono::Utc::now(), updated: None, description: None, instructions: None,
                 due_date: None, project: None, recurrence: None, notes: Vec::new(), agent: Some("bot".to_string()),
                 effort: None, work_status: Some(crate::task::WorkStatus::WaitingForReview),
             });
@@ -2477,7 +2484,7 @@ mod tests {
             let mut tf = crate::task::TaskFile::new();
             tf.tasks.push(crate::task::Task {
                 id: 1, title: "Multi-round".to_string(), status: Status::Open, priority: crate::task::Priority::Medium,
-                tags: Vec::new(), created: chrono::Utc::now(), updated: None, description: None,
+                tags: Vec::new(), created: chrono::Utc::now(), updated: None, description: None, instructions: None,
                 due_date: None, project: None, recurrence: None, notes: Vec::new(), agent: None, effort: None, work_status: None,
             });
             db::save(&state.db_path, &tf).unwrap();
@@ -2527,7 +2534,7 @@ mod tests {
             let mut tf = crate::task::TaskFile::new();
             tf.tasks.push(crate::task::Task {
                 id: 1, title: "T".to_string(), status: Status::Open, priority: crate::task::Priority::Medium,
-                tags: Vec::new(), created: chrono::Utc::now(), updated: None, description: None,
+                tags: Vec::new(), created: chrono::Utc::now(), updated: None, description: None, instructions: None,
                 due_date: None, project: None, recurrence: None, notes: Vec::new(), agent: None, effort: None, work_status: None,
             });
             db::save(&state.db_path, &tf).unwrap();
@@ -2556,7 +2563,7 @@ mod tests {
             let mut tf = crate::task::TaskFile::new();
             tf.tasks.push(crate::task::Task {
                 id: 1, title: "T".to_string(), status: Status::Open, priority: crate::task::Priority::Medium,
-                tags: Vec::new(), created: chrono::Utc::now(), updated: None, description: None,
+                tags: Vec::new(), created: chrono::Utc::now(), updated: None, description: None, instructions: None,
                 due_date: None, project: None, recurrence: None, notes: Vec::new(), agent: None, effort: None, work_status: None,
             });
             db::save(&state.db_path, &tf).unwrap();
