@@ -56,6 +56,16 @@ export function VersionBadge() {
         return;
       }
       if (status.phase === 'idle') {
+        // A freshly re-exec'd server reports idle; reload if it is the new version.
+        try {
+          const v = await fetchVersion();
+          if (v.current === target) {
+            window.location.reload();
+            return;
+          }
+        } catch {
+          break; // server is mid-restart; wait for it below
+        }
         setBusy(false); // already up to date
         return;
       }
