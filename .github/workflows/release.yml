@@ -26,7 +26,7 @@ jobs:
         working-directory: web
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - run: cargo test
+      - run: cargo test --features tui
       - run: shellcheck install.sh tests/install_sh_test.sh
       - run: sh tests/install_sh_test.sh
 

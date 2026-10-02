@@ -5,6 +5,8 @@ fn task_bin() -> Command {
     Command::new(env!("CARGO_BIN_EXE_task"))
 }
 
+// `task-tui` is only built with `--features tui` (see `required-features` in Cargo.toml).
+#[cfg(feature = "tui")]
 fn task_tui_bin() -> Command {
     Command::new(env!("CARGO_BIN_EXE_task-tui"))
 }
@@ -35,6 +37,7 @@ fn test_tui_help() {
 }
 
 #[test]
+#[cfg(feature = "tui")]
 fn test_tui_fails_without_terminal() {
     // Running task-tui without a real terminal should fail gracefully.
     let dir = temp_dir();
@@ -311,6 +314,9 @@ fn test_auth_todoist_write_token_fails_gracefully() {
         .args(["auth", "todoist", "--token", "testtoken"])
         .current_dir(dir.path())
         .env("HOME", dir.path())
+        // On Linux `dirs::config_dir()` honors XDG_CONFIG_HOME over $HOME/.config; pin it to the
+        // sabotaged directory so the result doesn't depend on the runner's environment.
+        .env("XDG_CONFIG_HOME", &base_config)
         .output()
         .unwrap();
 
