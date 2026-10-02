@@ -26,6 +26,8 @@ pub struct AppState {
     /// by `crate::watch::spawn` in the task_server binary; in tests it's just
     /// an unused channel with no watcher attached.
     pub change_tx: tokio::sync::broadcast::Sender<()>,
+    /// Version cache, update status and the background update job.
+    pub update: Arc<crate::update_state::UpdateState>,
 }
 
 #[derive(Deserialize)]
@@ -914,8 +916,59 @@ pub fn router(state: AppState) -> Router {
     router_with_static(state, None)
 }
 
+#[derive(Serialize)]
+struct VersionResponse {
+    current: String,
+    latest: Option<String>,
+    update_available: bool,
+    update_supported: bool,
+}
+
+async fn get_version(State(state): State<Arc<AppState>>) -> Json<VersionResponse> {
+    let update = state.update.clone();
+    let latest = tokio::task::spawn_blocking(move || update.latest_version()).await.ok().flatten();
+    let current = crate::update::current_version();
+    let update_available = latest
+        .as_deref()
+        .and_then(|l| semver::Version::parse(l).ok())
+        .is_some_and(|l| crate::update::is_newer(&current, &l));
+    Json(VersionResponse {
+        current: current.to_string(),
+        latest,
+        update_available,
+        update_supported: state.update.supported,
+    })
+}
+
+async fn post_update(
+    State(state): State<Arc<AppState>>,
+    headers: axum::http::HeaderMap,
+) -> Result<StatusCode, (StatusCode, Json<serde_json::Value>)> {
+    // A cross-site page cannot set this header without a CORS preflight, which we never allow.
+    if headers.get("x-command-center").and_then(|v| v.to_str().ok()) != Some("update") {
+        return Err(app_error(StatusCode::FORBIDDEN, "missing X-Command-Center header"));
+    }
+    if !state.update.supported {
+        return Err(app_error(StatusCode::BAD_REQUEST, "updates are not supported for this build"));
+    }
+    if !state.update.try_begin() {
+        return Err(app_error(StatusCode::CONFLICT, "an update is already running"));
+    }
+    let update = state.update.clone();
+    let db_path = state.db_path.clone();
+    std::thread::spawn(move || crate::update_state::run_update_job(&update, &db_path));
+    Ok(StatusCode::ACCEPTED)
+}
+
+async fn get_update_status(State(state): State<Arc<AppState>>) -> Json<crate::update_state::StatusSnapshot> {
+    Json(state.update.status())
+}
+
 fn api_routes() -> Router<Arc<AppState>> {
     Router::new()
+        .route("/api/version", get(get_version))
+        .route("/api/update", axum::routing::post(post_update))
+        .route("/api/update/status", get(get_update_status))
         .route("/api/tasks", get(list_tasks).post(add_task))
         .route("/api/tasks/:id", get(get_task).patch(edit_task).delete(delete_task))
         .route("/api/tasks/:id/done", axum::routing::post(done_task))
@@ -982,6 +1035,7 @@ pub async fn serve(db_path: PathBuf) -> Result<(), String> {
         db_path,
         write_lock: Arc::new(tokio::sync::Mutex::new(())),
         change_tx,
+        update: Arc::new(crate::update_state::UpdateState::from_env()),
     });
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", port))
         .await
@@ -1001,7 +1055,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let db_path = dir.path().join("tasks.db");
         let notes_dir = dir.path().join("Notes");
-        (dir, AppState { db_path, notes_dir, write_lock: Arc::new(tokio::sync::Mutex::new(())), change_tx: tokio::sync::broadcast::channel(16).0 })
+        (dir, AppState { db_path, notes_dir, write_lock: Arc::new(tokio::sync::Mutex::new(())), change_tx: tokio::sync::broadcast::channel(16).0, update: Arc::new(crate::update_state::UpdateState::for_tests("http://127.0.0.1:1", false)) })
     }
 
     /// `TASK_CONFIG_FILE` is process-global, so tests that set it must not run concurrently
@@ -1266,7 +1320,7 @@ mod tests {
         let config_path = dir.path().join("config.md");
         std::fs::write(&config_path, "agent-bot: /code/bot\n").unwrap();
         unsafe { std::env::set_var("TASK_CONFIG_FILE", &config_path) };
-        let app = router(AppState { notes_dir: dir.path().join("Notes"), db_path, write_lock: Arc::new(tokio::sync::Mutex::new(())), change_tx: tokio::sync::broadcast::channel(16).0 });
+        let app = router(AppState { notes_dir: dir.path().join("Notes"), db_path, write_lock: Arc::new(tokio::sync::Mutex::new(())), change_tx: tokio::sync::broadcast::channel(16).0, update: Arc::new(crate::update_state::UpdateState::for_tests("http://127.0.0.1:1", false)) });
         let response = app
             .oneshot(
                 Request::builder()
@@ -1292,7 +1346,7 @@ mod tests {
         let config_path = dir.path().join("config.md");
         std::fs::write(&config_path, "agent-bot: /code/bot\n").unwrap();
         unsafe { std::env::set_var("TASK_CONFIG_FILE", &config_path) };
-        let app = router(AppState { notes_dir: dir.path().join("Notes"), db_path, write_lock: Arc::new(tokio::sync::Mutex::new(())), change_tx: tokio::sync::broadcast::channel(16).0 });
+        let app = router(AppState { notes_dir: dir.path().join("Notes"), db_path, write_lock: Arc::new(tokio::sync::Mutex::new(())), change_tx: tokio::sync::broadcast::channel(16).0, update: Arc::new(crate::update_state::UpdateState::for_tests("http://127.0.0.1:1", false)) });
 
         let response = app
             .clone()
@@ -1353,7 +1407,7 @@ mod tests {
         let config_path = dir.path().join("config.md");
         std::fs::write(&config_path, "agent-bot: /code/bot\n").unwrap();
         unsafe { std::env::set_var("TASK_CONFIG_FILE", &config_path) };
-        let app = router(AppState { notes_dir: dir.path().join("Notes"), db_path, write_lock: Arc::new(tokio::sync::Mutex::new(())), change_tx: tokio::sync::broadcast::channel(16).0 });
+        let app = router(AppState { notes_dir: dir.path().join("Notes"), db_path, write_lock: Arc::new(tokio::sync::Mutex::new(())), change_tx: tokio::sync::broadcast::channel(16).0, update: Arc::new(crate::update_state::UpdateState::for_tests("http://127.0.0.1:1", false)) });
 
         let body = serde_json::json!({ "body": "Remembered fact." });
         let response = app
@@ -1398,7 +1452,7 @@ mod tests {
         let config_path = dir.path().join("config.md");
         std::fs::write(&config_path, "agent-bot: /code/bot\n").unwrap();
         unsafe { std::env::set_var("TASK_CONFIG_FILE", &config_path) };
-        let app = router(AppState { notes_dir: dir.path().join("Notes"), db_path, write_lock: Arc::new(tokio::sync::Mutex::new(())), change_tx: tokio::sync::broadcast::channel(16).0 });
+        let app = router(AppState { notes_dir: dir.path().join("Notes"), db_path, write_lock: Arc::new(tokio::sync::Mutex::new(())), change_tx: tokio::sync::broadcast::channel(16).0, update: Arc::new(crate::update_state::UpdateState::for_tests("http://127.0.0.1:1", false)) });
         let response = app
             .oneshot(
                 Request::builder()
@@ -1423,6 +1477,7 @@ mod tests {
             notes_dir: dir.path().join("Notes"),
             write_lock: Arc::new(tokio::sync::Mutex::new(())),
             change_tx: tokio::sync::broadcast::channel(16).0,
+            update: Arc::new(crate::update_state::UpdateState::for_tests("http://127.0.0.1:1", false)),
         };
         let app = router(state);
         let response = app
@@ -2571,5 +2626,82 @@ mod tests {
             .oneshot(Request::builder().uri("/").header("host", "evil.com").body(Body::empty()).unwrap())
             .await.unwrap();
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    fn get_req(uri: &str) -> Request<Body> {
+        Request::builder().uri(uri).header("host", "127.0.0.1").body(Body::empty()).unwrap()
+    }
+
+    fn post_update_req(with_header: bool) -> Request<Body> {
+        let mut b = Request::builder().method("POST").uri("/api/update").header("host", "127.0.0.1");
+        if with_header {
+            b = b.header("x-command-center", "update");
+        }
+        b.body(Body::empty()).unwrap()
+    }
+
+    #[tokio::test]
+    async fn test_version_reports_newer_release_but_unsupported_in_test_builds() {
+        let (_dir, mut state) = make_state();
+        let mut server = mockito::Server::new_async().await;
+        server.mock("GET", "/releases/latest").with_status(200)
+            .with_body(r#"{"tag_name":"v99.0.0","assets":[]}"#).create_async().await;
+        state.update = Arc::new(crate::update_state::UpdateState::for_tests(&server.url(), false));
+        let response = router(state).oneshot(get_req("/api/version")).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let json = body_json(response).await;
+        assert_eq!(json["current"], env!("CARGO_PKG_VERSION"));
+        assert_eq!(json["latest"], "99.0.0");
+        assert_eq!(json["update_available"], true);
+        assert_eq!(json["update_supported"], false);
+    }
+
+    #[tokio::test]
+    async fn test_version_survives_rate_limited_release_api() {
+        let (_dir, mut state) = make_state();
+        let mut server = mockito::Server::new_async().await;
+        server.mock("GET", "/releases/latest").with_status(403).create_async().await;
+        state.update = Arc::new(crate::update_state::UpdateState::for_tests(&server.url(), true));
+        let response = router(state).oneshot(get_req("/api/version")).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let json = body_json(response).await;
+        assert!(json["latest"].is_null());
+        assert_eq!(json["update_available"], false);
+    }
+
+    #[tokio::test]
+    async fn test_post_update_without_custom_header_is_403() {
+        let (_dir, mut state) = make_state();
+        state.update = Arc::new(crate::update_state::UpdateState::for_tests("http://127.0.0.1:1", true));
+        let update = state.update.clone();
+        let response = router(state).oneshot(post_update_req(false)).await.unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        assert_eq!(update.status().phase, crate::update::Phase::Idle);
+    }
+
+    #[tokio::test]
+    async fn test_post_update_unsupported_build_is_400() {
+        let (_dir, state) = make_state(); // for_tests(.., supported = false)
+        let response = router(state).oneshot(post_update_req(true)).await.unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn test_post_update_while_running_is_409() {
+        let (_dir, mut state) = make_state();
+        state.update = Arc::new(crate::update_state::UpdateState::for_tests("http://127.0.0.1:1", true));
+        assert!(state.update.try_begin()); // an update is "already running"
+        let response = router(state).oneshot(post_update_req(true)).await.unwrap();
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+    }
+
+    #[tokio::test]
+    async fn test_update_status_reports_phase_and_typed_error() {
+        let (_dir, state) = make_state();
+        state.update.fail(&crate::update::UpdateError::NoPlatformAsset("x".into()));
+        let response = router(state).oneshot(get_req("/api/update/status")).await.unwrap();
+        let json = body_json(response).await;
+        assert_eq!(json["phase"], "failed");
+        assert_eq!(json["error"]["kind"], "no_platform_asset");
     }
 }
