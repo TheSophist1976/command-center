@@ -285,6 +285,17 @@ fn server_is_running() -> bool {
     std::net::TcpStream::connect_timeout(&std::net::SocketAddr::from(([127, 0, 0, 1], port)), Duration::from_millis(200)).is_ok()
 }
 
+fn ensure_installed_location(exe: &Path) -> Result<(), String> {
+    if crate::update_state::path_looks_installed(exe) {
+        Ok(())
+    } else {
+        Err(format!(
+            "This `task` binary is running from a build directory ({}), not an installed release; install a release with install.sh, or rebuild from source instead of running `task update`.",
+            exe.display()
+        ))
+    }
+}
+
 /// `task update` / `task update --check`.
 pub fn run_cli(check_only: bool) -> Result<(), String> {
     let api = releases_api();
@@ -300,6 +311,7 @@ pub fn run_cli(check_only: bool) -> Result<(), String> {
     }
 
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+    ensure_installed_location(&exe)?;
     let install_dir = exe.parent().ok_or("Cannot locate the install directory")?.to_path_buf();
     let outcome = perform_update(&api, &install_dir, &mut |p| {
         println!("▸ {}…", format!("{:?}", p).to_lowercase());
@@ -337,6 +349,14 @@ mod tests {
     fn parse_version_rejects_junk_with_typed_error() {
         assert!(matches!(parse_version("nightly"), Err(UpdateError::BadRelease(_))));
         assert!(matches!(parse_version(""), Err(UpdateError::BadRelease(_))));
+    }
+
+    #[test]
+    fn ensure_installed_location_rejects_build_directories() {
+        assert!(ensure_installed_location(Path::new("/home/me/.local/bin/task")).is_ok());
+        let err = ensure_installed_location(Path::new("/code/command-center/target/release/task")).unwrap_err();
+        assert!(err.contains("not an installed release"));
+        assert!(ensure_installed_location(Path::new("/x/target/debug/task")).is_err());
     }
 
     #[test]
