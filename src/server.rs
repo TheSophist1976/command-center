@@ -914,9 +914,8 @@ pub fn router(state: AppState) -> Router {
     router_with_static(state, None)
 }
 
-pub fn router_with_static(state: AppState, static_dir: Option<std::path::PathBuf>) -> Router {
-    let state = Arc::new(state);
-    let mut app = Router::new()
+fn api_routes() -> Router<Arc<AppState>> {
+    Router::new()
         .route("/api/tasks", get(list_tasks).post(add_task))
         .route("/api/tasks/:id", get(get_task).patch(edit_task).delete(delete_task))
         .route("/api/tasks/:id/done", axum::routing::post(done_task))
@@ -929,13 +928,65 @@ pub fn router_with_static(state: AppState, static_dir: Option<std::path::PathBuf
         .route("/api/agents", get(list_agents))
         .route("/api/agents/:name/instructions", get(get_agent_instructions).put(edit_agent_instructions))
         .route("/api/agents/:name/memory", get(get_agent_memory).put(edit_agent_memory))
-        .route("/api/events", get(task_events));
+        .route("/api/events", get(task_events))
+}
 
+pub fn router_with_static(state: AppState, static_dir: Option<std::path::PathBuf>) -> Router {
+    let mut app = api_routes();
     if let Some(dir) = static_dir {
         app = app.fallback_service(tower_http::services::ServeDir::new(dir));
     }
+    app.layer(middleware::from_fn(validate_host)).with_state(Arc::new(state))
+}
 
-    app.layer(middleware::from_fn(validate_host)).with_state(state)
+/// Serves the web UI embedded in the binary (read from `web/dist` in debug builds).
+pub fn router_embedded(state: AppState) -> Router {
+    api_routes()
+        .fallback(embedded_handler)
+        .layer(middleware::from_fn(validate_host))
+        .with_state(Arc::new(state))
+}
+
+async fn embedded_handler(uri: axum::http::Uri) -> Response {
+    let path = uri.path().trim_start_matches('/');
+    let path = if path.is_empty() { "index.html" } else { path };
+    match crate::assets::web_asset(path) {
+        Some((bytes, mime)) => ([(axum::http::header::CONTENT_TYPE, mime)], bytes).into_response(),
+        None => StatusCode::NOT_FOUND.into_response(),
+    }
+}
+
+/// Runs the web server in the foreground until the process exits.
+pub async fn serve(db_path: PathBuf) -> Result<(), String> {
+    db::backup_daily(&db_path);
+    let notes_dir = db::resolve_notes_dir(&db_path);
+    let port: u16 = std::env::var("TASK_SERVER_PORT")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(4287);
+
+    println!("task serve: serving {} on http://127.0.0.1:{}", db_path.display(), port);
+
+    let (change_tx, _) = tokio::sync::broadcast::channel(16);
+    // Held for the lifetime of the process — dropping it would stop the watch.
+    let _watcher = match crate::watch::spawn(db_path.clone(), change_tx.clone()) {
+        Ok(w) => Some(w),
+        Err(e) => {
+            eprintln!("task serve: failed to watch {} for changes — live updates disabled: {}", db_path.display(), e);
+            None
+        }
+    };
+
+    let app = router_embedded(AppState {
+        notes_dir,
+        db_path,
+        write_lock: Arc::new(tokio::sync::Mutex::new(())),
+        change_tx,
+    });
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", port))
+        .await
+        .map_err(|e| format!("Failed to bind 127.0.0.1:{}: {}", port, e))?;
+    axum::serve(listener, app).await.map_err(|e| e.to_string())
 }
 
 #[cfg(test)]
@@ -2497,5 +2548,28 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
         let bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
         assert_eq!(bytes, "<html>hi</html>".as_bytes());
+    }
+
+    #[tokio::test]
+    async fn test_embedded_router_unknown_asset_is_404_and_api_still_works() {
+        let (_dir, state) = make_state();
+        let app = router_embedded(state);
+        let missing = app.clone()
+            .oneshot(Request::builder().uri("/no-such-file.js").header("host", "127.0.0.1").body(Body::empty()).unwrap())
+            .await.unwrap();
+        assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+        let api = app
+            .oneshot(Request::builder().uri("/api/tasks").header("host", "127.0.0.1").body(Body::empty()).unwrap())
+            .await.unwrap();
+        assert_eq!(api.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn test_embedded_router_still_rejects_spoofed_host() {
+        let (_dir, state) = make_state();
+        let response = router_embedded(state)
+            .oneshot(Request::builder().uri("/").header("host", "evil.com").body(Body::empty()).unwrap())
+            .await.unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
     }
 }

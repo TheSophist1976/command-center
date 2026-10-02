@@ -19,9 +19,24 @@ fn main() {
 
 fn run(cli: Cli) -> Result<(), (i32, String)> {
     let path = task::db::resolve_file_path(cli.file.as_deref());
+
+    // Early-dispatch commands that must run before the daily backup.
+    match &cli.command {
+        Some(Command::Serve) => {
+            let runtime = tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+                .map_err(|e| (1, e.to_string()))?;
+            return runtime.block_on(task::server::serve(path)).map_err(|e| (1, e));
+        }
+        _ => {}
+    }
+
     task::db::backup_daily(&path);
 
     match cli.command {
+        Some(Command::Serve) => unreachable!("handled above"),
+
         None | Some(Command::Tui) => {
             eprintln!("Use task-tui to launch the interactive terminal UI.");
             Ok(())

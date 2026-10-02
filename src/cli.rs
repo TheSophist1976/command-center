@@ -15,6 +15,8 @@ pub struct Cli {
 pub enum Command {
     /// Launch interactive terminal UI
     Tui,
+    /// Run the web UI server (foreground, http://127.0.0.1:4287)
+    Serve,
 
     /// Authenticate with external services
     Auth {
