@@ -15,6 +15,23 @@ pub struct Cli {
 pub enum Command {
     /// Launch interactive terminal UI
     Tui,
+    /// Run the web UI server (foreground, http://127.0.0.1:4287)
+    Serve,
+    /// Configure task directories and install AGENTS.md and Claude skills
+    Setup,
+    /// Update task to the latest release
+    Update {
+        /// Only report whether an update is available
+        #[arg(long)]
+        check: bool,
+    },
+    /// Re-install AGENTS.md and Claude skills from this binary (used by `task update`)
+    #[command(hide = true)]
+    RefreshFiles {
+        /// Leave user-edited files alone instead of asking
+        #[arg(long)]
+        skip_edited: bool,
+    },
 
     /// Authenticate with external services
     Auth {

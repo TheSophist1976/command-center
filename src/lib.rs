@@ -1,11 +1,17 @@
+pub mod assets;
 pub mod auth;
 pub mod cli;
 pub mod commands;
 pub mod config;
 pub mod db;
+pub mod managed;
 pub mod note;
 pub mod parser;
+pub mod prompt;
 pub mod server;
+pub mod setup;
+pub mod update;
+pub mod update_state;
 pub mod task;
 pub mod watch;
 

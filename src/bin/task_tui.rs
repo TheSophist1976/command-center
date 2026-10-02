@@ -346,5 +346,10 @@ fn run(cli: Cli) -> Result<(), (i32, String)> {
             println!("{}", task::commands::rm(&path, id)?);
             Ok(())
         }
+
+        // These subcommands are only handled by the `task` binary.
+        Some(Command::Serve | Command::Setup | Command::RefreshFiles { .. } | Command::Update { .. }) => {
+            Err((2, "this subcommand is only available in the `task` binary".to_string()))
+        }
     }
 }

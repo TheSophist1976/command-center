@@ -4,6 +4,8 @@
 
 This document describes how to work with tasks via the `task` CLI (tasks are stored in a SQLite database, `tasks.db`), and how to find the tasks assigned to you.
 
+This file is installed into your task directory by `task setup` and refreshed by `task update`; edit the copy in the source repo, not the installed one.
+
 ---
 
 ## Finding Your Agent Profile

@@ -2,7 +2,31 @@
 
 A fast CLI task manager for developers and AI agents. Tasks are stored in a local SQLite database (`tasks.db`). Notes remain plain Markdown files alongside it.
 
-## Build
+## Install
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/TheSophist1976/command-center-releases/main/install.sh | sh
+task setup     # choose your task/notes directories; installs AGENTS.md and Claude skills
+task serve     # web UI at http://127.0.0.1:4287
+```
+
+The one-liner downloads prebuilt binaries from the `TheSophist1976/command-center-releases` repo. The install one-liner works once the first release has been published to the releases repo; until then, build from source (see Develop from source below).
+
+`task serve` serves the web UI embedded in the binary (no separate frontend build needed). Set `TASK_SERVER_PORT` to override the default port.
+
+## Update
+
+```sh
+task update            # or: task update --check
+```
+
+`task update --check` only reports whether a newer release exists; it does not install anything.
+
+The web UI also shows the running version and an **Update** button when a newer release exists. It restarts the server automatically (about a second of downtime).
+
+## Develop from source
+
+### Build
 
 Requires [Rust](https://rustup.rs/) (1.75+).
 
