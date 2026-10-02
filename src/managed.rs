@@ -84,7 +84,11 @@ pub fn install_managed_files(
         };
 
         if overwrite {
-            write_file(dest, contents)?;
+            if let Err(e) = write_file(dest, contents) {
+                // Keep bookkeeping for files already written this run.
+                let _ = save_manifest(manifest_path, &manifest);
+                return Err(e);
+            }
             manifest.insert(key, new_hash);
             report.installed.push(dest.clone());
         } else {
@@ -200,6 +204,20 @@ mod tests {
         let report = install_managed_files(&f, &manifest, &mut EditedPolicy::Skip).unwrap();
         assert_eq!(report.skipped_edited.len(), 1);
         assert_eq!(std::fs::read_to_string(&f[0].0).unwrap(), "hand-written");
+    }
+
+    #[test]
+    fn manifest_progress_is_persisted_when_a_later_write_fails() {
+        let dir = tempdir().unwrap();
+        let manifest = dir.path().join("installed-files.json");
+        let blocker = dir.path().join("blocker");
+        std::fs::write(&blocker, "i am a file").unwrap();
+        let first = dir.path().join("ok").join("a.md");
+        let second = blocker.join("b.md");
+        let f = vec![(first.clone(), b"one".to_vec()), (second, b"two".to_vec())];
+        assert!(install_managed_files(&f, &manifest, &mut EditedPolicy::Skip).is_err());
+        let recorded = load_manifest(&manifest);
+        assert_eq!(recorded.get(&first.to_string_lossy().to_string()), Some(&sha256_hex(b"one")));
     }
 
     #[test]
