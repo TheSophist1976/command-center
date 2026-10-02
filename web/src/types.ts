@@ -11,6 +11,7 @@ export interface Task {
   created: string;
   updated?: string;
   description?: string;
+  instructions?: string;
   due_date?: string;
   project?: string;
   recurrence?: string;

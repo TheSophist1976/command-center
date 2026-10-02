@@ -23,6 +23,7 @@ pub struct AddArgs {
     pub tags: Option<String>,
     pub agent: Option<String>,
     pub description: Option<String>,
+    pub instructions: Option<String>,
 }
 
 pub struct ListArgs {
@@ -41,6 +42,7 @@ pub struct EditArgs {
     pub tags: Option<String>,
     pub agent: Option<String>,
     pub description: Option<String>,
+    pub instructions: Option<String>,
     pub effort: Option<String>,
     pub work_status: Option<String>,
     pub recur: Option<String>,
@@ -64,6 +66,7 @@ pub fn add(path: &Path, args: AddArgs) -> Result<String, (i32, String)> {
         created: Utc::now(),
         updated: None,
         description: args.description,
+        instructions: args.instructions,
         due_date,
         project: args.project,
         recurrence: None,
@@ -188,6 +191,11 @@ pub fn show(path: &Path, id: u32) -> Result<String, (i32, String)> {
         out.push_str(desc);
         out.push('\n');
     }
+    if let Some(ref ins) = t.instructions {
+        out.push_str("\n## Instructions\n");
+        out.push_str(ins);
+        out.push('\n');
+    }
     Ok(out.trim_end().to_string())
 }
 
@@ -228,6 +236,9 @@ pub fn edit(path: &Path, id: u32, args: EditArgs) -> Result<String, (i32, String
     }
     if let Some(d) = args.description {
         t.description = Some(d);
+    }
+    if let Some(i) = args.instructions {
+        t.instructions = if i.is_empty() { None } else { Some(i) };
     }
     if let Some(e) = effort {
         t.effort = Some(e);
@@ -275,6 +286,7 @@ pub fn done(path: &Path, id: u32) -> Result<String, (i32, String)> {
             created: Utc::now(),
             updated: None,
             description: parent.description.clone(),
+            instructions: parent.instructions.clone(),
             due_date: Some(next_due),
             project: parent.project.clone(),
             recurrence: Some(recur),
@@ -359,7 +371,7 @@ mod tests {
             tags: Vec::new(),
             created: Utc::now(),
             updated: None,
-            description: None,
+            description: None, instructions: None,
             due_date: None,
             project: None,
             recurrence: None,
@@ -380,7 +392,7 @@ mod tests {
             project: Some("Work".to_string()),
             tags: Some("a,b".to_string()),
             agent: Some("bot".to_string()),
-            description: Some("desc".to_string()),
+            description: Some("desc".to_string()), instructions: None,
         }).unwrap();
         assert!(msg.contains("Created task 1"));
 
@@ -395,7 +407,7 @@ mod tests {
         let (_dir, path) = setup();
         let err = add(&path, AddArgs {
             title: "X".to_string(), priority: "urgent".to_string(), due: None,
-            project: None, tags: None, agent: None, description: None,
+            project: None, tags: None, agent: None, description: None, instructions: None,
         }).unwrap_err();
         assert_eq!(err.0, 1);
         assert!(err.1.contains("Invalid priority"));
@@ -404,8 +416,8 @@ mod tests {
     #[test]
     fn test_list_filters_by_status_and_agent() {
         let (_dir, path) = setup();
-        add(&path, AddArgs { title: "Open task".to_string(), priority: "medium".to_string(), due: None, project: None, tags: None, agent: Some("bot".to_string()), description: None }).unwrap();
-        add(&path, AddArgs { title: "Other agent".to_string(), priority: "medium".to_string(), due: None, project: None, tags: None, agent: Some("human".to_string()), description: None }).unwrap();
+        add(&path, AddArgs { title: "Open task".to_string(), priority: "medium".to_string(), due: None, project: None, tags: None, agent: Some("bot".to_string()), description: None, instructions: None }).unwrap();
+        add(&path, AddArgs { title: "Other agent".to_string(), priority: "medium".to_string(), due: None, project: None, tags: None, agent: Some("human".to_string()), description: None, instructions: None }).unwrap();
         done(&path, 2).unwrap();
 
         let out = list(&path, ListArgs { status: Some("open".to_string()), agent: Some("bot".to_string()), project: None, tag: None, due_before: None }).unwrap();
@@ -423,11 +435,24 @@ mod tests {
     #[test]
     fn test_show_existing_task() {
         let (_dir, path) = setup();
-        add(&path, AddArgs { title: "Show me".to_string(), priority: "low".to_string(), due: None, project: None, tags: None, agent: None, description: Some("body text".to_string()) }).unwrap();
+        add(&path, AddArgs { title: "Show me".to_string(), priority: "low".to_string(), due: None, project: None, tags: None, agent: None, description: Some("body text".to_string()), instructions: None }).unwrap();
         let out = show(&path, 1).unwrap();
         assert!(out.contains("Show me"));
         assert!(out.contains("priority: low"));
         assert!(out.contains("body text"));
+    }
+
+    #[test]
+    fn test_instructions_add_show_edit_roundtrip() {
+        let (_dir, path) = setup();
+        add(&path, AddArgs { title: "Ins".to_string(), priority: "low".to_string(), due: None, project: None, tags: None, agent: None, description: Some("the desc".to_string()), instructions: Some("do step 1".to_string()) }).unwrap();
+        let out = show(&path, 1).unwrap();
+        assert!(out.contains("the desc"));
+        assert!(out.contains("## Instructions\ndo step 1"));
+        edit(&path, 1, EditArgs { title: None, priority: None, due: None, project: None, tags: None, agent: None, description: None, instructions: Some("do step 2".to_string()), effort: None, work_status: None, recur: None }).unwrap();
+        let tf = db::load(&path).unwrap();
+        assert_eq!(tf.tasks[0].instructions.as_deref(), Some("do step 2"));
+        assert_eq!(tf.tasks[0].description.as_deref(), Some("the desc"));
     }
 
     #[test]
@@ -441,8 +466,8 @@ mod tests {
     #[test]
     fn test_edit_updates_only_given_fields() {
         let (_dir, path) = setup();
-        add(&path, AddArgs { title: "Original".to_string(), priority: "medium".to_string(), due: None, project: None, tags: None, agent: None, description: None }).unwrap();
-        edit(&path, 1, EditArgs { title: None, priority: Some("critical".to_string()), due: None, project: None, tags: None, agent: None, description: None, effort: None, work_status: None, recur: None }).unwrap();
+        add(&path, AddArgs { title: "Original".to_string(), priority: "medium".to_string(), due: None, project: None, tags: None, agent: None, description: None, instructions: None }).unwrap();
+        edit(&path, 1, EditArgs { title: None, priority: Some("critical".to_string()), due: None, project: None, tags: None, agent: None, description: None, instructions: None, effort: None, work_status: None, recur: None }).unwrap();
 
         let tf = db::load(&path).unwrap();
         assert_eq!(tf.tasks[0].title, "Original");
@@ -453,14 +478,14 @@ mod tests {
     #[test]
     fn test_edit_missing_task_errors() {
         let (_dir, path) = setup();
-        let err = edit(&path, 1, EditArgs { title: Some("x".to_string()), priority: None, due: None, project: None, tags: None, agent: None, description: None, effort: None, work_status: None, recur: None }).unwrap_err();
+        let err = edit(&path, 1, EditArgs { title: Some("x".to_string()), priority: None, due: None, project: None, tags: None, agent: None, description: None, instructions: None, effort: None, work_status: None, recur: None }).unwrap_err();
         assert_eq!(err.0, 1);
     }
 
     #[test]
     fn test_done_marks_status_done() {
         let (_dir, path) = setup();
-        add(&path, AddArgs { title: "Finish me".to_string(), priority: "medium".to_string(), due: None, project: None, tags: None, agent: None, description: None }).unwrap();
+        add(&path, AddArgs { title: "Finish me".to_string(), priority: "medium".to_string(), due: None, project: None, tags: None, agent: None, description: None, instructions: None }).unwrap();
         let msg = done(&path, 1).unwrap();
         assert_eq!(msg, "Completed task 1");
 
@@ -471,7 +496,7 @@ mod tests {
     #[test]
     fn test_done_recurring_task_spawns_next_occurrence() {
         let (_dir, path) = setup();
-        add(&path, AddArgs { title: "Recurring".to_string(), priority: "medium".to_string(), due: Some("2026-01-05".to_string()), project: None, tags: None, agent: None, description: None }).unwrap();
+        add(&path, AddArgs { title: "Recurring".to_string(), priority: "medium".to_string(), due: Some("2026-01-05".to_string()), project: None, tags: None, agent: None, description: None, instructions: None }).unwrap();
         {
             let mut tf = db::load(&path).unwrap();
             tf.tasks[0].recurrence = Some(crate::task::Recurrence::from_str("weekly").unwrap());
@@ -497,7 +522,7 @@ mod tests {
         add(&path, AddArgs {
             title: "Recurring".to_string(), priority: "medium".to_string(),
             due: Some("2026-01-05".to_string()), project: None, tags: None,
-            agent: Some("bot".to_string()), description: None,
+            agent: Some("bot".to_string()), description: None, instructions: None,
         }).unwrap();
         {
             let mut tf = db::load(&path).unwrap();
@@ -515,7 +540,7 @@ mod tests {
     #[test]
     fn test_done_already_done_is_a_noop_message() {
         let (_dir, path) = setup();
-        add(&path, AddArgs { title: "T".to_string(), priority: "medium".to_string(), due: None, project: None, tags: None, agent: None, description: None }).unwrap();
+        add(&path, AddArgs { title: "T".to_string(), priority: "medium".to_string(), due: None, project: None, tags: None, agent: None, description: None, instructions: None }).unwrap();
         done(&path, 1).unwrap();
         let msg = done(&path, 1).unwrap();
         assert_eq!(msg, "Task 1 already done");
@@ -524,7 +549,7 @@ mod tests {
     #[test]
     fn test_reopen_sets_status_open() {
         let (_dir, path) = setup();
-        add(&path, AddArgs { title: "T".to_string(), priority: "medium".to_string(), due: None, project: None, tags: None, agent: None, description: None }).unwrap();
+        add(&path, AddArgs { title: "T".to_string(), priority: "medium".to_string(), due: None, project: None, tags: None, agent: None, description: None, instructions: None }).unwrap();
         done(&path, 1).unwrap();
         reopen(&path, 1).unwrap();
         let tf = db::load(&path).unwrap();
@@ -534,7 +559,7 @@ mod tests {
     #[test]
     fn test_rm_deletes_task() {
         let (_dir, path) = setup();
-        add(&path, AddArgs { title: "Doomed".to_string(), priority: "medium".to_string(), due: None, project: None, tags: None, agent: None, description: None }).unwrap();
+        add(&path, AddArgs { title: "Doomed".to_string(), priority: "medium".to_string(), due: None, project: None, tags: None, agent: None, description: None, instructions: None }).unwrap();
         let msg = rm(&path, 1).unwrap();
         assert!(msg.contains("Doomed"));
         let tf = db::load(&path).unwrap();
@@ -551,11 +576,11 @@ mod tests {
     #[test]
     fn test_edit_sets_work_status_and_show_prints_it() {
         let (_dir, path) = setup();
-        add(&path, AddArgs { title: "Track me".to_string(), priority: "medium".to_string(), due: None, project: None, tags: None, agent: None, description: None }).unwrap();
+        add(&path, AddArgs { title: "Track me".to_string(), priority: "medium".to_string(), due: None, project: None, tags: None, agent: None, description: None, instructions: None }).unwrap();
 
         edit(&path, 1, EditArgs {
             title: None, priority: None, due: None, project: None, tags: None,
-            agent: None, description: None, effort: None,
+            agent: None, description: None, instructions: None, effort: None,
             work_status: Some("in-progress".to_string()), recur: None,
         }).unwrap();
 
@@ -566,11 +591,11 @@ mod tests {
     #[test]
     fn test_edit_invalid_work_status_returns_error() {
         let (_dir, path) = setup();
-        add(&path, AddArgs { title: "Track me".to_string(), priority: "medium".to_string(), due: None, project: None, tags: None, agent: None, description: None }).unwrap();
+        add(&path, AddArgs { title: "Track me".to_string(), priority: "medium".to_string(), due: None, project: None, tags: None, agent: None, description: None, instructions: None }).unwrap();
 
         let result = edit(&path, 1, EditArgs {
             title: None, priority: None, due: None, project: None, tags: None,
-            agent: None, description: None, effort: None,
+            agent: None, description: None, instructions: None, effort: None,
             work_status: Some("bogus".to_string()), recur: None,
         });
         assert!(result.is_err());
@@ -579,11 +604,11 @@ mod tests {
     #[test]
     fn test_edit_sets_recurrence_and_show_prints_it() {
         let (_dir, path) = setup();
-        add(&path, AddArgs { title: "Recur me".to_string(), priority: "medium".to_string(), due: None, project: None, tags: None, agent: None, description: None }).unwrap();
+        add(&path, AddArgs { title: "Recur me".to_string(), priority: "medium".to_string(), due: None, project: None, tags: None, agent: None, description: None, instructions: None }).unwrap();
 
         edit(&path, 1, EditArgs {
             title: None, priority: None, due: None, project: None, tags: None,
-            agent: None, description: None, effort: None, work_status: None,
+            agent: None, description: None, instructions: None, effort: None, work_status: None,
             recur: Some("weekly:fri".to_string()),
         }).unwrap();
 
@@ -594,11 +619,11 @@ mod tests {
     #[test]
     fn test_edit_invalid_recurrence_returns_error() {
         let (_dir, path) = setup();
-        add(&path, AddArgs { title: "Recur me".to_string(), priority: "medium".to_string(), due: None, project: None, tags: None, agent: None, description: None }).unwrap();
+        add(&path, AddArgs { title: "Recur me".to_string(), priority: "medium".to_string(), due: None, project: None, tags: None, agent: None, description: None, instructions: None }).unwrap();
 
         let result = edit(&path, 1, EditArgs {
             title: None, priority: None, due: None, project: None, tags: None,
-            agent: None, description: None, effort: None, work_status: None,
+            agent: None, description: None, instructions: None, effort: None, work_status: None,
             recur: Some("bogus".to_string()),
         });
         assert!(result.is_err());

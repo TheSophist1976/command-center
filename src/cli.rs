@@ -85,6 +85,10 @@ pub enum Command {
         /// Task description
         #[arg(long)]
         description: Option<String>,
+
+        /// Task instructions (what an agent or person should do), separate from the description
+        #[arg(long)]
+        instructions: Option<String>,
     },
 
     /// List tasks
@@ -141,6 +145,9 @@ pub enum Command {
 
         #[arg(long)]
         description: Option<String>,
+
+        #[arg(long)]
+        instructions: Option<String>,
 
         #[arg(long)]
         effort: Option<String>,

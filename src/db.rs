@@ -85,6 +85,8 @@ fn open_conn(path: &Path) -> Result<Connection, String> {
     // against `tasks` anyway, so discarding the error is safe.
     conn.execute("ALTER TABLE tasks ADD COLUMN work_status TEXT", [])
         .ok();
+    conn.execute("ALTER TABLE tasks ADD COLUMN instructions TEXT", [])
+        .ok();
     Ok(conn)
 }
 
@@ -115,6 +117,7 @@ fn row_to_task(row: &rusqlite::Row) -> rusqlite::Result<Task> {
     let agent: Option<String> = row.get(12)?;
     let effort_s: Option<String> = row.get(13)?;
     let work_status_s: Option<String> = row.get(14)?;
+    let instructions: Option<String> = row.get(15)?;
 
     Ok(Task {
         id,
@@ -129,6 +132,7 @@ fn row_to_task(row: &rusqlite::Row) -> rusqlite::Result<Task> {
             .and_then(|s| DateTime::parse_from_rfc3339(&s).ok())
             .map(|dt| dt.with_timezone(&Utc)),
         description,
+        instructions,
         due_date: due_s.and_then(|s| NaiveDate::parse_from_str(&s, "%Y-%m-%d").ok()),
         project,
         recurrence: recur_s.and_then(|s| Recurrence::from_str(&s).ok()),
@@ -141,8 +145,8 @@ fn row_to_task(row: &rusqlite::Row) -> rusqlite::Result<Task> {
 
 fn insert_task_row(conn: &Connection, t: &Task) -> Result<(), String> {
     conn.execute(
-        "INSERT INTO tasks (id, title, status, priority, tags, created, updated, description, due_date, project, recurrence, notes, agent, effort, work_status)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+        "INSERT INTO tasks (id, title, status, priority, tags, created, updated, description, due_date, project, recurrence, notes, agent, effort, work_status, instructions)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
         params![
             t.id,
             t.title,
@@ -159,6 +163,7 @@ fn insert_task_row(conn: &Connection, t: &Task) -> Result<(), String> {
             t.agent,
             t.effort.as_ref().map(|e| e.to_string()),
             t.work_status.as_ref().map(|w| w.to_string()),
+            t.instructions,
         ],
     )
     .map_err(|e| format!("Failed to insert task {}: {}", t.id, e))?;
@@ -198,7 +203,7 @@ pub fn load(path: &Path) -> Result<TaskFile, String> {
     }
 
     let mut stmt = conn
-        .prepare("SELECT id, title, status, priority, tags, created, updated, description, due_date, project, recurrence, notes, agent, effort, work_status FROM tasks ORDER BY id")
+        .prepare("SELECT id, title, status, priority, tags, created, updated, description, due_date, project, recurrence, notes, agent, effort, work_status, instructions FROM tasks ORDER BY id")
         .map_err(|e| format!("Failed to prepare query: {}", e))?;
     let rows = stmt
         .query_map([], row_to_task)
@@ -293,6 +298,7 @@ mod tests {
             created: Utc::now(),
             updated: None,
             description: Some("Some description".to_string()),
+            instructions: None,
             due_date: None,
             project: None,
             recurrence: None,
@@ -406,7 +412,7 @@ mod tests {
             tags: vec!["a".to_string(), "b".to_string()],
             created: Utc::now(),
             updated: Some(Utc::now()),
-            description: Some("desc".to_string()),
+            description: Some("desc".to_string()), instructions: None,
             due_date: NaiveDate::from_ymd_opt(2026, 12, 31),
             project: Some("My Project: v2".to_string()),
             recurrence: Some(Recurrence::from_str("weekly:fri").unwrap()),
@@ -635,5 +641,11 @@ mod tests {
         save(&path, &task_file).unwrap();
         let reloaded = load(&path).unwrap();
         assert_eq!(reloaded.tasks[0].work_status, Some(WorkStatus::InProgress));
+        // instructions column was added by the same migration path.
+        assert_eq!(reloaded.tasks[0].instructions, None);
+        let mut reloaded = reloaded;
+        reloaded.tasks[0].instructions = Some("do it".to_string());
+        save(&path, &reloaded).unwrap();
+        assert_eq!(load(&path).unwrap().tasks[0].instructions.as_deref(), Some("do it"));
     }
 }

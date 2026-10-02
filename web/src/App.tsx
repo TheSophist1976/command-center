@@ -1003,6 +1003,18 @@ export default function App() {
                   ) : undefined}
                 />
               </FieldRow>
+              <FieldRow label="Instructions">
+                <EditableField
+                  id="field-instructions"
+                  value={selected.instructions ?? ''}
+                  type="textarea"
+                  placeholder="No instructions"
+                  onSave={(v) => handleEditField(selected.id, { instructions: v })}
+                  display={selected.instructions ? (
+                    <span style={{ whiteSpace: 'pre-wrap' }}><Linkify text={selected.instructions} /></span>
+                  ) : undefined}
+                />
+              </FieldRow>
             </div>
 
             {(review || selected.work_status === 'waiting-for-review' || selected.work_status === 'changes-requested') && (
