@@ -79,6 +79,8 @@ task note show task-<id>-review-thread
 ```
 This is a running conversation between you and the human; earlier rounds carry context (what was tried, what was explained) that matters for getting this round right. Only after reading the whole thread should you proceed to "For each task, before doing any work" below.
 
+**If a `changes-requested` task has a `task-<id>-question` note ending in an `## Answer — <date>` section**, the human answered your `needs-input` question from the web UI instead of the terminal. Read the question note (`task note show task-<id>-question`), treat that answer as the response to your question, set `--work-status in-progress`, and continue the task — do not ask the question again.
+
 **For each task, before doing any work:**
 1. Read the task title and description carefully
 2. Read all notes attached to the task (`notes` field, comma-separated slugs, shown by `task show <id>`). Use `task note show <slug>` to read each one.

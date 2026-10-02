@@ -168,6 +168,8 @@ task edit <id> --work-status needs-input
 
 Once you get an answer, set `--work-status` back to `in-progress` (or whatever it was before) and continue.
 
+The human can also answer from the web UI. That appends an `## Answer — <YYYY-MM-DD>` section to the `task-<id>-question` note and sets `--work-status changes-requested` (the same pickup path as review feedback). If you find a `changes-requested` task whose question note ends in an answer, read the note, treat it as the reply, set `--work-status in-progress`, and continue.
+
 **Update this as you work**, not just at the end — set `in-progress` when you start, `waiting-for-review` when you've finished and want the human to check your work before it's truly done.
 
 **`work_status: complete` does NOT mark the task done.** It's purely informational — the human still explicitly runs `task done <id>` to close the task out (see below). Don't skip `task done` because you set `work_status` to `complete`.

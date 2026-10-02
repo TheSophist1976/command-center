@@ -5,7 +5,7 @@ import { Terminal, Sun, CalendarDays, Settings, Search, PanelLeftClose, PanelLef
 import { Button } from './components/Button';
 import { NewTaskForm } from './components/NewTaskForm';
 import { EditableField, FieldRow } from './components/EditableField';
-import { fetchTasks, fetchAgents, addTask, editTask, markDone, reopenTask, deleteTask, fetchTaskNotes, createTaskNote, openNote, unlinkTaskNote, fetchTaskReview, postTaskFeedback, fetchTaskQuestion } from './api';
+import { fetchTasks, fetchAgents, addTask, editTask, markDone, reopenTask, deleteTask, fetchTaskNotes, createTaskNote, openNote, unlinkTaskNote, fetchTaskReview, postTaskFeedback, fetchTaskQuestion, postTaskAnswer } from './api';
 import { NotesSection } from './components/NotesSection';
 import { ReviewPanel } from './components/ReviewPanel';
 import { QuestionPanel } from './components/QuestionPanel';
@@ -370,6 +370,20 @@ export default function App() {
     try {
       const note = await postTaskFeedback(selected.id, text);
       setReview(note);
+      const updated = { ...selected, work_status: 'changes-requested' as const };
+      setSelected(updated);
+      setTasks((prev) => prev.map((t) => (t.id === updated.id ? updated : t)));
+    } catch (e) {
+      setError(String(e));
+      throw e;
+    }
+  }
+
+  async function handleSendAnswer(text: string) {
+    if (!selected) return;
+    try {
+      const note = await postTaskAnswer(selected.id, text);
+      setQuestion(note);
       const updated = { ...selected, work_status: 'changes-requested' as const };
       setSelected(updated);
       setTasks((prev) => prev.map((t) => (t.id === updated.id ? updated : t)));
@@ -1001,7 +1015,9 @@ export default function App() {
             {(question || selected.work_status === 'needs-input') && (
               <QuestionPanel
                 question={question}
+                awaitingAnswer={selected.work_status === 'needs-input'}
                 accentColor={selected.work_status ? WORK_STATUS_COLOR[selected.work_status] : undefined}
+                onSendAnswer={handleSendAnswer}
               />
             )}
 

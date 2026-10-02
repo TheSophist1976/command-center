@@ -801,6 +801,60 @@ async fn add_task_review_feedback(
     Ok(Json(note_response(note, modified)))
 }
 
+async fn answer_task_question(
+    State(state): State<Arc<AppState>>,
+    AxumPath(id): AxumPath<u32>,
+    Json(req): Json<FeedbackRequest>,
+) -> Result<Json<NoteResponse>, (StatusCode, Json<serde_json::Value>)> {
+    let text = req.text.trim();
+    if text.is_empty() {
+        return Err(app_error(StatusCode::BAD_REQUEST, "answer text must not be empty"));
+    }
+
+    let _guard = state.write_lock.lock().await;
+    let mut task_file = db::load(&state.db_path)
+        .map_err(|e| app_error(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+
+    let dir = notes_dir(&state);
+    let slug = question_slug(id);
+    let note_path = dir.join(format!("{}.md", slug));
+
+    let task_title = task_file
+        .find_task(id)
+        .ok_or_else(|| app_error(StatusCode::NOT_FOUND, format!("Task {} not found", id)))?
+        .title
+        .clone();
+
+    if !note_path.exists() {
+        crate::note::write_note(
+            &dir,
+            &crate::note::Note { slug: slug.clone(), title: format!("Question — {}", task_title), body: String::new() },
+        )
+        .map_err(|e| app_error(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    }
+
+    let today = chrono::Local::now().date_naive().format("%Y-%m-%d");
+    let section = format!("## Answer — {}\n\n{}", today, text);
+    crate::note::append_to_note(&dir, &slug, &section)
+        .map_err(|e| app_error(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+
+    {
+        let t = task_file.find_task_mut(id).expect("checked above");
+        if !t.notes.contains(&slug) {
+            t.notes.push(slug.clone());
+        }
+        t.work_status = Some(crate::task::WorkStatus::ChangesRequested);
+        t.updated = Some(chrono::Utc::now());
+    }
+    db::save(&state.db_path, &task_file)
+        .map_err(|e| app_error(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+
+    let note = crate::note::read_note(&note_path)
+        .map_err(|e| app_error(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    let modified = modified_time(&note_path);
+    Ok(Json(note_response(note, modified)))
+}
+
 /// Mirrors tui.rs's `open_note_external`, minus the raw-mode terminal handling that has
 /// no equivalent in a headless server process — every spawn here is fire-and-forget.
 /// Priority: Obsidian (if configured) > $EDITOR/$VISUAL.
@@ -870,7 +924,7 @@ pub fn router_with_static(state: AppState, static_dir: Option<std::path::PathBuf
         .route("/api/tasks/:id/notes", get(list_task_notes).post(create_task_note))
         .route("/api/tasks/:id/notes/:slug", axum::routing::delete(unlink_task_note))
         .route("/api/tasks/:id/review", get(get_task_review).post(add_task_review_feedback))
-        .route("/api/tasks/:id/question", get(get_task_question))
+        .route("/api/tasks/:id/question", get(get_task_question).post(answer_task_question))
         .route("/api/notes/:slug/open", axum::routing::post(open_note))
         .route("/api/agents", get(list_agents))
         .route("/api/agents/:name/instructions", get(get_agent_instructions).put(edit_agent_instructions))
@@ -2202,6 +2256,74 @@ mod tests {
         let json = body_json(response).await;
         assert_eq!(json["slug"], "task-1-question");
         assert_eq!(json["body"], "Which environment should this target, staging or prod?");
+    }
+
+    fn needs_input_task() -> crate::task::Task {
+        crate::task::Task {
+            id: 1, title: "Blocked".to_string(), status: Status::Open, priority: crate::task::Priority::Medium,
+            tags: Vec::new(), created: chrono::Utc::now(), updated: None, description: None,
+            due_date: None, project: None, recurrence: None, notes: vec!["task-1-question".to_string()],
+            agent: Some("bot".to_string()), effort: None, work_status: Some(crate::task::WorkStatus::NeedsInput),
+        }
+    }
+
+    fn post_question_answer(text: &str) -> Request<Body> {
+        Request::builder()
+            .method("POST")
+            .uri("/api/tasks/1/question")
+            .header("host", "127.0.0.1")
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_vec(&serde_json::json!({ "text": text })).unwrap()))
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn test_post_task_question_appends_answer_and_sets_changes_requested() {
+        let (_dir, state) = make_state();
+        let mut tf = crate::task::TaskFile::new();
+        tf.tasks.push(needs_input_task());
+        db::save(&state.db_path, &tf).unwrap();
+        crate::note::write_note(
+            &notes_dir(&state),
+            &crate::note::Note {
+                slug: "task-1-question".to_string(),
+                title: "Question — Blocked".to_string(),
+                body: "Which branch should I use?".to_string(),
+            },
+        )
+        .unwrap();
+
+        let response = router(state.clone()).oneshot(post_question_answer("Use main.")).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let json = body_json(response).await;
+        assert_eq!(json["slug"], "task-1-question");
+        let body = json["body"].as_str().unwrap();
+        assert!(body.contains("Which branch should I use?"));
+        assert!(body.contains("## Answer —"));
+        assert!(body.contains("Use main."));
+
+        let tf = db::load(&state.db_path).unwrap();
+        assert_eq!(tf.find_task(1).unwrap().work_status, Some(crate::task::WorkStatus::ChangesRequested));
+    }
+
+    #[tokio::test]
+    async fn test_post_task_question_empty_text_returns_400() {
+        let (_dir, state) = make_state();
+        let mut tf = crate::task::TaskFile::new();
+        tf.tasks.push(needs_input_task());
+        db::save(&state.db_path, &tf).unwrap();
+
+        let response = router(state.clone()).oneshot(post_question_answer("   ")).await.unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let tf = db::load(&state.db_path).unwrap();
+        assert_eq!(tf.find_task(1).unwrap().work_status, Some(crate::task::WorkStatus::NeedsInput));
+    }
+
+    #[tokio::test]
+    async fn test_post_task_question_missing_task_returns_404() {
+        let (_dir, state) = make_state();
+        let response = router(state).oneshot(post_question_answer("hi")).await.unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]
