@@ -52,13 +52,16 @@ fn run(cli: Cli) -> Result<(), (i32, String)> {
             }
             return Ok(());
         }
+        Some(Command::Update { check }) => {
+            return task::update::run_cli(*check).map_err(|e| (1, e));
+        }
         _ => {}
     }
 
     task::db::backup_daily(&path);
 
     match cli.command {
-        Some(Command::Serve | Command::Setup | Command::RefreshFiles { .. }) => unreachable!("handled above"),
+        Some(Command::Serve | Command::Setup | Command::RefreshFiles { .. } | Command::Update { .. }) => unreachable!("handled above"),
 
         None | Some(Command::Tui) => {
             eprintln!("Use task-tui to launch the interactive terminal UI.");

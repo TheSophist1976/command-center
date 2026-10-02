@@ -19,6 +19,12 @@ pub enum Command {
     Serve,
     /// Configure task directories and install AGENTS.md and Claude skills
     Setup,
+    /// Update task to the latest release
+    Update {
+        /// Only report whether an update is available
+        #[arg(long)]
+        check: bool,
+    },
     /// Re-install AGENTS.md and Claude skills from this binary (used by `task update`)
     #[command(hide = true)]
     RefreshFiles {
