@@ -1,4 +1,4 @@
-import type { Task, AgentProfile, Note } from './types';
+import type { Task, AgentProfile, Note, VersionInfo, UpdateStatus } from './types';
 
 async function jsonOrThrow<T>(response: Response): Promise<T> {
   if (!response.ok) {
@@ -159,4 +159,23 @@ export async function postTaskAnswer(taskId: number, text: string): Promise<Note
 
 export async function fetchTaskQuestion(taskId: number): Promise<Note | null> {
   return jsonOrThrow(await fetch(`/api/tasks/${taskId}/question`));
+}
+
+export async function fetchVersion(): Promise<VersionInfo> {
+  return jsonOrThrow(await fetch('/api/version'));
+}
+
+export async function startUpdate(): Promise<void> {
+  const response = await fetch('/api/update', {
+    method: 'POST',
+    headers: { 'X-Command-Center': 'update' },
+  });
+  if (!response.ok) {
+    const body = await response.json().catch(() => ({}));
+    throw new Error(body.error ?? `Request failed: ${response.status}`);
+  }
+}
+
+export async function fetchUpdateStatus(): Promise<UpdateStatus> {
+  return jsonOrThrow(await fetch('/api/update/status'));
 }

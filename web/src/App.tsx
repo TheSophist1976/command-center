@@ -13,6 +13,7 @@ import { AgentPicker } from './components/AgentPicker';
 import { AgentEditor } from './components/AgentEditor';
 import { DatePicker } from './components/DatePicker';
 import { Linkify } from './components/Linkify';
+import { VersionBadge } from './components/VersionBadge';
 import type { Task, AgentProfile, Note } from './types';
 import { countDueWindow, dueMatches, startOfToday, isOverdue, type DueWindow } from './dueWindow';
 import { statusFor, statusColor } from './mockAgentStatus';
@@ -774,6 +775,7 @@ export default function App() {
           ) : (
             <Button onClick={() => setShowNewTaskForm(true)}>New task</Button>
           )}
+          <VersionBadge />
         </header>
         {error && <div style={{ padding: 16, color: 'var(--danger)' }}>{error}</div>}
         <div style={{ display: 'flex', alignItems: 'center', gap: 16, height: 34, flex: 'none', padding: '0 24px', borderBottom: '1px solid var(--hairline-soft)', fontFamily: 'var(--font-display)', fontSize: 11, fontWeight: 700, letterSpacing: '0.06em', textTransform: 'uppercase', color: 'var(--fg-5)' }}>

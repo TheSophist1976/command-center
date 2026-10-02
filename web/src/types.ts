@@ -31,3 +31,16 @@ export interface Note {
   body: string;
   updated?: string;
 }
+
+export interface VersionInfo {
+  current: string;
+  latest: string | null;
+  update_available: boolean;
+  update_supported: boolean;
+}
+
+export interface UpdateStatus {
+  phase: 'idle' | 'downloading' | 'verifying' | 'installing' | 'restarting' | 'failed';
+  error: { kind: string; message: string } | null;
+  skipped_files: string[];
+}
