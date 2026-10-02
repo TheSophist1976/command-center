@@ -14,6 +14,7 @@ check() { # name expected actual
 }
 
 # --- detect_target, with uname faked ---
+# shellcheck disable=SC2317  # called indirectly: install.sh's detect_target runs `uname`
 uname() { if [ "$1" = "-s" ]; then echo "$FAKE_OS"; else echo "$FAKE_ARCH"; fi; }
 check "darwin arm64" aarch64-apple-darwin "$(FAKE_OS=Darwin FAKE_ARCH=arm64 detect_target)"
 check "darwin x64" x86_64-apple-darwin "$(FAKE_OS=Darwin FAKE_ARCH=x86_64 detect_target)"
