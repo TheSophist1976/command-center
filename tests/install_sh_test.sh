@@ -5,7 +5,7 @@ set -eu
 HERE=$(cd "$(dirname "$0")/.." && pwd)
 INSTALL_SH_LIB=1
 export INSTALL_SH_LIB
-# shellcheck source=../install.sh
+# shellcheck source=/dev/null  # install.sh is checked on its own as a separate input
 . "$HERE/install.sh"
 
 failures=0
