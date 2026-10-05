@@ -1,26 +1,47 @@
 :root {
-  /* Surfaces */
-  --ink: #00001E;
-  --ink-2: #020224;
-  --ink-3: #09163B;
+  /* Nord palette (https://www.nordtheme.com/docs/colors-and-palettes) */
+  --nord0: #2E3440;
+  --nord1: #3B4252;
+  --nord2: #434C5E;
+  --nord3: #4C566A;
+  --nord4: #D8DEE9;
+  --nord5: #E5E9F0;
+  --nord6: #ECEFF4;
+  --nord7: #8FBCBB;
+  --nord8: #88C0D0;
+  --nord9: #81A1C1;
+  --nord10: #5E81AC;
+  --nord11: #BF616A;
+  --nord12: #D08770;
+  --nord13: #EBCB8B;
+  --nord14: #A3BE8C;
+  --nord15: #B48EAD;
+
+  /* Surfaces (Polar Night) */
+  --ink: var(--nord0);
+  --ink-2: var(--nord1);
+  --ink-3: var(--nord2);
 
   /* Hairlines */
-  --hairline: rgba(255, 255, 255, 0.10);
-  --hairline-soft: rgba(255, 255, 255, 0.06);
+  --hairline: var(--nord3);
+  --hairline-soft: rgba(76, 86, 106, 0.5);
 
-  /* Foreground (descending opacity) */
-  --fg-1: #FFFFFF;
-  --fg-2: rgba(255, 255, 255, 0.85);
-  --fg-3: rgba(255, 255, 255, 0.65);
-  --fg-4: rgba(255, 255, 255, 0.5);
-  --fg-5: rgba(255, 255, 255, 0.3);
+  /* Foreground (Snow Storm, descending emphasis) */
+  --fg-1: var(--nord6);
+  --fg-2: var(--nord5);
+  --fg-3: var(--nord4);
+  --fg-4: #A5AFC2;
+  --fg-5: #7B88A1;
 
-  /* Brand / semantic */
-  --magenta: #FF0095;
-  --cyan: #0099FF;
-  --teal: #00F3DB;
-  --citrine: #F5C518;
-  --danger: #E5484D;
+  /* Brand / semantic (Frost + Aurora) */
+  --accent: var(--nord8);
+  --accent-hover: var(--nord7);
+  --accent-soft: rgba(136, 192, 208, 0.15);
+  --accent-ring: rgba(136, 192, 208, 0.4);
+  --cyan: var(--nord9);
+  --teal: var(--nord7);
+  --citrine: var(--nord13);
+  --danger: var(--nord11);
 
   /* Type */
   --font-display: system-ui, -apple-system, sans-serif;
@@ -52,5 +73,5 @@ html, body, #root {
   color: var(--fg-1);
 }
 
-a { color: var(--magenta); text-decoration: none; }
-a:hover { color: #CC0077; }
+a { color: var(--accent); text-decoration: none; }
+a:hover { color: var(--accent-hover); }

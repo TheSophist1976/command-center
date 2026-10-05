@@ -99,7 +99,7 @@ export function AgentEditor({ agent, onClose }: AgentEditorProps) {
               style={{
                 background: 'transparent',
                 border: 'none',
-                borderBottom: t === tab ? '2px solid var(--magenta)' : '2px solid transparent',
+                borderBottom: t === tab ? '2px solid var(--accent)' : '2px solid transparent',
                 color: t === tab ? 'var(--fg-1)' : 'var(--fg-4)',
                 fontWeight: t === tab ? 600 : 400,
                 fontSize: 13,
@@ -157,7 +157,7 @@ export function AgentEditor({ agent, onClose }: AgentEditorProps) {
           </div>
         )}
 
-        {error && <div style={{ fontSize: 13, color: 'var(--magenta)', marginTop: 10 }}>{error}</div>}
+        {error && <div style={{ fontSize: 13, color: 'var(--danger)', marginTop: 10 }}>{error}</div>}
 
         <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, marginTop: 16 }}>
           <Button variant="secondary" onClick={onClose}>Close</Button>

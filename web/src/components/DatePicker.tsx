@@ -183,8 +183,8 @@ export function DatePicker({ id, value, onSave }: DatePickerProps) {
                   onMouseEnter={() => setHighlighted(d)}
                   style={{
                     height: 26, borderRadius: 4, border: 'none', cursor: 'pointer', fontSize: 12,
-                    boxShadow: isHighlighted ? '0 0 0 1px var(--magenta)' : 'none',
-                    background: isSelected ? 'var(--magenta)' : isToday ? 'rgba(255,0,149,0.15)' : 'transparent',
+                    boxShadow: isHighlighted ? '0 0 0 1px var(--accent)' : 'none',
+                    background: isSelected ? 'var(--accent)' : isToday ? 'var(--accent-soft)' : 'transparent',
                     color: isSelected ? 'var(--ink)' : 'var(--fg-2)',
                   }}
                 >

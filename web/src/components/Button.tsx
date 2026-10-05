@@ -10,10 +10,10 @@ const sizeStyles: Record<ButtonSize, CSSProperties> = {
 };
 
 const variantStyles: Record<ButtonVariant, CSSProperties> = {
-  primary: { background: 'var(--magenta)', color: 'var(--ink)', border: '1px solid transparent' },
+  primary: { background: 'var(--accent)', color: 'var(--ink)', border: '1px solid transparent' },
   secondary: { background: 'transparent', color: 'var(--fg-1)', border: '1px solid var(--hairline)' },
   cyan: { background: 'var(--cyan)', color: 'var(--ink)', border: '1px solid transparent' },
-  ghost: { background: 'transparent', color: 'var(--magenta)', border: '1px solid transparent' },
+  ghost: { background: 'transparent', color: 'var(--accent)', border: '1px solid transparent' },
 };
 
 interface ButtonProps {

@@ -38,7 +38,7 @@
 
 .task-panel-resize-handle:hover,
 .task-panel.is-resizing .task-panel-resize-handle {
-  background: rgba(120, 140, 255, 0.35);
+  background: var(--accent-ring);
 }
 
 .task-panel-content {

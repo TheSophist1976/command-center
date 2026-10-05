@@ -630,7 +630,7 @@ export default function App() {
         }}
       >
         <div style={{ padding: '0 20px 22px', display: 'flex', alignItems: 'center', gap: 10 }}>
-          <div style={{ width: 26, height: 26, borderRadius: 5, background: 'var(--magenta)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+          <div style={{ width: 26, height: 26, borderRadius: 5, background: 'var(--accent)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
             <Terminal size={15} color="var(--ink)" />
           </div>
           <span style={{ fontFamily: 'var(--font-display)', fontWeight: 700, fontSize: 14 }}>command center</span>
@@ -646,15 +646,15 @@ export default function App() {
                 style={{
                   display: 'flex', alignItems: 'center', gap: 10, height: 36, padding: '0 10px',
                   borderRadius: 5, cursor: 'pointer',
-                  background: active ? 'rgba(255,0,149,0.12)' : 'transparent',
-                  boxShadow: active ? '0 0 0 1px rgba(255,0,149,0.35)' : 'none',
+                  background: active ? 'var(--accent-soft)' : 'transparent',
+                  boxShadow: active ? '0 0 0 1px var(--accent-ring)' : 'none',
                 }}
               >
-                <Inbox size={16} color={active ? 'var(--magenta)' : 'var(--fg-4)'} />
+                <Inbox size={16} color={active ? 'var(--accent)' : 'var(--fg-4)'} />
                 <span style={{ flex: 1, fontSize: 14, fontWeight: active ? 600 : 400, color: active ? 'var(--fg-1)' : 'var(--fg-3)' }}>
                   {item.label}
                 </span>
-                <span style={{ fontFamily: 'var(--font-mono)', fontSize: 12, color: active ? 'var(--magenta)' : 'var(--fg-5)' }}>{count}</span>
+                <span style={{ fontFamily: 'var(--font-mono)', fontSize: 12, color: active ? 'var(--accent)' : 'var(--fg-5)' }}>{count}</span>
               </div>
             );
           })}
@@ -677,15 +677,15 @@ export default function App() {
                 style={{
                   display: 'flex', alignItems: 'center', gap: 10, height: 36, padding: '0 10px',
                   borderRadius: 5, cursor: 'pointer',
-                  background: active ? 'rgba(255,0,149,0.12)' : 'transparent',
-                  boxShadow: active ? '0 0 0 1px rgba(255,0,149,0.35)' : 'none',
+                  background: active ? 'var(--accent-soft)' : 'transparent',
+                  boxShadow: active ? '0 0 0 1px var(--accent-ring)' : 'none',
                 }}
               >
-                <Icon size={16} color={active ? 'var(--magenta)' : 'var(--fg-4)'} />
+                <Icon size={16} color={active ? 'var(--accent)' : 'var(--fg-4)'} />
                 <span style={{ flex: 1, fontSize: 14, fontWeight: active ? 600 : 400, color: active ? 'var(--fg-1)' : 'var(--fg-3)' }}>
                   {item.label}
                 </span>
-                <span style={{ fontFamily: 'var(--font-mono)', fontSize: 12, color: active ? 'var(--magenta)' : 'var(--fg-5)' }}>{count}</span>
+                <span style={{ fontFamily: 'var(--font-mono)', fontSize: 12, color: active ? 'var(--accent)' : 'var(--fg-5)' }}>{count}</span>
               </div>
             );
           })}
@@ -807,8 +807,8 @@ export default function App() {
                   style={{
                     display: 'flex', alignItems: 'center', gap: 16, height: 46, padding: '0 24px 0 21px',
                     borderBottom: '1px solid var(--hairline-soft)', cursor: 'pointer',
-                    background: selected?.id === t.id ? 'rgba(255,0,149,0.12)' : 'transparent',
-                    borderLeft: selected?.id === t.id ? '3px solid var(--magenta)' : '3px solid transparent',
+                    background: selected?.id === t.id ? 'var(--accent-soft)' : 'transparent',
+                    borderLeft: selected?.id === t.id ? '3px solid var(--accent)' : '3px solid transparent',
                   }}
                 >
                   <span style={{ width: 34, fontFamily: 'var(--font-mono)', fontSize: 12, color: 'var(--fg-5)' }}>{t.id}</span>
@@ -1109,7 +1109,7 @@ export default function App() {
                 ['?', 'Toggle this help'],
               ].map(([key, desc]) => (
                 <div key={key} style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-                  <span style={{ width: 130, flex: 'none', fontFamily: 'var(--font-mono)', color: 'var(--magenta)' }}>{key}</span>
+                  <span style={{ width: 130, flex: 'none', fontFamily: 'var(--font-mono)', color: 'var(--accent)' }}>{key}</span>
                   <span style={{ color: 'var(--fg-3)' }}>{desc}</span>
                 </div>
               ))}

@@ -106,7 +106,7 @@ export function AgentPicker({ id, value, options, onSave }: AgentPickerProps) {
               onClick={() => choose(o.value)}
               style={{
                 padding: '6px 10px', fontSize: 13, cursor: 'pointer', borderRadius: 4,
-                background: i === highlighted ? 'rgba(255,0,149,0.15)' : 'transparent',
+                background: i === highlighted ? 'var(--accent-soft)' : 'transparent',
                 color: i === highlighted ? 'var(--fg-1)' : 'var(--fg-3)',
               }}
             >

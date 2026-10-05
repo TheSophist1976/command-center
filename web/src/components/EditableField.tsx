@@ -18,7 +18,7 @@ interface EditableFieldProps {
 const inputStyle: CSSProperties = {
   width: '100%',
   background: 'var(--ink-2)',
-  border: '1px solid var(--magenta)',
+  border: '1px solid var(--accent)',
   borderRadius: 4,
   color: 'var(--fg-1)',
   fontSize: 13,

@@ -41,7 +41,7 @@ export function Linkify({ text }: { text: string }): ReactNode {
         target="_blank"
         rel="noopener noreferrer"
         onClick={(e) => e.stopPropagation()}
-        style={{ color: 'var(--magenta)', textDecoration: 'underline' }}
+        style={{ color: 'var(--accent)', textDecoration: 'underline' }}
       >
         {url}
       </a>,
