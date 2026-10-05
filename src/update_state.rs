@@ -7,7 +7,7 @@ use serde::Serialize;
 
 use crate::update::{self, Phase, UpdateError};
 
-const LATEST_CACHE_TTL: Duration = Duration::from_secs(3600);
+const LATEST_CACHE_TTL: Duration = Duration::from_secs(300);
 /// A failed lookup (rate limit, offline) is cached briefly so the UI cannot hammer the API.
 const FAILURE_CACHE_TTL: Duration = Duration::from_secs(60);
 
