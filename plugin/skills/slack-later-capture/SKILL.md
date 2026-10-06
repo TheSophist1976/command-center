@@ -78,7 +78,7 @@ Do not set `--agent` (leave unassigned, for the human to triage) and do not set 
 
 Slack's saved/"Later" items are not programmatically closeable or unsaveable through the available Slack connector — there is no exposed `saved_items` API or equivalent tool. The closest real capability is `mcp__plugin_slack_slack__slack_add_reaction`, so use it as a visual proxy: after successfully creating the task and note in Step 4, add a `white_check_mark` reaction to the original message using the `channel_id` and `message_ts` captured in Step 2.
 
-This lets the user visually scan their Later list for the checkmark and manually unsave/close those items in the Slack app themselves — the skill cannot unsave them for them. If the reaction call fails (e.g. permissions), don't block task creation on it — log the failure in the report (Step 6) and move on.
+This lets the user visually scan their Later list for the checkmark and manually unsave/close those items in the Slack app themselves — the skill cannot unsave them. If the reaction call fails (e.g. permissions), don't block task creation on it — log the failure in the report (Step 6) and move on.
 
 ## Step 6: Report
 
