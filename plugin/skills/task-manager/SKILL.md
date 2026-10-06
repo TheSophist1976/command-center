@@ -3,13 +3,11 @@ name: task-manager
 description: Read and edit the user's task list. Use this skill when the user wants to list, view, add, edit, complete, reopen, or delete tasks.
 ---
 
-The user's tasks are stored in a SQLite database at:
-
-```
-~/Documents/Mark-main/Tasks/tasks.db
-```
+The user's tasks are stored in a SQLite database, `tasks.db`. The `task` CLI finds it for you: the `default-dir` setting in the config file (written by `task setup`), or the `TASK_FILE` environment variable, or the global `--file <path>` flag, in that order of increasing priority.
 
 Use the `task` CLI for every task operation — never open or edit `tasks.db` directly, it is a database file, not a text file. For note operations, use the `task note` CLI subcommands documented below.
+
+Every `task` command that writes is a single atomic transaction, so several agents can run `task` commands at the same time without losing each other's changes.
 
 ## Finding Your Tasks
 
@@ -69,11 +67,13 @@ Tasks have a `work_status` field, independent of open/done, so the human can see
 task edit <id> --work-status in-progress
 ```
 
-Valid values: `todo`, `in-progress`, `waiting-for-review`, `changes-requested`, `complete` (aliases `to-do`, `in_progress`/`inprogress`, `review`, `changes`, `done` are also accepted).
+Valid values: `todo`, `in-progress`, `waiting-for-review`, `changes-requested`, `needs-input`, `complete` (aliases `to-do`, `in_progress`/`inprogress`, `review`, `changes`, `needs_input`, and `done` are also accepted).
 
 **Setting `work_status` to `complete` does NOT mark the task done.** It's purely informational. Never substitute it for `task done <id>` — see the `work-agent-tasks` skill for when to set each value while working assigned tasks.
 
-**`changes-requested`** means a human left feedback on the task's review thread (see "Review Threads" below) and it needs another round of work — this value is set automatically by the web UI when feedback is posted, not something you normally set by hand.
+**`changes-requested`** means a human left feedback on the task's review thread (see "Review Threads" below) and it needs another round of work — this value is set automatically by the web UI when feedback is posted, not something you normally set by hand. It is also set when the human answers one of your questions (see "Asking a Question" below).
+
+**`needs-input`** means you are blocked on a question for the human (see "Asking a Question" below).
 
 ## Completing a Task
 
@@ -105,7 +105,7 @@ task rm <id>
 
 **Due date:** `YYYY-MM-DD`, or a weekday name/abbreviation (resolves to the next future occurrence) — e.g. `--due 2026-03-25` or `--due friday`
 
-**Work status:** `todo`, `in-progress`, `waiting-for-review`, `changes-requested`, `complete` — set via `--work-status` (see "Reporting Progress" above). Independent of open/done.
+**Work status:** `todo`, `in-progress`, `waiting-for-review`, `changes-requested`, `needs-input`, `complete` — set via `--work-status` (see "Reporting Progress" above). Independent of open/done.
 
 **Recurrence:** set via `--recur <pattern>`. Valid patterns: `daily`, `weekly`, `monthly`, `yearly` (every occurrence); `daily:N`, `weekly:N`, `monthly:N`, `yearly:N` (every N); `weekly:DAY` (e.g. `weekly:fri`); `weekly:N:DAY` (every N weeks on DAY); `monthly:N:DAY` (the Nth DAY of the month, e.g. `monthly:2:mon` for the 2nd Monday). `DAY` is a 3-letter abbreviation (`mon`, `tue`, `wed`, `thu`, `fri`, `sat`, `sun`).
 
@@ -161,6 +161,44 @@ task note append task-<id>-review-thread --body "## Agent response — <YYYY-MM-
 Then set `task edit <id> --work-status waiting-for-review` again — see `work-agent-tasks` for the full loop.
 
 You'll only ever see a `task-<id>-review-thread` note on a task whose `work_status` is `changes-requested`; the note itself is created automatically by the web UI the first time a human leaves feedback, not by you.
+
+## Asking a Question
+
+When you are blocked on something only the human can answer, put the question where the web UI can show it, so it is not lost in a terminal nobody is watching:
+
+```
+task note show task-<id>-question 2>/dev/null   # does a question note already exist?
+```
+
+If it does not exist, create it. `task note add` derives the slug from the title, so the title must be exactly `Task <id> Question` for the slug to be `task-<id>-question`:
+
+```
+task note add "Task <id> Question" --task <id>
+```
+
+Then set the question text (`--body` replaces the whole body, which is right because only one question is active at a time) and flag the task:
+
+```
+task note edit task-<id>-question --body "<the question>"
+task edit <id> --work-status needs-input
+```
+
+When the human answers from the web UI, an `## Answer — <YYYY-MM-DD>` section is appended to that note and the task's `work_status` becomes `changes-requested`. If you find a `changes-requested` task whose question note ends in an answer, read the note, treat it as the reply, set `--work-status in-progress`, and continue. Do not ask the same question again.
+
+## Agent Instructions and Memory
+
+Each agent profile can have standing instructions written by the human and a memory file it maintains itself. Read both at the start of a session, before working any task:
+
+```
+task agent instructions <agent-name> show
+task agent memory <agent-name> show
+```
+
+Both print a "not found" message when empty; that is not an error. Update memory only for patterns seen at least twice, standing facts, or corrected mistakes — never for one-off task details:
+
+```
+task agent memory <agent-name> edit --body "<updated content>"
+```
 
 ## Rules to Never Break
 

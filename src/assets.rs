@@ -44,6 +44,25 @@ mod tests {
     }
 
     #[test]
+    fn plugin_and_installed_task_manager_skills_do_not_drift() {
+        let installed = include_str!("../skills/task-manager/SKILL.md");
+        let plugin = include_str!("../plugin/skills/task-manager/SKILL.md");
+        assert_eq!(
+            installed, plugin,
+            "skills/task-manager/SKILL.md (installed by `task setup`) and plugin/skills/task-manager/SKILL.md must be identical; edit one and copy it to the other"
+        );
+    }
+
+    #[test]
+    fn task_manager_skill_documents_every_work_status() {
+        let skill = include_str!("../skills/task-manager/SKILL.md");
+        for status in ["todo", "in-progress", "waiting-for-review", "changes-requested", "needs-input", "complete"] {
+            assert!(skill.contains(status), "skill does not mention work status {}", status);
+        }
+        assert!(!skill.contains("Mark-main"), "skill must not hardcode a personal path");
+    }
+
+    #[test]
     fn agents_md_is_embedded() {
         assert!(AGENTS_MD.contains("needs-input"));
     }
