@@ -49,7 +49,7 @@ pub struct EditArgs {
 }
 
 pub fn add(path: &Path, args: AddArgs) -> Result<String, (i32, String)> {
-    let mut task_file = db::load(path).map_err(|e| (1, e))?;
+    let mut task_file = db::begin(path).map_err(|e| (1, e))?;
     let priority = Priority::from_str(&args.priority).map_err(|e| (1, e))?;
     let today = chrono::Local::now().date_naive();
     let due_date = args.due.as_deref().and_then(|d| parser::parse_due_date_input(d, today));
@@ -75,7 +75,7 @@ pub fn add(path: &Path, args: AddArgs) -> Result<String, (i32, String)> {
         effort: None,
         work_status: None,
     });
-    db::save(path, &task_file).map_err(|e| (1, e))?;
+    task_file.commit().map_err(|e| (1, e))?;
     Ok(format!("Created task {}: {}", id, args.title))
 }
 
@@ -200,7 +200,7 @@ pub fn show(path: &Path, id: u32) -> Result<String, (i32, String)> {
 }
 
 pub fn edit(path: &Path, id: u32, args: EditArgs) -> Result<String, (i32, String)> {
-    let mut task_file = db::load(path).map_err(|e| (1, e))?;
+    let mut task_file = db::begin(path).map_err(|e| (1, e))?;
     let today = chrono::Local::now().date_naive();
     let priority = args.priority.as_deref().map(Priority::from_str).transpose().map_err(|e| (1, e))?;
     let effort = args.effort.as_deref().map(Effort::from_str).transpose().map_err(|e| (1, e))?;
@@ -252,12 +252,12 @@ pub fn edit(path: &Path, id: u32, args: EditArgs) -> Result<String, (i32, String
     t.updated = Some(Utc::now());
     let title = t.title.clone();
 
-    db::save(path, &task_file).map_err(|e| (1, e))?;
+    task_file.commit().map_err(|e| (1, e))?;
     Ok(format!("Updated task {}: {}", id, title))
 }
 
 pub fn done(path: &Path, id: u32) -> Result<String, (i32, String)> {
-    let mut task_file = db::load(path).map_err(|e| (1, e))?;
+    let mut task_file = db::begin(path).map_err(|e| (1, e))?;
     let idx = task_file
         .tasks
         .iter()
@@ -298,7 +298,7 @@ pub fn done(path: &Path, id: u32) -> Result<String, (i32, String)> {
         spawned = Some((new_id, next_due));
     }
 
-    db::save(path, &task_file).map_err(|e| (1, e))?;
+    task_file.commit().map_err(|e| (1, e))?;
     match spawned {
         Some((new_id, next_due)) => Ok(format!(
             "Completed task {}. Next occurrence: task {}, due {}",
@@ -309,18 +309,18 @@ pub fn done(path: &Path, id: u32) -> Result<String, (i32, String)> {
 }
 
 pub fn reopen(path: &Path, id: u32) -> Result<String, (i32, String)> {
-    let mut task_file = db::load(path).map_err(|e| (1, e))?;
+    let mut task_file = db::begin(path).map_err(|e| (1, e))?;
     let t = task_file.find_task_mut(id).ok_or_else(|| (1, format!("Task {} not found", id)))?;
     t.status = Status::Open;
     t.updated = Some(Utc::now());
-    db::save(path, &task_file).map_err(|e| (1, e))?;
+    task_file.commit().map_err(|e| (1, e))?;
     Ok(format!("Reopened task {}", id))
 }
 
 pub fn rm(path: &Path, id: u32) -> Result<String, (i32, String)> {
-    let mut task_file = db::load(path).map_err(|e| (1, e))?;
+    let mut task_file = db::begin(path).map_err(|e| (1, e))?;
     let removed = task_file.remove_task(id).ok_or_else(|| (1, format!("Task {} not found", id)))?;
-    db::save(path, &task_file).map_err(|e| (1, e))?;
+    task_file.commit().map_err(|e| (1, e))?;
     Ok(format!("Deleted task {}: {}", id, removed.title))
 }
 

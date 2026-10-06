@@ -162,7 +162,7 @@ async fn add_task(
         .map_err(|e| app_error(StatusCode::BAD_REQUEST, e))?;
 
     let _guard = state.write_lock.lock().await;
-    let mut task_file = db::load(&state.db_path)
+    let mut task_file = db::begin(&state.db_path)
         .map_err(|e| app_error(StatusCode::INTERNAL_SERVER_ERROR, e))?;
 
     let id = task_file.next_id;
@@ -186,7 +186,7 @@ async fn add_task(
         work_status: None,
     };
     task_file.tasks.push(new_task.clone());
-    db::save(&state.db_path, &task_file).map_err(|e| app_error(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    task_file.commit().map_err(|e| app_error(StatusCode::INTERNAL_SERVER_ERROR, e))?;
     Ok(Json(new_task))
 }
 
@@ -272,7 +272,7 @@ async fn edit_task(
     let entering_review = matches!(work_status, Some(Some(crate::task::WorkStatus::WaitingForReview)));
 
     let _guard = state.write_lock.lock().await;
-    let mut task_file = db::load(&state.db_path)
+    let mut task_file = db::begin(&state.db_path)
         .map_err(|e| app_error(StatusCode::INTERNAL_SERVER_ERROR, e))?;
 
     let (updated_task, snapshot_project) = {
@@ -321,8 +321,8 @@ async fn edit_task(
             .map_err(|e| app_error(StatusCode::INTERNAL_SERVER_ERROR, e))?;
     }
 
-    db::save(&state.db_path, &task_file).map_err(|e| app_error(StatusCode::INTERNAL_SERVER_ERROR, e))?;
     let updated_task = task_file.find_task(id).cloned().unwrap_or(updated_task);
+    task_file.commit().map_err(|e| app_error(StatusCode::INTERNAL_SERVER_ERROR, e))?;
     Ok(Json(updated_task))
 }
 
@@ -387,7 +387,7 @@ async fn done_task(
     AxumPath(id): AxumPath<u32>,
 ) -> Result<Json<DoneResponse>, (StatusCode, Json<serde_json::Value>)> {
     let _guard = state.write_lock.lock().await;
-    let mut task_file = db::load(&state.db_path)
+    let mut task_file = db::begin(&state.db_path)
         .map_err(|e| app_error(StatusCode::INTERNAL_SERVER_ERROR, e))?;
     let idx = task_file
         .tasks
@@ -431,7 +431,7 @@ async fn done_task(
     }
 
     let completed = task_file.tasks[idx].clone();
-    db::save(&state.db_path, &task_file).map_err(|e| app_error(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    task_file.commit().map_err(|e| app_error(StatusCode::INTERNAL_SERVER_ERROR, e))?;
     Ok(Json(DoneResponse { completed, spawned }))
 }
 
@@ -440,7 +440,7 @@ async fn reopen_task(
     AxumPath(id): AxumPath<u32>,
 ) -> Result<Json<Task>, (StatusCode, Json<serde_json::Value>)> {
     let _guard = state.write_lock.lock().await;
-    let mut task_file = db::load(&state.db_path)
+    let mut task_file = db::begin(&state.db_path)
         .map_err(|e| app_error(StatusCode::INTERNAL_SERVER_ERROR, e))?;
     let updated_task = {
         let t = task_file
@@ -450,7 +450,7 @@ async fn reopen_task(
         t.updated = Some(chrono::Utc::now());
         t.clone()
     };
-    db::save(&state.db_path, &task_file).map_err(|e| app_error(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    task_file.commit().map_err(|e| app_error(StatusCode::INTERNAL_SERVER_ERROR, e))?;
     Ok(Json(updated_task))
 }
 
@@ -459,12 +459,12 @@ async fn delete_task(
     AxumPath(id): AxumPath<u32>,
 ) -> Result<StatusCode, (StatusCode, Json<serde_json::Value>)> {
     let _guard = state.write_lock.lock().await;
-    let mut task_file = db::load(&state.db_path)
+    let mut task_file = db::begin(&state.db_path)
         .map_err(|e| app_error(StatusCode::INTERNAL_SERVER_ERROR, e))?;
     task_file
         .remove_task(id)
         .ok_or_else(|| app_error(StatusCode::NOT_FOUND, format!("Task {} not found", id)))?;
-    db::save(&state.db_path, &task_file).map_err(|e| app_error(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    task_file.commit().map_err(|e| app_error(StatusCode::INTERNAL_SERVER_ERROR, e))?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -689,7 +689,7 @@ async fn create_task_note(
     Json(req): Json<CreateNoteRequest>,
 ) -> Result<Json<NoteResponse>, (StatusCode, Json<serde_json::Value>)> {
     let _guard = state.write_lock.lock().await;
-    let mut task_file = db::load(&state.db_path)
+    let mut task_file = db::begin(&state.db_path)
         .map_err(|e| app_error(StatusCode::INTERNAL_SERVER_ERROR, e))?;
     if task_file.find_task(id).is_none() {
         return Err(app_error(StatusCode::NOT_FOUND, format!("Task {} not found", id)));
@@ -703,7 +703,7 @@ async fn create_task_note(
 
     let t = task_file.find_task_mut(id).expect("checked above");
     t.notes.push(slug.clone());
-    db::save(&state.db_path, &task_file).map_err(|e| app_error(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    task_file.commit().map_err(|e| app_error(StatusCode::INTERNAL_SERVER_ERROR, e))?;
 
     let modified = modified_time(&note_path);
     Ok(Json(note_response(note, modified)))
@@ -767,7 +767,7 @@ async fn add_task_review_feedback(
     }
 
     let _guard = state.write_lock.lock().await;
-    let mut task_file = db::load(&state.db_path)
+    let mut task_file = db::begin(&state.db_path)
         .map_err(|e| app_error(StatusCode::INTERNAL_SERVER_ERROR, e))?;
 
     let dir = notes_dir(&state);
@@ -801,7 +801,7 @@ async fn add_task_review_feedback(
         t.work_status = Some(crate::task::WorkStatus::ChangesRequested);
         t.updated = Some(chrono::Utc::now());
     }
-    db::save(&state.db_path, &task_file)
+    task_file.commit()
         .map_err(|e| app_error(StatusCode::INTERNAL_SERVER_ERROR, e))?;
 
     let note = crate::note::read_note(&note_path)
@@ -821,7 +821,7 @@ async fn answer_task_question(
     }
 
     let _guard = state.write_lock.lock().await;
-    let mut task_file = db::load(&state.db_path)
+    let mut task_file = db::begin(&state.db_path)
         .map_err(|e| app_error(StatusCode::INTERNAL_SERVER_ERROR, e))?;
 
     let dir = notes_dir(&state);
@@ -855,7 +855,7 @@ async fn answer_task_question(
         t.work_status = Some(crate::task::WorkStatus::ChangesRequested);
         t.updated = Some(chrono::Utc::now());
     }
-    db::save(&state.db_path, &task_file)
+    task_file.commit()
         .map_err(|e| app_error(StatusCode::INTERNAL_SERVER_ERROR, e))?;
 
     let note = crate::note::read_note(&note_path)
@@ -909,13 +909,13 @@ async fn unlink_task_note(
         return Err(app_error(StatusCode::BAD_REQUEST, "invalid note slug"));
     }
     let _guard = state.write_lock.lock().await;
-    let mut task_file = db::load(&state.db_path)
+    let mut task_file = db::begin(&state.db_path)
         .map_err(|e| app_error(StatusCode::INTERNAL_SERVER_ERROR, e))?;
     let t = task_file
         .find_task_mut(id)
         .ok_or_else(|| app_error(StatusCode::NOT_FOUND, format!("Task {} not found", id)))?;
     t.notes.retain(|s| s != &slug);
-    db::save(&state.db_path, &task_file).map_err(|e| app_error(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    task_file.commit().map_err(|e| app_error(StatusCode::INTERNAL_SERVER_ERROR, e))?;
     Ok(StatusCode::NO_CONTENT)
 }
 

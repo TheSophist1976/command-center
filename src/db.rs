@@ -195,13 +195,7 @@ fn migrate_from_markdown(db_path: &Path, conn: &mut Connection) -> Result<(), St
     Ok(())
 }
 
-pub fn load(path: &Path) -> Result<TaskFile, String> {
-    let needs_migration = !path.exists();
-    let mut conn = open_conn(path)?;
-    if needs_migration {
-        migrate_from_markdown(path, &mut conn)?;
-    }
-
+fn load_from_conn(conn: &Connection) -> Result<TaskFile, String> {
     let mut stmt = conn
         .prepare("SELECT id, title, status, priority, tags, created, updated, description, due_date, project, recurrence, notes, agent, effort, work_status, instructions FROM tasks ORDER BY id")
         .map_err(|e| format!("Failed to prepare query: {}", e))?;
@@ -221,16 +215,118 @@ pub fn load(path: &Path) -> Result<TaskFile, String> {
     Ok(task_file)
 }
 
+fn open_migrated(path: &Path) -> Result<Connection, String> {
+    let needs_migration = !path.exists();
+    let mut conn = open_conn(path)?;
+    if needs_migration {
+        migrate_from_markdown(path, &mut conn)?;
+    }
+    Ok(conn)
+}
+
+/// Read-only snapshot. Never write this back with `save`; use `begin` for any
+/// read-modify-write so concurrent writers cannot lose each other's changes.
+pub fn load(path: &Path) -> Result<TaskFile, String> {
+    load_from_conn(&open_migrated(path)?)
+}
+
+/// Tasks plus the data version they were read at, from one consistent snapshot.
+pub fn load_versioned(path: &Path) -> Result<(TaskFile, i64), String> {
+    let conn = open_migrated(path)?;
+    conn.execute_batch("BEGIN")
+        .map_err(|e| format!("Failed to start read transaction: {}", e))?;
+    let result = load_from_conn(&conn).and_then(|tf| Ok((tf, read_version(&conn)?)));
+    let _ = conn.execute_batch("ROLLBACK");
+    result
+}
+
+fn read_version(conn: &Connection) -> Result<i64, String> {
+    conn.query_row("PRAGMA user_version", [], |r| r.get(0))
+        .map_err(|e| format!("Failed to read data version: {}", e))
+}
+
+/// Change counter bumped by every committed write. Unlike the file's mtime it is
+/// reliable in WAL mode (where the main file is not touched on each commit).
+pub fn version(path: &Path) -> Result<i64, String> {
+    read_version(&open_migrated(path)?)
+}
+
+fn write_all(conn: &Connection, task_file: &TaskFile, next_version: i64) -> Result<(), String> {
+    conn.execute("DELETE FROM tasks", [])
+        .map_err(|e| format!("Failed to clear tasks: {}", e))?;
+    for t in &task_file.tasks {
+        insert_task_row(conn, t)?;
+    }
+    conn.execute_batch(&format!("PRAGMA user_version = {}", next_version))
+        .map_err(|e| format!("Failed to bump data version: {}", e))
+}
+
+/// A read-modify-write transaction. `begin` takes SQLite's write lock *before*
+/// reading, so no other process can commit between our read and our `commit`.
+/// Dropping without `commit` rolls everything back.
+pub struct TaskTxn {
+    conn: Connection,
+    task_file: TaskFile,
+    version: i64,
+    finished: bool,
+}
+
+pub fn begin(path: &Path) -> Result<TaskTxn, String> {
+    let conn = open_migrated(path)?;
+    conn.execute_batch("BEGIN IMMEDIATE")
+        .map_err(|e| format!("Failed to lock {}: {}", path.display(), e))?;
+    let mut txn = TaskTxn { conn, task_file: TaskFile::new(), version: 0, finished: false };
+    txn.task_file = load_from_conn(&txn.conn)?;
+    txn.version = read_version(&txn.conn)?;
+    Ok(txn)
+}
+
+impl TaskTxn {
+    /// The data version this transaction read, as returned by `db::version`.
+    pub fn version(&self) -> i64 {
+        self.version
+    }
+
+    pub fn commit(mut self) -> Result<(), String> {
+        write_all(&self.conn, &self.task_file, self.version + 1)?;
+        self.conn
+            .execute_batch("COMMIT")
+            .map_err(|e| format!("Failed to commit transaction: {}", e))?;
+        self.finished = true;
+        Ok(())
+    }
+}
+
+impl Drop for TaskTxn {
+    fn drop(&mut self) {
+        if !self.finished {
+            let _ = self.conn.execute_batch("ROLLBACK");
+        }
+    }
+}
+
+impl std::ops::Deref for TaskTxn {
+    type Target = TaskFile;
+    fn deref(&self) -> &TaskFile {
+        &self.task_file
+    }
+}
+
+impl std::ops::DerefMut for TaskTxn {
+    fn deref_mut(&mut self) -> &mut TaskFile {
+        &mut self.task_file
+    }
+}
+
+/// Unconditionally replaces every task. Last writer wins, so only use it to seed
+/// a database; read-modify-write code must go through `begin`.
 pub fn save(path: &Path, task_file: &TaskFile) -> Result<(), String> {
     let mut conn = open_conn(path)?;
     let tx = conn
-        .transaction()
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
         .map_err(|e| format!("Failed to start transaction: {}", e))?;
-    tx.execute("DELETE FROM tasks", [])
-        .map_err(|e| format!("Failed to clear tasks: {}", e))?;
-    for t in &task_file.tasks {
-        insert_task_row(&tx, t)?;
-    }
+    let next_version = read_version(&tx)? + 1;
+    write_all(&tx, task_file, next_version)?;
     tx.commit()
         .map_err(|e| format!("Failed to commit transaction: {}", e))?;
     Ok(())
@@ -287,6 +383,77 @@ mod tests {
     use super::*;
     use tempfile::tempdir;
     use std::env;
+
+    #[test]
+    fn concurrent_begin_commit_loses_no_updates() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("tasks.db");
+        let mut seed = TaskFile::new();
+        seed.tasks = (1..=4).map(|i| sample_task(i, &format!("task {}", i))).collect();
+        save(&path, &seed).unwrap();
+
+        // Each thread edits a different task and adds one. With a plain load/save
+        // pair, overlapping threads overwrite each other's rows.
+        let handles: Vec<_> = (1..=4u32)
+            .map(|i| {
+                let path = path.clone();
+                std::thread::spawn(move || {
+                    for round in 0..5 {
+                        let mut txn = begin(&path).unwrap();
+                        txn.find_task_mut(i).unwrap().title = format!("task {} round {}", i, round);
+                        let id = txn.next_id;
+                        txn.next_id += 1;
+                        txn.tasks.push(sample_task(id, &format!("added by {} round {}", i, round)));
+                        txn.commit().unwrap();
+                    }
+                })
+            })
+            .collect();
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        let tf = load(&path).unwrap();
+        assert_eq!(tf.tasks.len(), 4 + 4 * 5, "an added task was lost");
+        let mut ids: Vec<u32> = tf.tasks.iter().map(|t| t.id).collect();
+        ids.sort();
+        ids.dedup();
+        assert_eq!(ids.len(), tf.tasks.len(), "duplicate ids were handed out");
+        for i in 1..=4u32 {
+            assert_eq!(tf.find_task(i).unwrap().title, format!("task {} round 4", i), "edit to task {} was lost", i);
+        }
+    }
+
+    #[test]
+    fn dropping_a_transaction_without_commit_changes_nothing() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("tasks.db");
+        let mut seed = TaskFile::new();
+        seed.tasks = vec![sample_task(1, "keep")];
+        save(&path, &seed).unwrap();
+        let before = version(&path).unwrap();
+
+        {
+            let mut txn = begin(&path).unwrap();
+            txn.tasks.clear();
+        }
+
+        assert_eq!(load(&path).unwrap().tasks.len(), 1);
+        assert_eq!(version(&path).unwrap(), before);
+    }
+
+    #[test]
+    fn every_commit_bumps_the_version() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("tasks.db");
+        save(&path, &TaskFile::new()).unwrap();
+        let v0 = version(&path).unwrap();
+        begin(&path).unwrap().commit().unwrap();
+        assert_eq!(version(&path).unwrap(), v0 + 1);
+        save(&path, &TaskFile::new()).unwrap();
+        assert_eq!(version(&path).unwrap(), v0 + 2);
+        assert_eq!(load_versioned(&path).unwrap().1, v0 + 2);
+    }
 
     fn sample_task(id: u32, title: &str) -> Task {
         Task {

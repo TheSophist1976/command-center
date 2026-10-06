@@ -865,14 +865,14 @@ struct App {
     session_viewing_output: bool,
     session_output_scroll: usize,
     session_output_follow: bool,
-    // mtime of tasks.db at last load — used to detect external writes before saving
-    file_mtime: Option<std::time::SystemTime>,
+    // db::version at last load/save — used to detect external writes before saving
+    file_version: Option<i64>,
 }
 
 impl App {
     fn new(path: &Path) -> Result<Self, String> {
-        let task_file = db::load(path)?;
-        let file_mtime = std::fs::metadata(path).ok().and_then(|m| m.modified().ok());
+        let (task_file, version) = db::load_versioned(path)?;
+        let file_version = Some(version);
         let view = config::read_config_value("default-view")
             .map(|v| View::from_config(&v))
             .unwrap_or(View::Due);
@@ -937,7 +937,7 @@ impl App {
             session_viewing_output: false,
             session_output_scroll: 0,
             session_output_follow: true,
-            file_mtime,
+            file_version,
         };
         app.table_state.select(Some(0));
         // Load persisted sessions
@@ -1110,34 +1110,30 @@ impl App {
     }
 
     fn save(&mut self) -> Result<(), String> {
-        // If the file was modified externally since we last loaded it, reload first
-        // to avoid clobbering external writes (e.g. from agent subagents).
-        if let Some(stored_mtime) = self.file_mtime {
-            if let Ok(meta) = std::fs::metadata(&self.file_path) {
-                if let Ok(current_mtime) = meta.modified() {
-                    if current_mtime != stored_mtime {
-                        let _ = self.reload_from_disk();
-                        self.status_message = Some(
-                            "File changed externally — reloaded. Please redo your action."
-                                .to_string(),
-                        );
-                        return Ok(());
-                    }
-                }
-            }
+        // Hold the write lock from the staleness check through the commit, so an agent
+        // or the web UI cannot slip a change in between. If the db changed since we
+        // loaded it, reload instead of clobbering their write.
+        let mut txn = db::begin(&self.file_path)?;
+        if self.file_version.is_some_and(|v| v != txn.version()) {
+            drop(txn);
+            let _ = self.reload_from_disk();
+            self.status_message = Some(
+                "File changed externally — reloaded. Please redo your action.".to_string(),
+            );
+            return Ok(());
         }
-        db::save(&self.file_path, &self.task_file)?;
-        self.file_mtime =
-            std::fs::metadata(&self.file_path).ok().and_then(|m| m.modified().ok());
+        let next_version = txn.version() + 1;
+        *txn = self.task_file.clone();
+        txn.commit()?;
+        self.file_version = Some(next_version);
         Ok(())
     }
 
     fn reload_from_disk(&mut self) -> Result<(), String> {
-        let task_file = db::load(&self.file_path)?;
+        let (task_file, version) = db::load_versioned(&self.file_path)?;
         let n = task_file.tasks.len();
         self.task_file = task_file;
-        self.file_mtime =
-            std::fs::metadata(&self.file_path).ok().and_then(|m| m.modified().ok());
+        self.file_version = Some(version);
         self.clamp_selection();
         self.status_message = Some(format!("Reloaded {} tasks from disk", n));
         Ok(())
@@ -2043,7 +2039,9 @@ fn handle_input(app: &mut App, key: KeyCode, action: InputAction) -> Result<(), 
                         config::write_config_value("default-dir", &trimmed)
                             .map_err(|e| format!("Failed to save config: {}", e))?;
                         let new_path = std::path::PathBuf::from(&trimmed).join("tasks.db");
-                        app.task_file = db::load(&new_path)?;
+                        let (task_file, version) = db::load_versioned(&new_path)?;
+                        app.task_file = task_file;
+                        app.file_version = Some(version);
                         app.file_path = new_path;
                         app.selected = 0;
                         app.table_state.select(Some(0));
@@ -4099,7 +4097,7 @@ mod tests {
             session_viewing_output: false,
             session_output_scroll: 0,
             session_output_follow: true,
-            file_mtime: None,
+            file_version: None,
         }
     }
 
@@ -4145,7 +4143,7 @@ mod tests {
         task_file.tasks = tasks;
         // Write initial file so save() works
         let _ = db::save(&path, &task_file);
-        let file_mtime = std::fs::metadata(&path).ok().and_then(|m| m.modified().ok());
+        let file_version = db::version(&path).ok();
         App {
             task_file,
             file_path: path,
@@ -4181,7 +4179,7 @@ mod tests {
             session_viewing_output: false,
             session_output_scroll: 0,
             session_output_follow: true,
-            file_mtime,
+            file_version,
         }
     }
 
@@ -4749,10 +4747,7 @@ mod tests {
     }
 
     #[test]
-    fn external_db_save_changes_mtime_so_save_guard_fires() {
-        // Verifies that db::save (as used by the CLI, e.g. `task edit`) actually
-        // changes tasks.db's mtime even though the connection runs in WAL mode,
-        // so the App::save() external-change guard reliably detects it.
+    fn external_db_write_bumps_version_so_save_guard_fires() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("tasks.db");
         let mut task_file = TaskFile::new();
@@ -4760,27 +4755,15 @@ mod tests {
         db::save(&path, &task_file).unwrap();
 
         let mut app = App::new(&path).unwrap();
-        let loaded_mtime = app.file_mtime;
-        assert!(loaded_mtime.is_some());
-
-        // Ensure the filesystem clock advances past its granularity before the
-        // external write, so the mtime comparison isn't a false negative.
-        std::thread::sleep(std::time::Duration::from_millis(1100));
+        let loaded_version = app.file_version;
+        assert!(loaded_version.is_some());
 
         // Simulate an external CLI process (`task edit`) writing to the same db.
         let mut second_task = make_task(None);
         second_task.id = 2;
         task_file.tasks.push(second_task);
         db::save(&path, &task_file).unwrap();
-
-        let current_mtime = std::fs::metadata(&path).ok().and_then(|m| m.modified().ok());
-        assert!(
-            current_mtime.is_some() && current_mtime != loaded_mtime,
-            "expected tasks.db mtime to change after an external db::save, \
-             loaded={:?} current={:?}",
-            loaded_mtime,
-            current_mtime
-        );
+        assert_ne!(db::version(&path).ok(), loaded_version);
 
         // App::save() should detect this, reload, and refuse to clobber the
         // external write instead of silently overwriting it.
@@ -4792,6 +4775,24 @@ mod tests {
             app.status_message,
             Some("File changed externally — reloaded. Please redo your action.".to_string())
         );
+    }
+
+    #[test]
+    fn save_succeeds_when_nothing_changed_externally() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("tasks.db");
+        let mut task_file = TaskFile::new();
+        task_file.tasks = vec![make_task(None)];
+        db::save(&path, &task_file).unwrap();
+
+        let mut app = App::new(&path).unwrap();
+        app.task_file.tasks[0].title = "edited".to_string();
+        app.save().unwrap();
+        app.task_file.tasks[0].title = "edited again".to_string();
+        app.save().unwrap();
+
+        assert_eq!(app.status_message, None);
+        assert_eq!(db::load(&path).unwrap().tasks[0].title, "edited again");
     }
 
     // -- per-view-grouping tests --

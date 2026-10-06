@@ -140,13 +140,13 @@ fn run(cli: Cli) -> Result<(), (i32, String)> {
                     println!("{}", file_path.display());
 
                     if let Some(id) = task_id {
-                        let mut task_file = task::db::load(&path).map_err(|e| (1, e))?;
+                        let mut task_file = task::db::begin(&path).map_err(|e| (1, e))?;
                         match task_file.find_task_mut(id) {
                             Some(t) => {
                                 if !t.notes.contains(&slug) {
                                     t.notes.push(slug.clone());
                                 }
-                                task::db::save(&path, &task_file).map_err(|e| (1, e))?;
+                                task_file.commit().map_err(|e| (1, e))?;
                             }
                             None => {
                                 eprintln!("Warning: task {} not found; note was created but not linked", id);
@@ -201,12 +201,12 @@ fn run(cli: Cli) -> Result<(), (i32, String)> {
                 }
 
                 NoteCommand::Link { slug, task_id } => {
-                    let mut task_file = task::db::load(&path).map_err(|e| (1, e))?;
+                    let mut task_file = task::db::begin(&path).map_err(|e| (1, e))?;
                     match task_file.find_task_mut(task_id) {
                         Some(t) => {
                             if !t.notes.contains(&slug) {
                                 t.notes.push(slug.clone());
-                                task::db::save(&path, &task_file).map_err(|e| (1, e))?;
+                                task_file.commit().map_err(|e| (1, e))?;
                                 println!("Linked note '{}' to task {}", slug, task_id);
                             } else {
                                 println!("Note '{}' already linked to task {}", slug, task_id);
@@ -218,14 +218,14 @@ fn run(cli: Cli) -> Result<(), (i32, String)> {
                 }
 
                 NoteCommand::Unlink { task_id } => {
-                    let mut task_file = task::db::load(&path).map_err(|e| (1, e))?;
+                    let mut task_file = task::db::begin(&path).map_err(|e| (1, e))?;
                     match task_file.find_task_mut(task_id) {
                         Some(t) => {
                             if t.notes.is_empty() {
                                 println!("Task {} has no linked notes", task_id);
                             } else if t.notes.len() == 1 {
                                 let removed = t.notes.remove(0);
-                                task::db::save(&path, &task_file).map_err(|e| (1, e))?;
+                                task_file.commit().map_err(|e| (1, e))?;
                                 println!("Unlinked note '{}' from task {}", removed, task_id);
                             } else {
                                 println!("Task {} has {} notes. Use `task note unlink-slug <slug> {}` to remove a specific note.", task_id, t.notes.len(), task_id);
