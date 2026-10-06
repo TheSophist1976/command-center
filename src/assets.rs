@@ -63,6 +63,19 @@ mod tests {
     }
 
     #[test]
+    fn shared_skills_name_no_personal_paths_or_harness_specific_tools() {
+        let skills = [
+            ("task-manager", include_str!("../skills/task-manager/SKILL.md")),
+            ("work-agent-tasks", include_str!("../plugin/skills/work-agent-tasks/SKILL.md")),
+            ("slack-later-capture", include_str!("../plugin/skills/slack-later-capture/SKILL.md")),
+        ];
+        for (name, text) in skills {
+            assert!(!text.contains("Mark-main"), "{} hardcodes a personal path", name);
+            assert!(!text.contains("AskUserQuestion"), "{} names a harness-specific tool", name);
+        }
+    }
+
+    #[test]
     fn agents_md_is_embedded() {
         assert!(AGENTS_MD.contains("needs-input"));
     }

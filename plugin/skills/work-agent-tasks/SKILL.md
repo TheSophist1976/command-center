@@ -5,71 +5,59 @@ description: Use when asked to "work my tasks", "work tasks", "execute my tasks"
 
 # Work Agent Tasks
 
-Orchestrate task execution by spawning a dedicated subagent for each agent type that has open tasks. Each subagent receives its specific instructions, memory, and tasks.
+Orchestrate task execution by giving each agent type that has open tasks its own worker. Each worker receives its specific instructions, memory, and tasks.
+
+A "worker" is whatever your harness offers for delegated work: a subagent, a parallel session, a background job. If your harness has none, work the agent types one after another in the same order; everything below still applies.
+
+The `task` CLI finds `tasks.db` on its own (`default-dir` in the config file, the `TASK_FILE` environment variable, or the global `--file <path>` flag). Never hardcode a database path. See the `task-manager` skill for the full CLI reference, the review-thread flow, and the question handshake.
 
 ## Step 1: Discover Agent Types and Their Tasks
 
-Read `~/Library/Application Support/task-manager/config.md` (macOS) or `~/.config/task-manager/config.md` (Linux).
+Read the config file: `~/Library/Application Support/task-manager/config.md` (macOS) or `~/.config/task-manager/config.md` (Linux).
 
 Find all `agent-<name>: <dir>` entries — these are the registered agent types (e.g. `Research`, `Follow-up`, `Writer`, `Reviewer`, `Automator`).
 
-For each agent name, run `task list --agent <name> --status open` **using the exact casing from config.md** (e.g. `Follow-up`, `Automator` — NOT lowercased) against `~/Documents/Mark-main/Tasks/tasks.db` to find its eligible open tasks. The `--agent` filter is a case-sensitive exact match, and tasks are stored with the same casing the `agent-<Name>:` config line uses — `--agent follow-up` silently matches nothing even though `--agent Follow-up` finds real tasks. (This is different from the lowercased/hyphenated convention used for `Notes/Agents/<name>/` file paths in Step 2/3 below — that directory naming is a separate, genuinely-lowercased convention on disk; don't apply it here.) Use `task show <id>` on each to get full detail (description, notes, recurrence, work_status) when building the subagent's task list.
+For each agent name, run `task list --agent <name> --status open` **using the exact casing from the config file** (e.g. `Follow-up`, not `follow-up`). The `--agent` filter is a case-sensitive exact match, so `--agent follow-up` silently matches nothing even though `--agent Follow-up` finds real tasks. Use `task show <id>` on each task to get full detail (description, instructions, notes, recurrence, work_status).
 
 **Skip the following tasks:**
 - Recurring tasks (a `recur` value shown in `task show <id>`) whose due date is in the future — these are scheduled for a later cycle and should not be worked early
-- Tasks whose `work_status` is already `waiting-for-review` or `complete` — these were already handed back by a prior run and are awaiting the human's review or `task done`. Handback no longer reassigns `agent` (see below), so these tasks stay in the `--agent <name>` filtered list until the human acts on them; re-picking them up would clobber that handback.
+- Tasks whose `work_status` is already `waiting-for-review` or `complete` — these were already handed back by a prior run and are awaiting the human's review or `task done`. Handback does not reassign `agent`, so these stay in the `--agent <name>` list until the human acts; re-picking them up would clobber that handback.
 
-**Do NOT skip tasks whose `work_status` is `changes-requested`** — this is exactly what this step should pick up. It means a human left feedback on a `task-<id>-review-thread` note and the task needs another round. See the standing instructions below for how to handle these.
+**Do NOT skip tasks whose `work_status` is `changes-requested`** — this is exactly what this step should pick up. It means a human left feedback on a `task-<id>-review-thread` note, or answered a question, and the task needs another round.
 
-(Tasks with `agent:human` or no `agent` field never show up in an `--agent <name>` filtered list, so no extra filtering is needed for those.)
+(Tasks with `agent:human` or no `agent` field never show up in an `--agent <name>` list, so no extra filtering is needed for those.)
 
-Build a map of: `agent-name → [list of eligible open tasks]`. Only agents with at least one eligible task need a subagent spawned.
+Build a map of `agent-name → [eligible open tasks]`. Only agents with at least one eligible task need a worker.
 
-## Step 2: Read Instructions for Each Active Agent
+## Step 2: Read Instructions and Memory for Each Active Agent
 
-For each agent that has open tasks, read its instructions from:
+For each agent that has eligible tasks, run (with the same exact name as in the config file — the CLI maps it to the right note on disk, including the legacy location):
+
 ```
-~/Documents/Mark-main/Tasks/Notes/Agents/<agent-name>/instructions.md
-```
-
-The `<agent-name>` is lowercased and hyphenated (e.g. `Follow-up` → `follow-up`, `Research` → `research`).
-
-If no file exists at the new path, fall back to the legacy path:
-```
-~/Documents/Mark-main/Tasks/Notes/Instructions/<agent-name>.md
+task agent instructions <name> show
+task agent memory <name> show
 ```
 
-If no instructions file exists at either path, the subagent uses only the standing instructions in this skill.
+If either prints "No … found", that is not an error: use only the standing instructions in this skill. Memory contains patterns and preferences learned from past tasks; the worker should treat it as persistent context that informs how it works, not as instructions to follow literally.
 
-## Step 3: Read Memory for Each Active Agent
+## Step 3: Start Workers
 
-For each agent that has open tasks, read its memory from:
-```
-~/Documents/Mark-main/Tasks/Notes/Agents/<agent-name>/memory.md
-```
+**One worker per agent type**, given all of that agent's tasks in a single prompt. **Exception — independent, slow tasks:** for agent types whose tasks are independent of each other and often wait on slow external calls (the `Automator` profile is the usual example), start one worker **per task**, so total time is the slowest single task rather than the sum.
 
-Memory contains patterns and preferences learned from past tasks. If no memory file exists, proceed without it — an empty memory is not an error.
+Each `task` command that writes is a single atomic transaction, so workers can run concurrently without overwriting each other. That includes archive-style tasks: have them delete each archived task individually with `task rm <id>`.
 
-Pass the memory content to the subagent alongside the instructions. The subagent should treat memory as persistent context that informs how it works, not as instructions to follow literally.
+Each worker receives:
 
-## Step 4: Spawn Subagents — One Per Task for Automator, One Per Agent Type for Others
+1. The agent's instructions (from Step 2)
+2. The agent's memory (from Step 2), if any
+3. The specific task(s) it owns: id, title, description, instructions, metadata, attached notes
+4. The standing instructions below
 
-**For the `Automator` agent type:** spawn one subagent **per task** (not one for all tasks). Automator tasks are independent and often involve slow MCP calls (Jira, Slack) — parallelizing them cuts total wall-clock time from 15+ minutes to the duration of the slowest single task.
-
-**For all other agent types** (Follow-up, Reviewer, Writer, Research, Notes-Leadership, etc.): spawn one subagent per agent type as before, passing all tasks for that agent in a single prompt.
-
-**The archive task (title matches "Archive Closed Tasks...", `recur:monthly`) no longer needs special sequencing.** Tasks now live in a SQLite database (`tasks.db`), and each `task rm <id>` / `task edit <id>` call is its own atomic, transactional operation — unlike the old markdown file, there is no whole-file rewrite for concurrent subagents to race on. The archive task can run in the same parallel batch as everything else; just have it delete each archived task individually with `task rm <id>` rather than doing any bulk file rewrite.
-
-Each subagent receives:
-
-1. The agent's full instructions from its instructions file
-2. The agent's memory from its memory file (if it exists)
-3. The specific task(s) assigned to that subagent (task ID, title, description, metadata, attached notes)
-4. The following standing instructions (apply to all subagents regardless of agent type):
+Start all workers at once if your harness can run them in parallel. Wait for every worker to finish before reporting.
 
 ---
 
-**Standing instructions for all subagents:**
+**Standing instructions for all workers:**
 
 You are working tasks assigned to `agent:<name>`. Follow the instructions provided for your agent type exactly. Apply your memory as persistent context — it reflects patterns and preferences learned from previous work.
 
@@ -77,142 +65,95 @@ You are working tasks assigned to `agent:<name>`. Follow the instructions provid
 ```
 task note show task-<id>-review-thread
 ```
-This is a running conversation between you and the human; earlier rounds carry context (what was tried, what was explained) that matters for getting this round right. Only after reading the whole thread should you proceed to "For each task, before doing any work" below.
+This is a running conversation between you and the human; earlier rounds carry context (what was tried, what was explained) that matters for getting this round right.
 
-**If a `changes-requested` task has a `task-<id>-question` note ending in an `## Answer — <date>` section**, the human answered your `needs-input` question from the web UI instead of the terminal. Read the question note (`task note show task-<id>-question`), treat that answer as the response to your question, set `--work-status in-progress`, and continue the task — do not ask the question again.
+**If a `changes-requested` task has a `task-<id>-question` note ending in an `## Answer — <date>` section**, the human answered your `needs-input` question from the web UI. Read the question note (`task note show task-<id>-question`), treat that answer as the response, set `--work-status in-progress`, and continue — do not ask the question again.
 
 **For each task, before doing any work:**
-1. Read the task title and description carefully, **and the task's own instructions**: run `task show <id>` and read the `## Instructions` section if it has one. These are what the human wants done for this specific task and they supplement your agent instructions. Never rewrite them yourself — if they are unclear or conflict with your agent instructions, ask (step 3)
-2. Read all notes attached to the task (`notes` field, comma-separated slugs, shown by `task show <id>`). Use `task note show <slug>` to read each one.
-   - **Instruction notes first**: notes whose slug or title contains `instructions`, `how-to`, or `steps` must be read before anything else — they contain task-specific guidance that overrides or supplements your agent instructions
-   - **Other notes**: read for context after instruction notes
-3. If anything is unclear after reading the task and all its notes, use `AskUserQuestion` to ask the human before proceeding (see "Any time you have a question" below for the `needs-input` handshake to run alongside it)
-4. Update the task title and description to reflect the clarified scope (`task edit <id> --title "..." --description "..."`); leave `--instructions` as the human wrote it
-5. Mark the task as started: `task edit <id> --work-status in-progress`
+1. Read the task title and description, **and the task's own instructions**: run `task show <id>` and read the `## Instructions` section if it has one. These are what the human wants done for this specific task and they supplement your agent instructions. Never rewrite them yourself — if they are unclear or conflict with your agent instructions, ask (step 3).
+2. Read all notes attached to the task (the `notes` field shown by `task show <id>`) with `task note show <slug>`.
+   - **Instruction notes first**: notes whose slug or title contains `instructions`, `how-to`, or `steps` carry task-specific guidance that overrides or supplements your agent instructions.
+   - Read the other notes for context afterwards.
+3. If anything is unclear, ask — see "Questions" below.
+4. Update the task title and description to reflect the clarified scope (`task edit <id> --title "..." --description "..."`); leave `--instructions` as the human wrote it.
+5. Mark the task started: `task edit <id> --work-status in-progress`
 
-**While working, keep `work_status` current** — it's how the human tracks your progress without you having to mark the task done. If a task genuinely spans multiple distinct phases and you want to signal that, update it again mid-task (e.g. back to `in-progress` after a pause); otherwise setting it once at the start is enough until handback.
+**While working, keep `work_status` current** — it is how the human tracks your progress without you marking the task done. Set it once at the start; update it mid-task only if the task has distinct phases or you pause for a question.
 
 **Work tasks in this order:**
-1. **Due date** — earliest due date first; tasks with no due date go last
+1. **Due date** — earliest first; tasks with no due date go last. Overdue before due today before due later.
 2. **Priority** — within the same due date: `critical` → `high` → `medium` → `low`
 
-Tasks that are overdue (due date before today) come before tasks due today, which come before tasks due in the future.
-
-**Any time you have a question — before starting, or mid-work — ask it and keep going:**
-- Before calling `AskUserQuestion`, surface the question in a note so it shows up as a badge in the command-center web UI even if the human isn't watching this terminal:
-  ```bash
-  task note show task-<id>-question 2>/dev/null   # check whether it already exists
-  ```
-  If that fails, create it — `task note add`'s slug comes from slugifying the title (there's no `--slug` flag), so the title must be exactly `Task <id> Question` for the slug to come out as `task-<id>-question`:
-  ```bash
-  task note add "Task <id> Question" --task <id>
-  ```
-  Either way, set the question text (`--body` replaces the whole body, which is correct since only one question is active at a time) and set the status:
-  ```bash
-  task note edit task-<id>-question --body "<the question>"
-  task edit <id> --work-status needs-input
-  ```
-- Then use `AskUserQuestion` immediately, whether the question arises before you start or partway through the work
-- Once answered, set `task edit <id> --work-status in-progress` (or whatever status the task was in before the question) so the `needs-input` badge clears, then continue working the task to completion in the same session — do not stop, park, or hand the task back just because a question came up
-- Never guess at an answer instead of asking, and never silently skip part of a task because something was unclear
+**Questions — before starting or mid-work:**
+- Follow the "Asking a Question" steps in the `task-manager` skill: write the question to the `task-<id>-question` note and set `--work-status needs-input`, so it shows as a badge in the web UI even if the human is not watching your session.
+- Then put the question to the human with whatever interactive question mechanism your harness provides, and continue once answered: set `--work-status` back to `in-progress` (or the prior status) and finish the task in the same session.
+- If your harness cannot ask interactively, leave the task at `needs-input`, move on to your next task, and list it in your report. The human answers in the web UI and the task comes back as `changes-requested`.
+- Never guess an answer, and never silently skip part of a task because something was unclear.
 
 **After completing each task, hand it back for review:**
-- Ensure the artifact is reflected in the task's linked note (create one via `task note add "<title>" --task <id>` and link it via `task note link <slug> <id>` if none exists yet)
-- **If this was a `changes-requested` round** (a `task-<id>-review-thread` note already exists), append your response to that same thread instead of only relying on the artifact note:
+- Make sure the result is reflected in a note linked to the task (create one with `task note add "<title>" --task <id>` if none exists).
+- **If this was a `changes-requested` round** (a `task-<id>-review-thread` note exists), append your response to that thread:
   ```
   task note append task-<id>-review-thread --body "## Agent response — <YYYY-MM-DD>
 
   <summary of what changed>"
   ```
-  This keeps the whole back-and-forth in one place the human can read top to bottom.
-- Set `task edit <id> --work-status waiting-for-review`
-- (`task edit` sets the `updated` timestamp automatically — no need to set it yourself)
-- Consider whether to update memory (see Updating Memory below)
+- Set `task edit <id> --work-status waiting-for-review`. (`updated` is set automatically.)
+- Consider whether to update memory (see below).
 
-**For recurring tasks (a `recur` value is set): do NOT touch the due date yourself.** Leave it exactly as it is and only set `work_status`. The human reviews the note, decides the cycle is actually done, and runs `task done <id>` themselves — `done` already knows the recurrence rule and computes the correct next due date automatically, spawning the next occurrence at that point. An agent pre-advancing `--due` on a still-open task both duplicates that logic and makes the task silently vanish from "due today" views before the human ever reviewed it — do not do this, even if old memory notes say to.
+**Recurring tasks (a `recur` value is set): do NOT touch the due date.** Leave it exactly as it is and only set `work_status`. The human reviews, decides the cycle is done, and runs `task done <id>` themselves, which computes the next due date and spawns the next occurrence. Pre-advancing `--due` yourself duplicates that logic and makes the task vanish from "due today" views before anyone reviewed it — even if old memory notes say to.
 
 **Rules:**
-- Never mark a task complete (`task done <id>`) yourself — setting `--work-status waiting-for-review` signals readiness; the human reviews and marks it done
-- **Never edit `--due` on a recurring task.** Only `done` (run by the human) advances it, via the recurrence engine's next-occurrence spawn.
-- **Never reassign a task's `agent` field to `human`.** The task stays owned by your agent profile; `work_status` alone signals handback. The human finds review-ready tasks by filtering/grouping on `work_status` (the web UI's Work status group-by/badge, or `task show <id>`), not by `agent`.
-- **Never set `--work-status complete` as a substitute for handback or for `task done`** — it does not mark the task done. Use `waiting-for-review` as described above; only the human decides when a task is actually `complete`/done.
-- If a task genuinely cannot be completed even after asking clarifying questions, write a note explaining why and set `--work-status waiting-for-review` so it surfaces for review
-- Do not fabricate results
-
-See the `task-manager` skill for the full CLI command reference and note commands.
+- Never run `task done <id>` yourself — `--work-status waiting-for-review` signals readiness; the human reviews and closes the task.
+- Never edit `--due` on a recurring task.
+- Never reassign a task's `agent` field to `human`. The task stays owned by your agent profile; `work_status` alone signals handback.
+- Never set `--work-status complete` as a substitute for handback or for `task done`.
+- If a task cannot be completed even after asking, write a note explaining why and set `--work-status waiting-for-review` so it surfaces for review.
+- Do not fabricate results.
 
 ---
 
 ## Updating Memory
 
-After completing tasks, each subagent should consider whether to update its memory file. Memory captures learned context that improves future work — it is not a task log.
+After completing tasks, each worker should consider whether to update its agent's memory. Memory captures learned context that improves future work — it is not a task log.
 
 **Update memory when:**
-- A preference or pattern has been observed at least twice (e.g. "Mark prefers bullet points over prose in summaries")
-- A standing fact is established (e.g. a recurring contact, a known project constraint, a consistent tone preference)
-- A past mistake is being corrected (e.g. "Previously wrote formal tone — Mark prefers casual for internal docs")
+- A preference or pattern has been observed at least twice
+- A standing fact is established (a recurring contact, a project constraint, a consistent tone preference)
+- A past mistake is being corrected
 
 **Do NOT update memory for:**
 - One-off task details (those belong in the task note)
-- Information specific to a single task that won't recur
+- Anything specific to a single task that will not recur
 - Anything likely to change within the current sprint
 
-**How to write:**
-Use `task agent memory <name> edit --body "<updated content>"` or write the file directly at `Notes/Agents/<name>/memory.md`.
+**How to write:** `task agent memory <name> edit --body "<updated content>"`
 
-**Suggested memory sections:**
-```markdown
-## Preferences
-- Mark prefers bullet points over prose in summaries
-- Casual tone for internal documents; formal for external
+Memory is free-form markdown. Suggested sections: `## Preferences`, `## Patterns`, `## Standing Context`. Review and prune outdated entries periodically.
 
-## Patterns
-- Follow-up tasks for Jira issues often require checking the related Slack thread too
-- Research tasks on architecture topics: check Confluence before Slack
+## Step 4: Report Back
 
-## Standing Context
-- Primary Jira project: ITS
-- Slack workspace: itential
-```
-
-Memory is free-form markdown — add, edit, or remove sections as needed. Review and prune outdated entries periodically.
-
-## Step 5: Run All Subagents in Parallel
-
-All subagents are independent — spawn them all in a single message so they run concurrently. This includes: every per-task Automator subagent (including archive, per the note in Step 4) AND every per-type subagent for other agents. Send one message with all Agent tool calls at once. There is no longer a sequencing requirement for the archive task — each subagent's `task` CLI calls are individually transactional against the SQLite database, so concurrent writes from different subagents can't clobber each other.
-
-Any subagent with a question — at any point in its work, not just at the start — sets `--work-status needs-input` and writes the question to `task-<id>-question` (see "Any time you have a question" in Step 4 above) before surfacing it via `AskUserQuestion`, then clears back to its prior status and keeps working once answered. Batch questions across tasks where possible to avoid repeated interruptions, but never let a question stop a subagent from finishing its task.
-
-Wait for all subagents to report completion before moving to Step 6 — do not proceed on partial results.
-
-## Step 6: Report Back
-
-After all subagents complete, summarize to the human:
+After all workers finish, summarize to the human:
 - Which agents ran and how many tasks each worked
 - Any memory updates made
-- Tasks now marked `work_status: waiting-for-review` (ready for your review)
-- Any tasks that were `changes-requested` rounds — note these explicitly, since the human already reviewed this task once and left feedback
-- Any questions that came up mid-work and how they were resolved
-- Any tasks that could not be completed and why
+- Tasks now `waiting-for-review`
+- Tasks that were `changes-requested` rounds — call these out, since the human already reviewed them once
+- Questions that came up and how they were resolved, and any tasks left at `needs-input`
+- Tasks that could not be completed, and why
 
 ## Quick Reference
 
-| Action | Location / Command |
-|--------|-------------------|
-| Config file (macOS) | `~/Library/Application Support/task-manager/config.md` |
-| Tasks database | `~/Documents/Mark-main/Tasks/tasks.db` |
+| Action | Command |
+|--------|---------|
 | List an agent's open tasks | `task list --agent <name> --status open` |
-| Show full task detail (incl. the task's `## Instructions`) | `task show <id>` |
-| Mark task started | `task edit <id> --work-status in-progress` |
-| Read a review thread in full | `task note show task-<id>-review-thread` |
+| Full task detail (incl. `## Instructions`) | `task show <id>` |
+| Mark started | `task edit <id> --work-status in-progress` |
+| Read a review thread | `task note show task-<id>-review-thread` |
 | Respond to feedback | `task note append task-<id>-review-thread --body "## Agent response — <date>\n\n<summary>"` |
-| Mark done | `task done <id>` (never do this yourself for others' tasks — this is also what advances a recurring task's due date and spawns the next occurrence, so leave `--due` alone on recurring tasks and let the human trigger this) |
-| Delete (archive) a task | `task rm <id>` |
-| Agent instructions | `~/Documents/Mark-main/Tasks/Notes/Agents/<name>/instructions.md` |
-| Agent memory | `~/Documents/Mark-main/Tasks/Notes/Agents/<name>/memory.md` |
-| Show memory | `task agent memory <name> show` |
-| Update memory | `task agent memory <name> edit --body "<content>"` |
-| Create note | `task note add "<title>" --task <id>` |
-| Ask a question, any time | write question to `task-<id>-question` note (title exactly `Task <id> Question` if creating) + `--work-status needs-input`, then `AskUserQuestion` — clear back to prior status once answered, then keep working |
+| Ask a question | write `task-<id>-question` note + `--work-status needs-input` (see `task-manager`) |
 | Hand back for review | `task edit <id> --work-status waiting-for-review` |
-| Timestamp format | ISO 8601 UTC e.g. `2026-05-08T14:00:00+00:00` (set automatically by the CLI) |
+| Read agent instructions / memory | `task agent instructions <name> show` / `task agent memory <name> show` |
+| Update memory | `task agent memory <name> edit --body "<content>"` |
+| Create a linked note | `task note add "<title>" --task <id>` |
+| Mark done | `task done <id>` — the human's call; also what advances a recurring task |
+| Delete (archive) a task | `task rm <id>` |
