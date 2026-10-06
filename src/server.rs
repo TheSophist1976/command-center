@@ -479,13 +479,7 @@ async fn list_agents() -> Json<Vec<AgentProfile>> {
 /// Mirrors the CLI's `task agent instructions`/`task agent memory` slug resolution
 /// (src/bin/task.rs), so the web UI edits the exact same files.
 fn agent_notes_dir(state: &AppState, slug: &str) -> PathBuf {
-    state
-        .db_path
-        .parent()
-        .unwrap_or(std::path::Path::new("."))
-        .join("Notes")
-        .join("Agents")
-        .join(slug)
+    crate::agent::agent_dir(&state.notes_dir, slug)
 }
 
 fn agent_exists(name: &str) -> bool {
@@ -495,8 +489,7 @@ fn agent_exists(name: &str) -> bool {
 }
 
 fn instructions_slug(name: &str) -> String {
-    crate::config::read_config_value(&format!("agent-{}-instructions", name))
-        .unwrap_or_else(|| crate::note::slugify(name))
+    crate::agent::instructions_slug(name)
 }
 
 async fn get_agent_instructions(
@@ -616,11 +609,11 @@ fn notes_dir(state: &AppState) -> PathBuf {
 }
 
 fn review_thread_slug(task_id: u32) -> String {
-    format!("task-{}-review-thread", task_id)
+    crate::agent::review_thread_slug(task_id)
 }
 
 fn question_slug(task_id: u32) -> String {
-    format!("task-{}-question", task_id)
+    crate::agent::question_slug(task_id)
 }
 
 /// Slugs become filenames (`{slug}.md`) joined onto the notes directory. Reject anything

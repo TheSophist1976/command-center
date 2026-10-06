@@ -57,6 +57,28 @@ pub enum Command {
         subcommand: AgentCommand,
     },
 
+    /// Show which agent profile is in effect (TASK_AGENT, else the working directory)
+    Whoami {
+        /// Print JSON instead of text
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// List the tasks an agent should work now, in order
+    Next {
+        /// Agent profile (default: TASK_AGENT, else the profile for the working directory)
+        #[arg(long)]
+        agent: Option<String>,
+
+        /// Return at most this many tasks
+        #[arg(long)]
+        limit: Option<usize>,
+
+        /// Print the full work queue as JSON: instructions, memory, tasks, review threads, notes
+        #[arg(long)]
+        json: bool,
+    },
+
     /// Add a new task
     Add {
         /// Task title (wrap in quotes if it contains spaces)
@@ -97,7 +119,7 @@ pub enum Command {
         #[arg(long)]
         status: Option<String>,
 
-        /// Filter by assigned agent
+        /// Filter by assigned agent, ignoring case (default: TASK_AGENT when set)
         #[arg(long)]
         agent: Option<String>,
 

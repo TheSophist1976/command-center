@@ -87,16 +87,21 @@ pub fn filter_and_sort_tasks<'a>(
     tag: Option<&str>,
     due_before: Option<chrono::NaiveDate>,
 ) -> Vec<&'a Task> {
-    let mut result: Vec<&Task> = tasks
+    let result: Vec<&Task> = tasks
         .iter()
         .filter(|t| status.is_none_or(|s| t.status == s))
-        .filter(|t| agent.is_none_or(|a| t.agent.as_deref() == Some(a)))
+        .filter(|t| agent.is_none_or(|a| t.agent.as_deref().is_some_and(|x| x.eq_ignore_ascii_case(a))))
         .filter(|t| project.is_none_or(|p| t.project.as_deref() == Some(p)))
         .filter(|t| tag.is_none_or(|tag| t.tags.iter().any(|x| x == tag)))
         .filter(|t| due_before.is_none_or(|d| t.due_date.is_some_and(|td| td <= d)))
         .collect();
 
-    result.sort_by(|a, b| {
+    sort_by_due_then_priority(result)
+}
+
+/// Earliest due date first (undated last), then highest priority first.
+pub fn sort_by_due_then_priority(mut tasks: Vec<&Task>) -> Vec<&Task> {
+    tasks.sort_by(|a, b| {
         let date_cmp = match (a.due_date, b.due_date) {
             (Some(x), Some(y)) => x.cmp(&y),
             (Some(_), None) => std::cmp::Ordering::Less,
@@ -105,8 +110,7 @@ pub fn filter_and_sort_tasks<'a>(
         };
         date_cmp.then(a.priority.cmp(&b.priority))
     });
-
-    result
+    tasks
 }
 
 pub fn list(path: &Path, args: ListArgs) -> Result<String, (i32, String)> {
@@ -144,6 +148,40 @@ pub fn list(path: &Path, args: ListArgs) -> Result<String, (i32, String)> {
         let status = if t.status == Status::Done { "x" } else { " " };
         lines.push(format!("[{}] {:>4}  {:<8} {:<10}  {}", status, t.id, t.priority, due, t.title));
     }
+    Ok(lines.join("\n"))
+}
+
+pub struct NextArgs {
+    pub agent: String,
+    pub limit: Option<usize>,
+    pub json: bool,
+}
+
+/// The tasks `agent` should work now, in order. With `json`, the full work queue
+/// (instructions, memory, review threads, answered questions, linked notes).
+pub fn next(path: &Path, notes_dir: &Path, args: NextArgs) -> Result<String, (i32, String)> {
+    let task_file = db::load(path).map_err(|e| (1, e))?;
+    let profiles = crate::config::list_agent_profiles();
+    let agent = crate::agent::resolve_name(&profiles, &args.agent);
+    let today = chrono::Local::now().date_naive();
+    let tasks = crate::agent::eligible(&task_file.tasks, &agent, today);
+
+    if args.json {
+        let v = crate::agent::queue_json(&agent, notes_dir, &tasks, args.limit);
+        return serde_json::to_string_pretty(&v).map_err(|e| (1, e.to_string()));
+    }
+    if tasks.is_empty() {
+        return Ok(format!("Nothing to work for {}.", agent));
+    }
+    let lines: Vec<String> = tasks
+        .iter()
+        .take(args.limit.unwrap_or(usize::MAX))
+        .map(|t| {
+            let entry = crate::agent::queue_entry(t, notes_dir);
+            let due = t.due_date.map(|d| d.format("%Y-%m-%d").to_string()).unwrap_or_else(|| "-".to_string());
+            format!("{:>4}  {:<17} {:<8} {:<10}  {}", t.id, entry.pickup.as_str(), t.priority, due, t.title)
+        })
+        .collect();
     Ok(lines.join("\n"))
 }
 

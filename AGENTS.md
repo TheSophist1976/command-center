@@ -10,19 +10,43 @@ This file is installed into your task directory by `task setup` and refreshed by
 
 ## Finding Your Agent Profile
 
-Tasks can be assigned to specific AI agents using the `agent` field in the task metadata. To find tasks assigned to you:
+Tasks can be assigned to specific AI agents using the `agent` field in the task metadata. Agent names are matched **ignoring case** (`--agent follow-up` finds tasks assigned to `Follow-up`).
 
-1. **Read the config file** at `~/Library/Application Support/task-manager/config.md` (macOS) or `~/.config/task-manager/config.md` (Linux)
-2. **Find all `agent-*` entries** — each defines a named agent profile and its working directory:
-   ```
-   agent-command-center: ~/code/command-center
-   agent-itential: ~/code/itential
-   ```
-3. **Expand tildes** in directory paths (replace `~` with your home directory)
-4. **Find the profile whose directory is a prefix of your current working directory** — use the longest match if multiple profiles match
-5. **Filter tasks to those assigned to you** by running `task list --agent <your-profile-name>`
+**1. Say who you are.** Set `TASK_AGENT=<profile-name>` in the environment your harness starts you in. If you cannot, run from a directory inside your profile's directory (see below). Then check:
 
-**Example**: If your CWD is `/Users/mark/code/command-center/src` and a profile exists with dir `/Users/mark/code/command-center`, your agent name is `command-center`. Work only on tasks with `agent:command-center` in their metadata.
+```bash
+task whoami            # agent: <name>, source: TASK_AGENT or working-directory, dir: <profile dir>
+task whoami --json
+```
+
+`TASK_AGENT` wins over the working directory. `task whoami` exits with an error if neither identifies an agent.
+
+**2. Get your work queue:**
+
+```bash
+task next              # tasks you should work now, in order, one line each
+task next --json       # the full queue: your instructions, your memory, and every task with its notes
+```
+
+`task next` uses `TASK_AGENT` (or the working directory) unless you pass `--agent <name>`, and `--limit N` caps the list. It applies the selection rules for you: only open tasks assigned to you; it **skips** tasks at `waiting-for-review` or `complete` (already handed back), tasks at `needs-input` (blocked on the human), and recurring tasks that are not due yet; it orders by due date (earliest first, undated last) and then priority.
+
+Each task in the JSON has a `pickup` value telling you why it is there:
+
+| `pickup` | Meaning |
+|----------|---------|
+| `new` | Not started. |
+| `continue` | Already `in-progress`; resume it. |
+| `review_feedback` | The human left feedback; read `review_thread` first. |
+| `answered_question` | The human answered your `needs-input` question; the answer is at the end of `question`. |
+
+Alongside `task` it carries `review_thread` and `question` (note bodies, or `null`) and `notes` (the other linked notes, each with `slug`, `title`, `body`). Top-level `instructions` and `memory` are your standing instructions and memory, so you do not need to read them separately.
+
+**Without `TASK_AGENT`**, identity comes from the config file at `~/Library/Application Support/task-manager/config.md` (macOS) or `~/.config/task-manager/config.md` (Linux). Each `agent-*` entry defines a profile and its working directory:
+```
+agent-command-center: ~/code/command-center
+agent-itential: ~/code/itential
+```
+The profile whose directory is the longest prefix of your current working directory is you. Example: with CWD `/Users/mark/code/command-center/src` your name is `command-center`.
 
 **Tasks with `agent:human`** are for the human and should not be worked on by AI agents.
 

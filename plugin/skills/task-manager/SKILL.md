@@ -11,13 +11,15 @@ Every `task` command that writes is a single atomic transaction, so several agen
 
 ## Finding Your Tasks
 
-Tasks can be assigned to specific AI agents via the `agent` field in task metadata. To find tasks assigned to you:
+Tasks can be assigned to specific AI agents via the `agent` field in task metadata. Agent names are matched ignoring case.
 
-1. Read the config file at `~/Library/Application Support/task-manager/config.md` (macOS) or `~/.config/task-manager/config.md` (Linux)
-2. Find all lines starting with `agent-` — these define named agent profiles and their working directories, e.g. `agent-command-center: ~/code/command-center`
-3. Expand tildes in directory paths (replace `~` with your home directory)
-4. Find the profile whose directory is a prefix of your current working directory — use the longest match if multiple profiles match
-5. Run `task list --agent <your-profile-name> --status open` to see the tasks assigned to you
+1. Make sure you know who you are: `TASK_AGENT=<profile-name>` is set in your environment, or you are running inside your profile's working directory. Check with `task whoami`.
+2. Ask for your work queue:
+   ```
+   task next            # one line per task, in the order to work them
+   task next --json     # full queue: your instructions, memory, tasks, review threads, linked notes
+   ```
+   `task next` already skips tasks that were handed back (`waiting-for-review`, `complete`), tasks blocked on the human (`needs-input`), and recurring tasks that are not due yet. Each task in the JSON has a `pickup` of `new`, `continue`, `review_feedback` or `answered_question`, telling you why it is there.
 
 Only work on tasks assigned to your agent profile. Tasks with `agent:human` are for the human. Tasks with no `agent` field are unassigned — do not work on these unless explicitly told to.
 

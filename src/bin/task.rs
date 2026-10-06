@@ -247,10 +247,56 @@ fn run(cli: Cli) -> Result<(), (i32, String)> {
         }
 
         Some(Command::List { status, agent, project, tag, due_before }) => {
+            let agent = agent.or_else(task::agent::env_agent);
             let msg = task::commands::list(&path, task::commands::ListArgs {
                 status, agent, project, tag, due_before,
             })?;
             println!("{}", msg);
+            Ok(())
+        }
+
+        Some(Command::Whoami { json }) => {
+            let cwd = std::env::current_dir().map_err(|e| (1, e.to_string()))?;
+            let config = task::config::config_path();
+            let identity = config
+                .as_deref()
+                .and_then(|c| task::agent::identity(task::agent::env_agent().as_deref(), c, &cwd))
+                .or_else(|| {
+                    task::agent::env_agent().map(|name| task::agent::Identity {
+                        name,
+                        source: task::agent::Source::Env,
+                        dir: None,
+                    })
+                })
+                .ok_or_else(|| {
+                    (1, "No agent identity: set TASK_AGENT, or run from a directory under an agent-<name> profile".to_string())
+                })?;
+            if json {
+                println!(
+                    "{}",
+                    serde_json::json!({"agent": identity.name, "source": identity.source.label(), "dir": identity.dir})
+                );
+            } else {
+                println!("agent: {}\nsource: {}", identity.name, identity.source.label());
+                if let Some(dir) = &identity.dir {
+                    println!("dir: {}", dir);
+                }
+            }
+            Ok(())
+        }
+
+        Some(Command::Next { agent, limit, json }) => {
+            let agent = match agent.or_else(task::agent::env_agent) {
+                Some(a) => a,
+                None => {
+                    let cwd = std::env::current_dir().map_err(|e| (1, e.to_string()))?;
+                    task::config::config_path()
+                        .and_then(|c| task::config::find_agent_for_cwd_from(&c, &cwd))
+                        .ok_or_else(|| (1, "No agent given: pass --agent, set TASK_AGENT, or run from a directory under an agent-<name> profile".to_string()))?
+                }
+            };
+            let notes_dir = task::db::resolve_notes_dir(&path);
+            println!("{}", task::commands::next(&path, &notes_dir, task::commands::NextArgs { agent, limit, json })?);
             Ok(())
         }
 
@@ -287,10 +333,8 @@ fn run(cli: Cli) -> Result<(), (i32, String)> {
 
             match subcommand {
                 AgentCommand::Instructions { name, action } => {
-                    let slug = task::config::read_config_value(
-                        &format!("agent-{}-instructions", name)
-                    )
-                    .unwrap_or_else(|| task::note::slugify(&name));
+                    let name = task::agent::resolve_name(&task::config::list_agent_profiles(), &name);
+                    let slug = task::agent::instructions_slug(&name);
 
                     // New path: Notes/Agents/<slug>/instructions.md
                     let agents_dir = notes_dir.join("Agents").join(&slug);
@@ -344,6 +388,7 @@ fn run(cli: Cli) -> Result<(), (i32, String)> {
                 }
 
                 AgentCommand::Memory { name, action } => {
+                    let name = task::agent::resolve_name(&task::config::list_agent_profiles(), &name);
                     let slug = task::note::slugify(&name);
                     let agents_dir = notes_dir.join("Agents").join(&slug);
                     let memory_path = agents_dir.join("memory.md");

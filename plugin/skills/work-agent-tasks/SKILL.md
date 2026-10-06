@@ -17,28 +17,19 @@ Read the config file: `~/Library/Application Support/task-manager/config.md` (ma
 
 Find all `agent-<name>: <dir>` entries — these are the registered agent types (e.g. `Research`, `Follow-up`, `Writer`, `Reviewer`, `Automator`).
 
-For each agent name, run `task list --agent <name> --status open` **using the exact casing from the config file** (e.g. `Follow-up`, not `follow-up`). The `--agent` filter is a case-sensitive exact match, so `--agent follow-up` silently matches nothing even though `--agent Follow-up` finds real tasks. Use `task show <id>` on each task to get full detail (description, instructions, notes, recurrence, work_status).
-
-**Skip the following tasks:**
-- Recurring tasks (a `recur` value shown in `task show <id>`) whose due date is in the future — these are scheduled for a later cycle and should not be worked early
-- Tasks whose `work_status` is already `waiting-for-review` or `complete` — these were already handed back by a prior run and are awaiting the human's review or `task done`. Handback does not reassign `agent`, so these stay in the `--agent <name>` list until the human acts; re-picking them up would clobber that handback.
-
-**Do NOT skip tasks whose `work_status` is `changes-requested`** — this is exactly what this step should pick up. It means a human left feedback on a `task-<id>-review-thread` note, or answered a question, and the task needs another round.
-
-(Tasks with `agent:human` or no `agent` field never show up in an `--agent <name>` list, so no extra filtering is needed for those.)
-
-Build a map of `agent-name → [eligible open tasks]`. Only agents with at least one eligible task need a worker.
-
-## Step 2: Read Instructions and Memory for Each Active Agent
-
-For each agent that has eligible tasks, run (with the same exact name as in the config file — the CLI maps it to the right note on disk, including the legacy location):
+For each agent name, run:
 
 ```
-task agent instructions <name> show
-task agent memory <name> show
+task next --agent <name> --json
 ```
 
-If either prints "No … found", that is not an error: use only the standing instructions in this skill. Memory contains patterns and preferences learned from past tasks; the worker should treat it as persistent context that informs how it works, not as instructions to follow literally.
+Agent names are matched ignoring case. The result is that agent's work queue, already filtered and ordered: it leaves out tasks that were handed back (`waiting-for-review`, `complete`), tasks blocked on the human (`needs-input`), and recurring tasks that are not due yet. A `changes-requested` task is included, with `pickup` set to `review_feedback` (the human left feedback on the review thread) or `answered_question` (the human answered a question from the web UI). A task with an empty `tasks` list needs no worker.
+
+(Tasks with `agent:human` or no `agent` field never appear in an agent's queue.)
+
+## Step 2: What Each Worker Gets
+
+`task next --json` already carries everything a worker needs for its agent: `instructions` (the standing instructions note), `memory`, and for each task its full detail, `review_thread`, `question`, and linked `notes`. If `instructions` or `memory` is `null`, there is none: use only the standing instructions in this skill. Treat memory as persistent context that informs how the worker works, not as instructions to follow literally.
 
 ## Step 3: Start Workers
 
@@ -145,7 +136,8 @@ After all workers finish, summarize to the human:
 
 | Action | Command |
 |--------|---------|
-| List an agent's open tasks | `task list --agent <name> --status open` |
+| Work queue for an agent (filtered, ordered, with instructions and memory) | `task next --agent <name> --json` |
+| Who am I? | `task whoami` (uses `TASK_AGENT`, else the working directory) |
 | Full task detail (incl. `## Instructions`) | `task show <id>` |
 | Mark started | `task edit <id> --work-status in-progress` |
 | Read a review thread | `task note show task-<id>-review-thread` |
