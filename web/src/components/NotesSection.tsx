@@ -8,9 +8,11 @@ interface NotesSectionProps {
   onCreate: (title: string) => void;
   onOpen: (slug: string) => void;
   onUnlink: (slug: string) => void;
+  /** Larger rows and buttons for touch screens. */
+  touch?: boolean;
 }
 
-export function NotesSection({ notes, onCreate, onOpen, onUnlink }: NotesSectionProps) {
+export function NotesSection({ notes, onCreate, onOpen, onUnlink, touch }: NotesSectionProps) {
   const [adding, setAdding] = useState(false);
   const [newTitle, setNewTitle] = useState('');
 
@@ -23,7 +25,7 @@ export function NotesSection({ notes, onCreate, onOpen, onUnlink }: NotesSection
   }
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginTop: 8 }}>
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
       <div
         style={{
           fontFamily: 'var(--font-display)',
@@ -38,7 +40,7 @@ export function NotesSection({ notes, onCreate, onOpen, onUnlink }: NotesSection
       </div>
 
       {notes.length === 0 && !adding && (
-        <div style={{ fontSize: 13, color: 'var(--fg-5)', fontStyle: 'italic' }}>No notes yet.</div>
+        <div style={{ fontSize: touch ? 14 : 13, color: 'var(--fg-5)', fontStyle: 'italic' }}>No notes yet.</div>
       )}
 
       {notes.map((n) => (
@@ -50,7 +52,8 @@ export function NotesSection({ notes, onCreate, onOpen, onUnlink }: NotesSection
             gap: 8,
             border: '1px solid var(--hairline)',
             borderRadius: 6,
-            padding: '8px 10px',
+            padding: touch ? '0 4px 0 12px' : '8px 10px',
+            minHeight: touch ? 48 : undefined,
           }}
         >
           <button
@@ -65,7 +68,7 @@ export function NotesSection({ notes, onCreate, onOpen, onUnlink }: NotesSection
               border: 'none',
               cursor: 'pointer',
               textAlign: 'left',
-              fontSize: 13,
+              fontSize: touch ? 14 : 13,
               fontWeight: 600,
               color: 'var(--fg-1)',
               padding: 0,
@@ -77,9 +80,12 @@ export function NotesSection({ notes, onCreate, onOpen, onUnlink }: NotesSection
           <button
             onClick={() => onUnlink(n.slug)}
             title="Unlink note"
-            style={{ background: 'transparent', border: 'none', cursor: 'pointer', color: 'var(--fg-5)', padding: 0 }}
+            style={{
+              background: 'transparent', border: 'none', cursor: 'pointer', color: 'var(--fg-5)', padding: 0,
+              ...(touch ? { width: 40, height: 40, display: 'flex', alignItems: 'center', justifyContent: 'center' } : {}),
+            }}
           >
-            <X size={14} />
+            <X size={touch ? 16 : 14} />
           </button>
         </div>
       ))}
@@ -121,7 +127,7 @@ export function NotesSection({ notes, onCreate, onOpen, onUnlink }: NotesSection
           </Button>
         </div>
       ) : (
-        <Button size="sm" variant="secondary" onClick={() => setAdding(true)}>
+        <Button size={touch ? 'md' : 'sm'} variant="secondary" onClick={() => setAdding(true)}>
           + Add note
         </Button>
       )}

@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { Settings } from 'lucide-react';
 import type { UpdateStatus, VersionInfo } from '../types';
 import { fetchUpdateStatus, fetchVersion, startUpdate } from '../api';
 import { Button } from './Button';
@@ -14,7 +15,11 @@ const PHASE_TEXT: Record<UpdateStatus['phase'], string> = {
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
-export function VersionBadge() {
+/**
+ * Sidebar footer: the Settings row with the running version, plus the
+ * in-app updater when a newer release is available.
+ */
+export function SettingsFooter({ touch }: { touch?: boolean }) {
   const [info, setInfo] = useState<VersionInfo | null>(null);
   const [busy, setBusy] = useState(false);
   const [text, setText] = useState('');
@@ -91,22 +96,28 @@ export function VersionBadge() {
     setBusy(false);
   }
 
-  if (!info) return null;
+  const updatable = !!info?.update_available && !!info.latest;
 
   return (
-    <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 10, fontSize: 12, color: 'var(--fg-4)' }}>
-      <span>v{info.current}</span>
-      {info.update_available && info.latest && (
-        <>
-          <span style={{ color: 'var(--fg-2)' }}>v{info.latest} available</span>
-          {info.update_supported && (
+    <div style={{ marginTop: 'auto', padding: touch ? '14px 22px 0' : '14px 20px 0', borderTop: '1px solid var(--hairline-soft)', display: 'flex', flexDirection: 'column', gap: 10 }}>
+      {updatable && (
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10, fontSize: 12, color: 'var(--fg-2)' }}>
+          <span style={{ flex: 1 }}>v{info!.latest} available</span>
+          {info!.update_supported && (
             <Button size="sm" onClick={runUpdate} disabled={busy}>
               {busy ? text : 'Update'}
             </Button>
           )}
-        </>
+        </div>
       )}
-      {error && <span style={{ color: 'var(--danger)' }}>{error}</span>}
+      {error && <div style={{ fontSize: 12, color: 'var(--danger)' }}>{error}</div>}
+      <div style={{ display: 'flex', alignItems: 'center', gap: touch ? 12 : 10, minHeight: touch ? 44 : undefined }}>
+        <Settings size={touch ? 18 : 16} color="var(--fg-4)" />
+        <span style={{ flex: 1, fontSize: touch ? 15 : 14, color: 'var(--fg-3)' }}>Settings</span>
+        {info && (
+          <span style={{ fontFamily: 'var(--font-mono)', fontSize: touch ? 12 : 11.5, color: 'var(--fg-5)' }}>v{info.current}</span>
+        )}
+      </div>
     </div>
   );
 }

@@ -1,170 +1,67 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import './tokens.css';
 import './taskPanel.css';
-import { Terminal, Sun, CalendarDays, Settings, Search, PanelLeftClose, PanelLeftOpen, PanelRightClose, PanelRightOpen, X, AlertTriangle, HelpCircle, Repeat, CalendarOff, UserX, Inbox } from 'lucide-react';
+import './layout.css';
+import { Terminal, Search, PanelLeftClose, PanelLeftOpen, PanelRightClose, PanelRightOpen, Menu, ChevronLeft, Plus } from 'lucide-react';
 import { Button } from './components/Button';
 import { NewTaskForm } from './components/NewTaskForm';
-import { EditableField, FieldRow } from './components/EditableField';
 import { fetchTasks, fetchAgents, addTask, editTask, markDone, reopenTask, deleteTask, fetchTaskNotes, createTaskNote, openNote, unlinkTaskNote, fetchTaskReview, postTaskFeedback, fetchTaskQuestion, postTaskAnswer } from './api';
-import { NotesSection } from './components/NotesSection';
-import { ReviewPanel } from './components/ReviewPanel';
-import { QuestionPanel } from './components/QuestionPanel';
-import { AgentPicker } from './components/AgentPicker';
 import { AgentEditor } from './components/AgentEditor';
-import { DatePicker } from './components/DatePicker';
-import { Linkify } from './components/Linkify';
-import { VersionBadge } from './components/VersionBadge';
+import { SettingsFooter } from './components/SettingsFooter';
+import { TaskDetail } from './components/TaskDetail';
+import { TaskRow } from './components/TaskRow';
+import { MobileTaskRow } from './components/MobileTaskRow';
+import { MobileDrawer } from './components/MobileDrawer';
+import { MobileNewTaskSheet } from './components/MobileNewTaskSheet';
+import { CommandPalette, type PaletteCommand } from './components/CommandPalette';
+import { COL, sectionLabelStyle } from './styles';
 import type { Task, AgentProfile, Note } from './types';
-import { countDueWindow, dueMatches, startOfToday, isOverdue, type DueWindow } from './dueWindow';
+import { startOfToday } from './dueWindow';
 import { statusFor, statusColor } from './mockAgentStatus';
-
-type DueFilter = DueWindow | 'no-due-date' | 'recurring' | 'all-tasks' | 'inbox';
-
-const INBOX_ITEMS: { value: DueFilter; label: string }[] = [
-  { value: 'inbox', label: 'Inbox' },
-];
-
-const DUE_WINDOW_ITEMS: { value: DueFilter; label: string }[] = [
-  { value: 'day', label: 'Today' },
-  { value: 'week', label: 'This week' },
-  { value: 'month', label: 'This month' },
-  { value: 'year', label: 'This year' },
-  { value: 'no-due-date', label: 'No due date' },
-  { value: 'recurring', label: 'Recurring' },
-  { value: 'all-tasks', label: 'All tasks' },
-];
-
-const ALL_FILTER_ITEMS = [...INBOX_ITEMS, ...DUE_WINDOW_ITEMS];
-
-function hasNoDueDate(t: Task): boolean {
-  return t.status === 'open' && !t.due_date;
-}
-
-function isRecurring(t: Task): boolean {
-  return t.status === 'open' && !!t.recurrence;
-}
-
-function missingAgent(t: Task): boolean {
-  return t.status === 'open' && !t.agent;
-}
-
-function isInboxTask(t: Task, today: Date): boolean {
-  return t.status === 'open' && (!t.agent || !t.due_date || isOverdue(t, today));
-}
-
-function countForDueFilter(tasks: Task[], today: Date, value: DueFilter): number {
-  switch (value) {
-    case 'inbox':
-      return tasks.filter((t) => isInboxTask(t, today)).length;
-    case 'all-tasks':
-      return tasks.length;
-    case 'no-due-date':
-      return tasks.filter(hasNoDueDate).length;
-    case 'recurring':
-      return tasks.filter(isRecurring).length;
-    default:
-      return countDueWindow(tasks, today, value);
-  }
-}
+import { addDays, addMonths, formatLocalDate } from './taskFormat';
+import {
+  ALL_FILTER_ITEMS, DUE_WINDOW_ITEMS, GROUP_BY_OPTIONS, INBOX_ITEM,
+  countForFilter, groupTasks, matchesFilter, type DueFilter, type FilterItem, type GroupBy,
+} from './filters';
+import { useMediaQuery } from './useMediaQuery';
 
 const PANEL_MIN_WIDTH = 352;
 const PANEL_MAX_WIDTH = 880;
 const PANEL_DEFAULT_WIDTH = 440;
 
-const PRIORITY_OPTIONS = [
-  { value: 'critical', label: 'Critical' },
-  { value: 'high', label: 'High' },
-  { value: 'medium', label: 'Medium' },
-  { value: 'low', label: 'Low' },
+/** Below this width the app switches to the phone layout. */
+const MOBILE_QUERY = '(max-width: 720px)';
+
+/** Quick due-date shortcuts: key → [label, offset from today, or null to clear]. */
+const QUICK_DUE: [string, string, ((today: Date) => Date) | null][] = [
+  ['T', 'Due today', (d) => d],
+  ['N', 'Due tomorrow', (d) => addDays(d, 1)],
+  ['W', 'Due +1 week', (d) => addDays(d, 7)],
+  ['M', 'Due +1 month', (d) => addMonths(d, 1)],
+  ['Q', 'Due +1 quarter', (d) => addMonths(d, 3)],
+  ['Y', 'Due +1 year', (d) => addMonths(d, 12)],
+  ['X', 'Clear due date', null],
 ];
 
-const EFFORT_OPTIONS = [
-  { value: 'high', label: 'High' },
-  { value: 'medium', label: 'Medium' },
-  { value: 'low', label: 'Low' },
+/** Inspector field shortcuts: key → [label, element id to click]. */
+const FIELD_KEYS: [string, string, string][] = [
+  ['e', 'Edit title', 'field-title'],
+  ['d', 'Edit due date', 'field-due'],
+  ['p', 'Edit priority', 'field-priority'],
+  ['t', 'Edit tags', 'field-tags'],
+  ['A', 'Edit agent', 'field-agent'],
+  ['E', 'Edit effort', 'field-effort'],
 ];
 
-const WORK_STATUS_OPTIONS = [
-  { value: '', label: 'None' },
-  { value: 'todo', label: 'To Do' },
-  { value: 'in-progress', label: 'In Progress' },
-  { value: 'waiting-for-review', label: 'Waiting for Review' },
-  { value: 'changes-requested', label: 'Changes Requested' },
-  { value: 'needs-input', label: 'Needs Input' },
-  { value: 'complete', label: 'Complete' },
-];
-
-const WORK_STATUS_LABEL: Record<string, string> = {
-  'todo': 'To Do',
-  'in-progress': 'In Progress',
-  'waiting-for-review': 'Waiting for Review',
-  'changes-requested': 'Changes Requested',
-  'needs-input': 'Needs Input',
-  'complete': 'Complete',
-};
-
-const WORK_STATUS_COLOR: Record<string, string> = {
-  'todo': 'var(--fg-4)',
-  'in-progress': 'var(--citrine)',
-  'waiting-for-review': 'var(--cyan)',
-  'changes-requested': 'var(--danger)',
-  'needs-input': 'var(--danger)',
-  'complete': 'var(--teal)',
-};
-
-type GroupBy = 'agent' | 'project' | 'priority' | 'work_status' | 'none';
-
-const GROUP_BY_OPTIONS: { value: GroupBy; label: string }[] = [
-  { value: 'agent', label: 'Agent' },
-  { value: 'project', label: 'Project' },
-  { value: 'priority', label: 'Priority' },
-  { value: 'work_status', label: 'Work status' },
-  { value: 'none', label: 'None' },
-];
-
-const PRIORITY_ORDER: Record<string, number> = { critical: 0, high: 1, medium: 2, low: 3 };
-
-function groupKey(task: Task, groupBy: GroupBy): string {
-  switch (groupBy) {
-    case 'agent':
-      return task.agent ?? 'unassigned';
-    case 'project':
-      return task.project ?? 'no project';
-    case 'priority':
-      return task.priority;
-    case 'work_status':
-      return task.work_status ?? 'no status';
-    case 'none':
-      return '';
-  }
+function isTypingTarget(target: EventTarget | null): boolean {
+  if (!(target instanceof HTMLElement)) return false;
+  const tag = target.tagName;
+  return tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || target.isContentEditable;
 }
 
-function byPriority(a: Task, b: Task): number {
-  return (PRIORITY_ORDER[a.priority] ?? 99) - (PRIORITY_ORDER[b.priority] ?? 99);
+function countLabel(n: number): string {
+  return `${n} ${n === 1 ? 'task' : 'tasks'}`;
 }
-
-function groupTasks(tasks: Task[], groupBy: GroupBy): Map<string, Task[]> {
-  const groups = new Map<string, Task[]>();
-  for (const t of tasks) {
-    const key = groupKey(t, groupBy);
-    if (!groups.has(key)) groups.set(key, []);
-    groups.get(key)!.push(t);
-  }
-  for (const group of groups.values()) {
-    group.sort(byPriority);
-  }
-  if (groupBy === 'priority') {
-    return new Map([...groups.entries()].sort((a, b) => (PRIORITY_ORDER[a[0]] ?? 99) - (PRIORITY_ORDER[b[0]] ?? 99)));
-  }
-  return groups;
-}
-
-const priorityColor: Record<string, string> = {
-  critical: 'var(--danger)',
-  high: 'var(--citrine)',
-  medium: 'var(--fg-3)',
-  low: 'var(--fg-5)',
-};
 
 export default function App() {
   const [tasks, setTasks] = useState<Task[]>([]);
@@ -172,7 +69,6 @@ export default function App() {
   const [selected, setSelected] = useState<Task | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [showNewTaskForm, setShowNewTaskForm] = useState(false);
-  const [search, setSearch] = useState('');
   const [groupBy, setGroupBy] = useState<GroupBy>('agent');
   const [dueFilter, setDueFilter] = useState<DueFilter>('day');
   const [leftOpen, setLeftOpen] = useState(true);
@@ -186,8 +82,15 @@ export default function App() {
   const [taskNotes, setTaskNotes] = useState<Note[]>([]);
   const [review, setReview] = useState<Note | null>(null);
   const [question, setQuestion] = useState<Note | null>(null);
-  const [showShortcuts, setShowShortcuts] = useState(false);
+  const [paletteOpen, setPaletteOpen] = useState(false);
   const [editingAgent, setEditingAgent] = useState<AgentProfile | null>(null);
+  // Phone-only UI state.
+  const isMobile = useMediaQuery(MOBILE_QUERY);
+  const [mobileSearch, setMobileSearch] = useState<string | null>(null);
+  const [drawerOpen, setDrawerOpen] = useState(false);
+  const [newSheetOpen, setNewSheetOpen] = useState(false);
+  const [swipeOpenId, setSwipeOpenId] = useState<number | null>(null);
+
   const today = useMemo(() => startOfToday(), []);
   const agentOptions = useMemo(
     () => [
@@ -197,12 +100,12 @@ export default function App() {
     ],
     [agents],
   );
-  const searchInputRef = useRef<HTMLInputElement>(null);
   const panelRaf1 = useRef<number>(0);
   const panelRaf2 = useRef<number>(0);
   const reviewSlug = selected ? `task-${selected.id}-review-thread` : null;
   const questionSlug = selected ? `task-${selected.id}-question` : null;
   const visibleNotes = taskNotes.filter((n) => n.slug !== reviewSlug && n.slug !== questionSlug);
+  const filterItem: FilterItem = ALL_FILTER_ITEMS.find((i) => i.value === dueFilter) ?? INBOX_ITEM;
 
   function selectTask(task: Task) {
     setSelected(task);
@@ -269,15 +172,16 @@ export default function App() {
   }, [selected?.id]);
 
   useEffect(() => {
-    if (!selected) return;
+    if (!selected || isMobile) return;
     document.querySelector(`[data-task-row="${selected.id}"]`)?.scrollIntoView({ block: 'nearest' });
-  }, [selected?.id]);
+  }, [selected?.id, isMobile]);
 
-  async function handleAddTask(title: string) {
+  async function handleAddTask(input: { title: string; due?: string; agent?: string }) {
     try {
-      const created = await addTask({ title });
+      const created = await addTask(input);
       setTasks((prev) => [...prev, created]);
       setShowNewTaskForm(false);
+      setNewSheetOpen(false);
     } catch (e) {
       setError(String(e));
     }
@@ -291,10 +195,14 @@ export default function App() {
         const next = prev.map((t) => (t.id === completed.id ? completed : t));
         return spawned ? [...next, spawned] : next;
       });
-      const nextSelection = currentIndex === -1
+      if (selected?.id !== task.id) return;
+      // On desktop, completing the selected task moves on to the next one so you
+      // can keep triaging; on a phone you stay on the task you just completed.
+      const nextSelection = isMobile || currentIndex === -1
         ? completed
         : flatOrder[currentIndex + 1] ?? flatOrder[currentIndex - 1] ?? completed;
-      selectTask(nextSelection);
+      if (isMobile) setSelected(nextSelection);
+      else selectTask(nextSelection);
     } catch (e) {
       setError(String(e));
     }
@@ -304,10 +212,15 @@ export default function App() {
     try {
       const updated = await reopenTask(task.id);
       setTasks((prev) => prev.map((t) => (t.id === updated.id ? updated : t)));
-      setSelected(updated);
+      setSelected((prev) => (prev?.id === updated.id ? updated : prev));
     } catch (e) {
       setError(String(e));
     }
+  }
+
+  function toggleDone(task: Task) {
+    if (task.status === 'done') handleReopen(task);
+    else handleMarkDone(task);
   }
 
   async function handleDelete(task: Task) {
@@ -324,10 +237,14 @@ export default function App() {
     try {
       const updated = await editTask(id, changes);
       setTasks((prev) => prev.map((t) => (t.id === updated.id ? updated : t)));
-      setSelected(updated);
+      setSelected((prev) => (prev?.id === updated.id ? updated : prev));
     } catch (e) {
       setError(String(e));
     }
+  }
+
+  function setQuickDue(task: Task, date: Date | null) {
+    handleEditField(task.id, { due: date ? formatLocalDate(date) : '' });
   }
 
   function updateTaskNoteSlugs(taskId: number, notes: string[]) {
@@ -394,185 +311,133 @@ export default function App() {
     }
   }
 
+  const query = isMobile ? (mobileSearch ?? '') : '';
   const filteredTasks = useMemo(() => {
-    let result = tasks;
-    if (dueFilter === 'inbox') {
-      result = result.filter((t) => isInboxTask(t, today));
-    } else if (dueFilter === 'no-due-date') {
-      result = result.filter(hasNoDueDate);
-    } else if (dueFilter === 'recurring') {
-      result = result.filter(isRecurring);
-    } else if (dueFilter !== 'all-tasks') {
-      result = result.filter((t) => dueMatches(t, today, dueFilter));
-    }
-    const q = search.trim().toLowerCase();
+    let result = tasks.filter((t) => matchesFilter(t, today, dueFilter));
+    const q = query.trim().toLowerCase();
     if (q) {
       result = result.filter((t) => t.title.toLowerCase().includes(q));
     }
     return result;
-  }, [tasks, dueFilter, search, today]);
+  }, [tasks, dueFilter, query, today]);
 
   const grouped = useMemo(() => groupTasks(filteredTasks, groupBy), [filteredTasks, groupBy]);
   const flatOrder = useMemo(() => [...grouped.values()].flat(), [grouped]);
 
-  useEffect(() => {
-    function isTypingTarget(target: EventTarget | null): boolean {
-      if (!(target instanceof HTMLElement)) return false;
-      const tag = target.tagName;
-      return tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || target.isContentEditable;
-    }
+  function moveSelection(delta: number) {
+    if (flatOrder.length === 0) return;
+    const currentIndex = selected ? flatOrder.findIndex((t) => t.id === selected.id) : -1;
+    const nextIndex = currentIndex === -1 ? 0 : Math.min(Math.max(currentIndex + delta, 0), flatOrder.length - 1);
+    selectTask(flatOrder[nextIndex]);
+  }
 
-    function clickField(id: string) {
-      if (!selected || !rightOpen) return;
+  function cycleDueFilter(delta: number) {
+    const idx = DUE_WINDOW_ITEMS.findIndex((i) => i.value === dueFilter);
+    const next = (idx + delta + DUE_WINDOW_ITEMS.length) % DUE_WINDOW_ITEMS.length;
+    setDueFilter(DUE_WINDOW_ITEMS[next].value);
+  }
+
+  function cycleGroupBy() {
+    const idx = GROUP_BY_OPTIONS.findIndex((o) => o.value === groupBy);
+    setGroupBy(GROUP_BY_OPTIONS[(idx + 1) % GROUP_BY_OPTIONS.length].value);
+  }
+
+  function clickField(id: string) {
+    if (!selected) return;
+    if (rightOpen) {
       document.getElementById(id)?.click();
+      return;
     }
+    // Open the inspector first, then click once it has rendered.
+    setRightOpen(true);
+    window.setTimeout(() => document.getElementById(id)?.click(), 50);
+  }
 
-    function moveSelection(delta: number) {
-      if (flatOrder.length === 0) return;
-      const currentIndex = selected ? flatOrder.findIndex((t) => t.id === selected.id) : -1;
-      const nextIndex = currentIndex === -1 ? 0 : Math.min(Math.max(currentIndex + delta, 0), flatOrder.length - 1);
-      selectTask(flatOrder[nextIndex]);
+  function openFirstNote() {
+    if (selected?.notes?.length) handleOpenNote(selected.notes[0]);
+  }
+
+  function handleKeyDown(e: KeyboardEvent) {
+    if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
+      e.preventDefault();
+      setPaletteOpen((v) => !v);
+      return;
     }
+    if (e.metaKey || e.ctrlKey || e.altKey) return;
+    if (paletteOpen || isTypingTarget(e.target)) return;
 
-    function toggleDone(task: Task) {
-      if (task.status === 'done') handleReopen(task);
-      else handleMarkDone(task);
-    }
-
-    function cycleDueFilter(delta: number) {
-      const idx = DUE_WINDOW_ITEMS.findIndex((i) => i.value === dueFilter);
-      const next = (idx + delta + DUE_WINDOW_ITEMS.length) % DUE_WINDOW_ITEMS.length;
-      setDueFilter(DUE_WINDOW_ITEMS[next].value);
-    }
-
-    function cycleGroupBy() {
-      const idx = GROUP_BY_OPTIONS.findIndex((o) => o.value === groupBy);
-      const next = (idx + 1) % GROUP_BY_OPTIONS.length;
-      setGroupBy(GROUP_BY_OPTIONS[next].value);
-    }
-
-    function formatLocalDate(d: Date): string {
-      const y = d.getFullYear();
-      const m = String(d.getMonth() + 1).padStart(2, '0');
-      const day = String(d.getDate()).padStart(2, '0');
-      return `${y}-${m}-${day}`;
-    }
-
-    function addDays(d: Date, days: number): Date {
-      const copy = new Date(d);
-      copy.setDate(copy.getDate() + days);
-      return copy;
-    }
-
-    function addMonths(d: Date, months: number): Date {
-      const copy = new Date(d);
-      copy.setMonth(copy.getMonth() + months);
-      return copy;
-    }
-
-    function setQuickDue(offset: Date | null) {
-      if (!selected) return;
-      handleEditField(selected.id, { due: offset ? formatLocalDate(offset) : '' });
-    }
-
-    function handleKeyDown(e: KeyboardEvent) {
-      if (e.metaKey || e.ctrlKey || e.altKey) return;
-      if (isTypingTarget(e.target)) return;
-
-      switch (e.key) {
-        case 'j':
-        case 'ArrowDown':
-          e.preventDefault();
-          moveSelection(1);
-          break;
-        case 'k':
-        case 'ArrowUp':
-          e.preventDefault();
-          moveSelection(-1);
-          break;
-        case 'Enter':
-        case ' ':
-          if (selected) {
-            e.preventDefault();
-            toggleDone(selected);
-          }
-          break;
-        case 'a':
-          e.preventDefault();
-          setShowNewTaskForm(true);
-          break;
-        case 'e':
-          clickField('field-title');
-          break;
-        case 'd':
-          clickField('field-due');
-          break;
-        case 'p':
-          clickField('field-priority');
-          break;
-        case 't':
-          clickField('field-tags');
-          break;
-        case 'A':
-          e.preventDefault();
-          clickField('field-agent');
-          break;
-        case 'E':
-          clickField('field-effort');
-          break;
-        case 'g':
-          if (selected?.notes?.length) handleOpenNote(selected.notes[0]);
-          break;
-        case 'T':
-          if (selected) { e.preventDefault(); setQuickDue(today); }
-          break;
-        case 'N':
-          if (selected) { e.preventDefault(); setQuickDue(addDays(today, 1)); }
-          break;
-        case 'W':
-          if (selected) { e.preventDefault(); setQuickDue(addDays(today, 7)); }
-          break;
-        case 'M':
-          if (selected) { e.preventDefault(); setQuickDue(addMonths(today, 1)); }
-          break;
-        case 'Q':
-          if (selected) { e.preventDefault(); setQuickDue(addMonths(today, 3)); }
-          break;
-        case 'Y':
-          if (selected) { e.preventDefault(); setQuickDue(addMonths(today, 12)); }
-          break;
-        case 'X':
-          if (selected) { e.preventDefault(); setQuickDue(null); }
-          break;
-        case '/':
-          e.preventDefault();
-          searchInputRef.current?.focus();
-          break;
-        case 'G':
-          e.preventDefault();
-          cycleGroupBy();
-          break;
-        case '[':
-          e.preventDefault();
-          cycleDueFilter(-1);
-          break;
-        case ']':
-          e.preventDefault();
-          cycleDueFilter(1);
-          break;
-        case '?':
-          e.preventDefault();
-          setShowShortcuts((v) => !v);
-          break;
-        case 'Escape':
-          setRightOpen(false);
-          break;
+    const quick = QUICK_DUE.find(([key]) => key === e.key);
+    if (quick) {
+      if (selected) {
+        e.preventDefault();
+        setQuickDue(selected, quick[2] ? quick[2](today) : null);
       }
+      return;
+    }
+    const field = FIELD_KEYS.find(([key]) => key === e.key);
+    if (field) {
+      if (selected && rightOpen) {
+        if (e.key === 'A') e.preventDefault();
+        document.getElementById(field[2])?.click();
+      }
+      return;
     }
 
+    switch (e.key) {
+      case 'j':
+      case 'ArrowDown':
+        e.preventDefault();
+        moveSelection(1);
+        break;
+      case 'k':
+      case 'ArrowUp':
+        e.preventDefault();
+        moveSelection(-1);
+        break;
+      case 'Enter':
+      case ' ':
+        if (selected) {
+          e.preventDefault();
+          toggleDone(selected);
+        }
+        break;
+      case 'a':
+        e.preventDefault();
+        if (isMobile) setNewSheetOpen(true);
+        else setShowNewTaskForm(true);
+        break;
+      case 'g':
+        openFirstNote();
+        break;
+      case '/':
+      case '?':
+        e.preventDefault();
+        setPaletteOpen(true);
+        break;
+      case 'G':
+        e.preventDefault();
+        cycleGroupBy();
+        break;
+      case '[':
+        e.preventDefault();
+        cycleDueFilter(-1);
+        break;
+      case ']':
+        e.preventDefault();
+        cycleDueFilter(1);
+        break;
+      case 'Escape':
+        if (isMobile) setSelected(null);
+        else setRightOpen(false);
+        break;
+    }
+  }
+
+  // Re-subscribed every render so the handler always sees the latest state.
+  useEffect(() => {
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [selected, rightOpen, flatOrder, dueFilter, groupBy]);
+  });
 
   useEffect(() => {
     if (rightOpen) {
@@ -620,12 +485,211 @@ export default function App() {
     localStorage.setItem('taskPanelWidth', String(panelWidth));
   }, [panelWidth]);
 
+  function paletteCommands(): PaletteCommand[] {
+    const close = () => setPaletteOpen(false);
+    const cmd = (label: string, kbd: string, fn: () => void): PaletteCommand => ({ label, kbd, run: () => { close(); fn(); } });
+    return [
+      cmd('New task', 'a', () => setShowNewTaskForm(true)),
+      ...ALL_FILTER_ITEMS.map((f) => cmd(`Go to ${f.label}`, f.value === 'inbox' ? '' : '[ ]', () => setDueFilter(f.value))),
+      ...GROUP_BY_OPTIONS.map((g) => cmd(`Group by ${g.label.toLowerCase()}`, 'G', () => setGroupBy(g.value))),
+      cmd('Next task', 'j ↓', () => moveSelection(1)),
+      cmd('Previous task', 'k ↑', () => moveSelection(-1)),
+      ...(selected
+        ? [
+            cmd(`Selected: ${selected.status === 'done' ? 'reopen' : 'mark done'}`, 'Enter', () => toggleDone(selected)),
+            ...QUICK_DUE.map(([key, label, fn]) => cmd(`Selected: ${label.toLowerCase()}`, key, () => setQuickDue(selected, fn ? fn(today) : null))),
+            ...FIELD_KEYS.map(([key, label, id]) => cmd(`Selected: ${label.toLowerCase()}`, key, () => clickField(id))),
+            ...(selected.notes?.length ? [cmd('Selected: open first linked note', 'g', openFirstNote)] : []),
+          ]
+        : []),
+      cmd('Toggle sidebar', '', () => setLeftOpen((v) => !v)),
+      cmd(rightOpen ? 'Close inspector' : 'Open inspector', rightOpen ? 'Esc' : '', () => setRightOpen((v) => !v)),
+    ];
+  }
+
+  const detailProps = selected && {
+    task: selected,
+    today,
+    agentOptions,
+    review,
+    question,
+    notes: visibleNotes,
+    onEdit: (changes: Parameters<typeof editTask>[1]) => handleEditField(selected.id, changes),
+    onSendFeedback: handleSendFeedback,
+    onSendAnswer: handleSendAnswer,
+    onCreateNote: handleCreateNote,
+    onOpenNote: handleOpenNote,
+    onUnlinkNote: handleUnlinkNote,
+  };
+
+  function groupDot(name: string) {
+    if (groupBy !== 'agent' || !agents.some((a) => a.name === name)) return null;
+    return statusFor(name).state;
+  }
+
+  if (isMobile) {
+    return (
+      <div style={{ display: 'flex', flexDirection: 'column', height: '100dvh', overflow: 'hidden', paddingTop: 'env(safe-area-inset-top, 0px)' }}>
+        {mobileSearch === null ? (
+          <div style={{ height: 56, flex: 'none', display: 'flex', alignItems: 'center', gap: 4, padding: '0 6px' }}>
+            <MobileIconButton label="Menu" onClick={() => setDrawerOpen(true)}><Menu size={22} color="var(--fg-3)" /></MobileIconButton>
+            <span style={{ fontFamily: 'var(--font-display)', fontWeight: 600, fontSize: 22 }}>{filterItem.label}</span>
+            <span style={{ fontFamily: 'var(--font-mono)', fontSize: 13, color: 'var(--accent)', paddingTop: 4, marginLeft: 4 }}>{filteredTasks.length}</span>
+            <div style={{ flex: 1 }} />
+            <MobileIconButton label="Search" onClick={() => setMobileSearch('')}><Search size={20} color="var(--fg-3)" /></MobileIconButton>
+          </div>
+        ) : (
+          <div style={{ height: 56, flex: 'none', display: 'flex', alignItems: 'center', gap: 8, padding: '0 6px 0 16px' }}>
+            <div style={{ flex: 1, display: 'flex', alignItems: 'center', gap: 8, height: 40, padding: '0 12px', border: '1px solid var(--accent)', borderRadius: 5, background: 'var(--ink-2)' }}>
+              <Search size={16} color="var(--fg-4)" />
+              <input
+                autoFocus
+                value={mobileSearch}
+                onChange={(e) => setMobileSearch(e.target.value)}
+                placeholder="Search tasks…"
+                style={{ flex: 1, minWidth: 0, background: 'transparent', border: 'none', outline: 'none', color: 'var(--fg-1)', fontSize: 16 }}
+              />
+            </div>
+            <button
+              onClick={() => setMobileSearch(null)}
+              style={{ height: 44, padding: '0 10px', background: 'transparent', border: 'none', color: 'var(--accent)', fontSize: 15, fontWeight: 600, cursor: 'pointer' }}
+            >
+              Cancel
+            </button>
+          </div>
+        )}
+
+        <div className="no-scrollbar" style={{ flex: 'none', display: 'flex', gap: 8, overflowX: 'auto', padding: '4px 16px 12px' }}>
+          {ALL_FILTER_ITEMS.map((item) => {
+            const active = dueFilter === item.value;
+            return (
+              <button
+                key={item.value}
+                onClick={() => setDueFilter(item.value)}
+                style={{
+                  flex: 'none', display: 'flex', alignItems: 'center', gap: 6, height: 34, padding: '0 12px', borderRadius: 999, cursor: 'pointer', whiteSpace: 'nowrap',
+                  border: `1px solid ${active ? 'var(--accent-ring)' : 'var(--hairline)'}`,
+                  background: active ? 'var(--accent-soft)' : 'transparent',
+                }}
+              >
+                <span style={{ fontSize: 13.5, fontWeight: active ? 600 : 400, color: active ? 'var(--fg-1)' : 'var(--fg-3)' }}>{item.label}</span>
+                <span style={{ fontFamily: 'var(--font-mono)', fontSize: 12, color: active ? 'var(--accent)' : 'var(--fg-5)' }}>
+                  {countForFilter(tasks, today, item.value)}
+                </span>
+              </button>
+            );
+          })}
+        </div>
+
+        {error && <div style={{ padding: '8px 16px', color: 'var(--danger)', fontSize: 13 }}>{error}</div>}
+
+        <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', borderTop: '1px solid var(--hairline)', paddingBottom: 96 }}>
+          {[...grouped.entries()].map(([groupName, groupTasksList]) => {
+            const state = groupDot(groupName);
+            return (
+              <div key={groupName || 'all'}>
+                {groupBy !== 'none' && (
+                  <div style={{ position: 'sticky', top: 0, zIndex: 2, display: 'flex', alignItems: 'center', gap: 8, height: 36, padding: '0 16px', background: 'var(--ink-2)', borderBottom: '1px solid var(--hairline-soft)' }}>
+                    {state && <span style={{ width: 7, height: 7, borderRadius: 999, background: statusColor(state) }} />}
+                    <span style={{ fontFamily: 'var(--font-mono)', fontSize: 12.5, fontWeight: 600, textTransform: groupBy === 'priority' ? 'uppercase' : 'none' }}>{groupName}</span>
+                    <span style={{ fontSize: 12, color: 'var(--fg-4)' }}>{countLabel(groupTasksList.length)}</span>
+                    <span style={{ flex: 1 }} />
+                    {state && state !== 'idle' && (
+                      <span style={{ fontFamily: 'var(--font-mono)', fontSize: 11.5, color: statusColor(state) }}>{state}</span>
+                    )}
+                  </div>
+                )}
+                {groupTasksList.map((t) => (
+                  <MobileTaskRow
+                    key={t.id}
+                    task={t}
+                    today={today}
+                    showAgent={groupBy !== 'agent'}
+                    swipeOpen={swipeOpenId === t.id}
+                    onSwipeOpenChange={(open) => setSwipeOpenId(open ? t.id : null)}
+                    onSelect={() => { setSwipeOpenId(null); setSelected(t); }}
+                    onToggleDone={() => toggleDone(t)}
+                    onQuickDue={(days) => setQuickDue(t, addDays(today, days))}
+                  />
+                ))}
+              </div>
+            );
+          })}
+          {filteredTasks.length === 0 ? (
+            <EmptyState title={query ? 'No matches.' : filterItem.empty[0]} body={query ? '' : filterItem.empty[1]} padding="72px 32px" />
+          ) : (
+            <div style={{ padding: 16, textAlign: 'center', fontSize: 12, color: 'var(--fg-5)' }}>Swipe right to complete · left to set a due date</div>
+          )}
+        </div>
+
+        <button
+          onClick={() => setNewSheetOpen(true)}
+          aria-label="New task"
+          style={{
+            position: 'fixed', right: 20, bottom: 'calc(20px + env(safe-area-inset-bottom, 16px))', width: 56, height: 56, borderRadius: 16,
+            background: 'var(--accent)', border: 'none', display: 'flex', alignItems: 'center', justifyContent: 'center',
+            cursor: 'pointer', boxShadow: '0 8px 24px rgba(0, 0, 0, 0.35)', zIndex: 5,
+          }}
+        >
+          <Plus size={24} strokeWidth={2.5} color="var(--ink)" />
+        </button>
+
+        {selected && detailProps && (
+          <div className="mobile-detail" style={{ paddingTop: 'env(safe-area-inset-top, 0px)' }}>
+            <div style={{ height: 52, flex: 'none', display: 'flex', alignItems: 'center', gap: 4, padding: '0 6px', borderBottom: '1px solid var(--hairline)' }}>
+              <button
+                onClick={() => setSelected(null)}
+                style={{ height: 44, display: 'flex', alignItems: 'center', gap: 2, padding: '0 8px 0 4px', background: 'transparent', border: 'none', cursor: 'pointer', color: 'var(--accent)', fontSize: 15, fontWeight: 600 }}
+              >
+                <ChevronLeft size={22} color="var(--accent)" />
+                {filterItem.label}
+              </button>
+              <div style={{ flex: 1 }} />
+              <span style={{ fontFamily: 'var(--font-mono)', fontSize: 13, color: 'var(--fg-4)', paddingRight: 14 }}>#{selected.id}</span>
+            </div>
+            <div key={selected.id} style={{ flex: 1, minHeight: 0, overflowY: 'auto', padding: '16px 20px 24px', color: 'var(--fg-5)' }}>
+              <TaskDetail {...detailProps} mobile showId={false} />
+            </div>
+            <div style={{ flex: 'none', display: 'flex', gap: 10, padding: '12px 16px calc(12px + env(safe-area-inset-bottom, 22px))', borderTop: '1px solid var(--hairline)', background: 'var(--ink-2)' }}>
+              <MobileActionButton grow primary={selected.status === 'open'} onClick={() => toggleDone(selected)}>
+                {selected.status === 'open' ? 'Mark done' : 'Reopen'}
+              </MobileActionButton>
+              <MobileActionButton onClick={() => handleDelete(selected)}>Delete</MobileActionButton>
+            </div>
+          </div>
+        )}
+
+        {drawerOpen && (
+          <MobileDrawer
+            tasks={tasks}
+            today={today}
+            agents={agents}
+            filter={dueFilter}
+            groupBy={groupBy}
+            onFilter={(f) => { setDueFilter(f); setDrawerOpen(false); }}
+            onGroupBy={setGroupBy}
+            onClose={() => setDrawerOpen(false)}
+          />
+        )}
+
+        {newSheetOpen && (
+          <MobileNewTaskSheet
+            today={today}
+            agentNames={[...agents.map((a) => a.name), 'human']}
+            onSubmit={handleAddTask}
+            onClose={() => setNewSheetOpen(false)}
+          />
+        )}
+      </div>
+    );
+  }
+
   return (
     <div style={{ display: 'flex', height: '100vh', overflow: 'hidden' }}>
       {leftOpen && (
       <aside
         style={{
-          width: 252, flex: 'none', background: 'var(--ink-2)',
+          width: 252, flex: 'none', background: 'var(--ink-2)', overflowY: 'auto',
           borderRight: '1px solid var(--hairline)', display: 'flex', flexDirection: 'column', padding: '20px 0',
         }}
       >
@@ -635,81 +699,30 @@ export default function App() {
           </div>
           <span style={{ fontFamily: 'var(--font-display)', fontWeight: 700, fontSize: 14 }}>command center</span>
         </div>
-        <nav style={{ display: 'flex', flexDirection: 'column', padding: '0 10px', gap: 2, marginBottom: 12 }}>
-          {INBOX_ITEMS.map((item) => {
-            const active = dueFilter === item.value;
-            const count = countForDueFilter(tasks, today, item.value);
-            return (
-              <div
-                key={item.value}
-                onClick={() => setDueFilter(item.value)}
-                style={{
-                  display: 'flex', alignItems: 'center', gap: 10, height: 36, padding: '0 10px',
-                  borderRadius: 5, cursor: 'pointer',
-                  background: active ? 'var(--accent-soft)' : 'transparent',
-                  boxShadow: active ? '0 0 0 1px var(--accent-ring)' : 'none',
-                }}
-              >
-                <Inbox size={16} color={active ? 'var(--accent)' : 'var(--fg-4)'} />
-                <span style={{ flex: 1, fontSize: 14, fontWeight: active ? 600 : 400, color: active ? 'var(--fg-1)' : 'var(--fg-3)' }}>
-                  {item.label}
-                </span>
-                <span style={{ fontFamily: 'var(--font-mono)', fontSize: 12, color: active ? 'var(--accent)' : 'var(--fg-5)' }}>{count}</span>
-              </div>
-            );
-          })}
-        </nav>
-        <div style={{ padding: '0 20px 8px', fontFamily: 'var(--font-display)', fontWeight: 700, fontSize: 11, letterSpacing: '0.08em', textTransform: 'uppercase', color: 'var(--fg-5)' }}>
-          Due window
-        </div>
-        <nav style={{ display: 'flex', flexDirection: 'column', padding: '0 10px', gap: 2, marginBottom: 12 }}>
-          {DUE_WINDOW_ITEMS.map((item) => {
-            const active = dueFilter === item.value;
-            const count = countForDueFilter(tasks, today, item.value);
-            const Icon = item.value === 'day' ? Sun
-              : item.value === 'no-due-date' ? HelpCircle
-              : item.value === 'recurring' ? Repeat
-              : CalendarDays;
-            return (
-              <div
-                key={item.value}
-                onClick={() => setDueFilter(item.value)}
-                style={{
-                  display: 'flex', alignItems: 'center', gap: 10, height: 36, padding: '0 10px',
-                  borderRadius: 5, cursor: 'pointer',
-                  background: active ? 'var(--accent-soft)' : 'transparent',
-                  boxShadow: active ? '0 0 0 1px var(--accent-ring)' : 'none',
-                }}
-              >
-                <Icon size={16} color={active ? 'var(--accent)' : 'var(--fg-4)'} />
-                <span style={{ flex: 1, fontSize: 14, fontWeight: active ? 600 : 400, color: active ? 'var(--fg-1)' : 'var(--fg-3)' }}>
-                  {item.label}
-                </span>
-                <span style={{ fontFamily: 'var(--font-mono)', fontSize: 12, color: active ? 'var(--accent)' : 'var(--fg-5)' }}>{count}</span>
-              </div>
-            );
-          })}
-        </nav>
-        <div style={{ padding: '8px 20px', display: 'flex', flexDirection: 'column', gap: 4 }}>
+        <SidebarNav items={[INBOX_ITEM]} active={dueFilter} tasks={tasks} today={today} onPick={setDueFilter} />
+        <div style={{ ...sectionLabelStyle, padding: '0 20px 8px' }}>Due window</div>
+        <SidebarNav items={DUE_WINDOW_ITEMS} active={dueFilter} tasks={tasks} today={today} onPick={setDueFilter} />
+        {agents.length > 0 && <div style={{ ...sectionLabelStyle, padding: '4px 20px 8px' }}>Agents</div>}
+        <div style={{ padding: '0 20px', display: 'flex', flexDirection: 'column', gap: 4, marginBottom: 12 }}>
           {agents.map((a) => {
             const status = statusFor(a.name);
             return (
               <div
                 key={a.name}
                 onClick={() => setEditingAgent(a)}
-                title={`Edit ${a.name}`}
+                title={status.detail ? `${status.detail} — click to edit ${a.name}` : `Edit ${a.name}`}
                 style={{ display: 'flex', alignItems: 'center', gap: 10, height: 28, cursor: 'pointer', borderRadius: 4 }}
               >
                 <span style={{ width: 7, height: 7, borderRadius: 999, background: statusColor(status.state) }} />
-                <span style={{ fontFamily: 'var(--font-mono)', fontSize: 12.5, color: 'var(--fg-3)' }}>{a.name}</span>
+                <span style={{ flex: 1, minWidth: 0, fontFamily: 'var(--font-mono)', fontSize: 12.5, color: 'var(--fg-3)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{a.name}</span>
+                {status.state !== 'idle' && (
+                  <span style={{ fontSize: 11.5, color: statusColor(status.state) }}>{status.state}</span>
+                )}
               </div>
             );
           })}
         </div>
-        <div style={{ marginTop: 'auto', padding: '14px 20px 0', borderTop: '1px solid var(--hairline-soft)', display: 'flex', alignItems: 'center', gap: 10 }}>
-          <Settings size={16} color="var(--fg-4)" />
-          <span style={{ flex: 1, fontSize: 14, color: 'var(--fg-3)' }}>Settings</span>
-        </div>
+        <SettingsFooter />
       </aside>
       )}
 
@@ -722,24 +735,9 @@ export default function App() {
           >
             {leftOpen ? <PanelLeftClose size={18} color="var(--fg-4)" /> : <PanelLeftOpen size={18} color="var(--fg-4)" />}
           </button>
-          <span style={{ fontFamily: 'var(--font-display)', fontWeight: 600, fontSize: 22 }}>
-            {ALL_FILTER_ITEMS.find((i) => i.value === dueFilter)?.label ?? 'All tasks'}
-          </span>
+          <span style={{ fontFamily: 'var(--font-display)', fontWeight: 600, fontSize: 22, whiteSpace: 'nowrap' }}>{filterItem.label}</span>
+          <span style={{ fontFamily: 'var(--font-mono)', fontSize: 13, color: 'var(--accent)', paddingTop: 4 }}>{filteredTasks.length}</span>
           <div style={{ flex: 1 }} />
-          <button
-            onClick={() => setRightOpen((v) => !v)}
-            title={rightOpen ? 'Hide inspector' : 'Show inspector'}
-            style={{ background: 'transparent', border: 'none', cursor: 'pointer', display: 'flex', padding: 4 }}
-          >
-            {rightOpen ? <PanelRightClose size={18} color="var(--fg-4)" /> : <PanelRightOpen size={18} color="var(--fg-4)" />}
-          </button>
-          <button
-            onClick={() => setShowShortcuts(true)}
-            title="Keyboard shortcuts (?)"
-            style={{ background: 'transparent', border: '1px solid var(--hairline)', borderRadius: 5, cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', width: 28, height: 28, color: 'var(--fg-4)', fontSize: 13, fontWeight: 700 }}
-          >
-            ?
-          </button>
           <div style={{ display: 'flex', alignItems: 'center', gap: 8, height: 34, padding: '0 12px', border: '1px solid var(--hairline)', borderRadius: 5 }}>
             <span style={{ fontSize: 13, color: 'var(--fg-4)' }}>Group</span>
             <select
@@ -754,117 +752,75 @@ export default function App() {
               ))}
             </select>
           </div>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 8, height: 34, padding: '0 12px', border: '1px solid var(--hairline)', borderRadius: 5, background: 'var(--ink-2)', width: 240 }}>
-            <Search size={14} color="var(--fg-4)" />
-            <input
-              ref={searchInputRef}
-              value={search}
-              onChange={(e) => setSearch(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === 'Escape') {
-                  setSearch('');
-                  (e.target as HTMLInputElement).blur();
-                }
-              }}
-              placeholder="Search tasks…"
-              style={{ flex: 1, background: 'transparent', border: 'none', outline: 'none', color: 'var(--fg-1)', fontSize: 13 }}
-            />
-          </div>
+          <button
+            onClick={() => setPaletteOpen(true)}
+            title="Search tasks or run a command (⌘K)"
+            style={{
+              display: 'flex', alignItems: 'center', gap: 8, height: 34, padding: '0 6px 0 12px', border: '1px solid var(--hairline)',
+              borderRadius: 5, background: 'var(--ink-2)', width: 280, minWidth: 0, flexShrink: 1, cursor: 'pointer',
+            }}
+          >
+            <Search size={14} color="var(--fg-4)" style={{ flex: 'none' }} />
+            <span style={{ flex: 1, minWidth: 0, textAlign: 'left', color: 'var(--fg-5)', fontSize: 13, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+              Search or run a command…
+            </span>
+            <span style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--fg-3)', border: '1px solid var(--hairline)', borderRadius: 4, padding: '2px 6px' }}>⌘K</span>
+          </button>
           {showNewTaskForm ? (
-            <NewTaskForm onSubmit={handleAddTask} onCancel={() => setShowNewTaskForm(false)} />
+            <NewTaskForm onSubmit={(title) => handleAddTask({ title })} onCancel={() => setShowNewTaskForm(false)} />
           ) : (
             <Button onClick={() => setShowNewTaskForm(true)}>New task</Button>
           )}
-          <VersionBadge />
+          <button
+            onClick={() => setRightOpen((v) => !v)}
+            title={rightOpen ? 'Hide inspector' : 'Show inspector'}
+            style={{ background: 'transparent', border: 'none', cursor: 'pointer', display: 'flex', padding: 4 }}
+          >
+            {rightOpen ? <PanelRightClose size={18} color="var(--fg-4)" /> : <PanelRightOpen size={18} color="var(--fg-4)" />}
+          </button>
         </header>
         {error && <div style={{ padding: 16, color: 'var(--danger)' }}>{error}</div>}
         <div style={{ display: 'flex', alignItems: 'center', gap: 16, height: 34, flex: 'none', padding: '0 24px', borderBottom: '1px solid var(--hairline-soft)', fontFamily: 'var(--font-display)', fontSize: 11, fontWeight: 700, letterSpacing: '0.06em', textTransform: 'uppercase', color: 'var(--fg-5)' }}>
-          <span style={{ width: 34 }}>ID</span>
-          <span style={{ width: 78 }}>Priority</span>
-          <span style={{ width: 64 }}></span>
-          <span style={{ width: 100 }}>Status</span>
-          <span style={{ width: 110 }}>Agent</span>
+          <span style={{ width: COL.check, flex: 'none' }} />
+          <span style={{ width: COL.id, flex: 'none' }}>ID</span>
+          <span style={{ width: COL.priority, flex: 'none' }}>Priority</span>
+          <span style={{ width: COL.flags, flex: 'none' }} />
+          <span style={{ width: COL.status, flex: 'none' }}>Status</span>
+          <span style={{ width: COL.agent, flex: 'none' }}>Agent</span>
           <span style={{ flex: 1 }}>Task</span>
-          <span style={{ width: 96 }}>Due</span>
-          <span style={{ width: 44 }}>Effort</span>
+          <span style={{ width: COL.due, flex: 'none' }}>Due</span>
+          <span style={{ width: COL.effort, flex: 'none' }}>Effort</span>
         </div>
         <div style={{ flex: 1, minHeight: 0, overflow: 'auto' }}>
-          {[...grouped.entries()].map(([groupName, groupTasksList]) => (
-            <div key={groupName || 'all'}>
-              {groupBy !== 'none' && (
-                <div style={{ display: 'flex', alignItems: 'center', gap: 10, height: 38, padding: '0 24px', background: 'var(--ink-2)', borderBottom: '1px solid var(--hairline-soft)' }}>
-                  <span style={{ fontFamily: 'var(--font-mono)', fontSize: 12.5, fontWeight: 600, textTransform: groupBy === 'priority' ? 'uppercase' : 'none' }}>
-                    {groupName}
-                  </span>
-                  <span style={{ fontSize: 12, color: 'var(--fg-4)' }}>{groupTasksList.length} tasks</span>
-                </div>
-              )}
-              {groupTasksList.map((t) => (
-                <div
-                  key={t.id}
-                  data-task-row={t.id}
-                  onClick={() => selectTask(t)}
-                  style={{
-                    display: 'flex', alignItems: 'center', gap: 16, height: 46, padding: '0 24px 0 21px',
-                    borderBottom: '1px solid var(--hairline-soft)', cursor: 'pointer',
-                    background: selected?.id === t.id ? 'var(--accent-soft)' : 'transparent',
-                    borderLeft: selected?.id === t.id ? '3px solid var(--accent)' : '3px solid transparent',
-                  }}
-                >
-                  <span style={{ width: 34, fontFamily: 'var(--font-mono)', fontSize: 12, color: 'var(--fg-5)' }}>{t.id}</span>
-                  <span style={{ width: 78, fontFamily: 'var(--font-display)', fontSize: 11, fontWeight: 700, textTransform: 'uppercase', color: priorityColor[t.priority] }}>
-                    {t.priority}
-                  </span>
-                  <span style={{ width: 64, display: 'flex', alignItems: 'center', gap: 4 }}>
-                    {isOverdue(t, today) && (
-                      <span title="Overdue" style={{ display: 'flex' }}><AlertTriangle size={13} color="var(--danger)" /></span>
-                    )}
-                    {hasNoDueDate(t) && (
-                      <span title="No due date" style={{ display: 'flex' }}><CalendarOff size={13} color="var(--fg-5)" /></span>
-                    )}
-                    {missingAgent(t) && (
-                      <span title="No agent assigned" style={{ display: 'flex' }}><UserX size={13} color="var(--fg-5)" /></span>
-                    )}
-                    {t.recurrence && (
-                      <span title="Recurring" style={{ display: 'flex' }}><Repeat size={13} color="var(--fg-4)" /></span>
-                    )}
-                  </span>
-                  <span style={{ width: 100 }}>
-                    {t.work_status && (
-                      <span
-                        style={{
-                          display: 'inline-block', fontSize: 10, fontWeight: 700, textTransform: 'uppercase',
-                          letterSpacing: '0.04em', padding: '2px 8px', borderRadius: 999,
-                          color: 'var(--ink)', background: WORK_STATUS_COLOR[t.work_status],
-                        }}
-                      >
-                        {WORK_STATUS_LABEL[t.work_status]}
-                      </span>
-                    )}
-                  </span>
-                  <span style={{
-                    width: 110, fontSize: 12.5, color: t.agent ? 'var(--fg-3)' : 'var(--fg-5)',
-                    whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
-                  }}>
-                    {t.agent ?? '—'}
-                  </span>
-                  <span style={{
-                    flex: 1, minWidth: 0, fontSize: 14.5, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
-                    textDecoration: t.status === 'done' ? 'line-through' : 'none',
-                    color: t.status === 'done' ? 'var(--fg-4)' : 'inherit',
-                  }}>
-                    {t.title}
-                  </span>
-                  <span style={{ width: 96, fontFamily: 'var(--font-mono)', fontSize: 12.5, color: 'var(--fg-3)' }}>
-                    {t.due_date ?? '—'}
-                  </span>
-                  <span style={{ width: 44, fontFamily: 'var(--font-mono)', fontSize: 12, color: 'var(--fg-3)' }}>
-                    {t.effort ?? '—'}
-                  </span>
-                </div>
-              ))}
-            </div>
-          ))}
+          {[...grouped.entries()].map(([groupName, groupTasksList]) => {
+            const state = groupDot(groupName);
+            return (
+              <div key={groupName || 'all'}>
+                {groupBy !== 'none' && (
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 10, height: 38, padding: '0 24px', background: 'var(--ink-2)', borderBottom: '1px solid var(--hairline-soft)' }}>
+                    {state && <span style={{ width: 7, height: 7, borderRadius: 999, background: statusColor(state) }} />}
+                    <span style={{ fontFamily: 'var(--font-mono)', fontSize: 12.5, fontWeight: 600, textTransform: groupBy === 'priority' ? 'uppercase' : 'none' }}>
+                      {groupName}
+                    </span>
+                    <span style={{ fontSize: 12, color: 'var(--fg-4)' }}>{countLabel(groupTasksList.length)}</span>
+                  </div>
+                )}
+                {groupTasksList.map((t) => (
+                  <TaskRow
+                    key={t.id}
+                    task={t}
+                    today={today}
+                    selected={selected?.id === t.id}
+                    onSelect={() => selectTask(t)}
+                    onToggleDone={() => toggleDone(t)}
+                  />
+                ))}
+              </div>
+            );
+          })}
+          {filteredTasks.length === 0 && (
+            <EmptyState title={filterItem.empty[0]} body={filterItem.empty[1]} padding="120px 24px" onNewTask={() => setShowNewTaskForm(true)} />
+          )}
         </div>
       </main>
 
@@ -887,175 +843,21 @@ export default function App() {
           title="Drag to resize"
         />
         <div key={selected?.id ?? 'empty'} className={selected ? 'task-panel-content' : 'task-panel-content task-panel-empty'}>
-        {selected ? (
-          <>
-            <div style={{ display: 'flex', alignItems: 'flex-start', gap: 8 }}>
-              <div style={{
-                flex: 1, fontFamily: 'var(--font-display)', fontWeight: 600, fontSize: 20, color: 'var(--fg-1)', marginBottom: 12,
-                textDecoration: selected.status === 'done' ? 'line-through' : 'none',
-              }}>
-                <EditableField
-                  id="field-title"
-                  value={selected.title}
-                  onSave={(v) => v.trim() && handleEditField(selected.id, { title: v.trim() })}
-                  display={selected.title ? <Linkify text={selected.title} /> : undefined}
-                />
-              </div>
-              <button
-                onClick={() => setRightOpen(false)}
-                title="Close inspector"
-                style={{ background: 'transparent', border: 'none', cursor: 'pointer', display: 'flex', padding: 2, flex: 'none' }}
-              >
-                <X size={16} color="var(--fg-4)" />
-              </button>
-            </div>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 13, color: 'var(--fg-3)' }}>
-              <span>#{selected.id} ·</span>
-              <EditableField
-                id="field-priority"
-                value={selected.priority}
-                type="select"
-                options={PRIORITY_OPTIONS}
-                onSave={(v) => handleEditField(selected.id, { priority: v })}
-                display={
-                  <span style={{ color: priorityColor[selected.priority], fontWeight: 700, fontSize: 11, textTransform: 'uppercase' }}>
-                    {selected.priority}
-                  </span>
-                }
-              />
-              <span>· {selected.status}</span>
-            </div>
-            <div style={{ display: 'flex', gap: 8, marginTop: 12, marginBottom: 20 }}>
-              {selected.status === 'open' ? (
-                <Button size="sm" onClick={() => handleMarkDone(selected)}>Mark done</Button>
-              ) : (
-                <Button size="sm" variant="secondary" onClick={() => handleReopen(selected)}>Reopen</Button>
-              )}
-              <Button size="sm" variant="secondary" onClick={() => handleDelete(selected)}>Delete</Button>
-            </div>
-
-            <div style={{ display: 'flex', flexDirection: 'column', marginBottom: 20 }}>
-              <FieldRow label="Due">
-                <DatePicker
-                  id="field-due"
-                  value={selected.due_date ?? ''}
-                  onSave={(v) => handleEditField(selected.id, { due: v })}
-                />
-              </FieldRow>
-              <FieldRow label="Effort">
-                <EditableField
-                  id="field-effort"
-                  value={selected.effort ?? 'medium'}
-                  type="select"
-                  options={EFFORT_OPTIONS}
-                  onSave={(v) => handleEditField(selected.id, { effort: v })}
-                  display={selected.effort ?? '—'}
-                />
-              </FieldRow>
-              <FieldRow label="Work status">
-                <EditableField
-                  value={selected.work_status ?? ''}
-                  type="select"
-                  options={WORK_STATUS_OPTIONS}
-                  onSave={(v) => handleEditField(selected.id, { work_status: v })}
-                  display={selected.work_status ? WORK_STATUS_LABEL[selected.work_status] : undefined}
-                />
-              </FieldRow>
-              <FieldRow label="Project">
-                <EditableField
-                  value={selected.project ?? ''}
-                  placeholder="No project"
-                  onSave={(v) => handleEditField(selected.id, { project: v })}
-                />
-              </FieldRow>
-              <FieldRow label="Agent">
-                <AgentPicker
-                  id="field-agent"
-                  value={selected.agent ?? ''}
-                  options={agentOptions}
-                  onSave={(v) => handleEditField(selected.id, { agent: v })}
-                />
-              </FieldRow>
-              <FieldRow label="Tags">
-                <EditableField
-                  id="field-tags"
-                  value={selected.tags.join(', ')}
-                  placeholder="No tags"
-                  onSave={(v) => handleEditField(selected.id, { tags: v })}
-                  display={selected.tags.length ? selected.tags.join(', ') : undefined}
-                />
-              </FieldRow>
-              <FieldRow label="Recurrence">
-                <EditableField
-                  value={selected.recurrence ?? ''}
-                  placeholder="e.g. daily, weekly:2, weekly:fri, monthly:2:fri — empty to clear"
-                  onSave={(v) => handleEditField(selected.id, { recurrence: v })}
-                />
-              </FieldRow>
-              <FieldRow label="Description">
-                <EditableField
-                  value={selected.description ?? ''}
-                  type="textarea"
-                  placeholder="No description"
-                  onSave={(v) => handleEditField(selected.id, { description: v })}
-                  display={selected.description ? (
-                    <span style={{ whiteSpace: 'pre-wrap' }}><Linkify text={selected.description} /></span>
-                  ) : undefined}
-                />
-              </FieldRow>
-              <FieldRow label="Instructions">
-                <EditableField
-                  id="field-instructions"
-                  value={selected.instructions ?? ''}
-                  type="textarea"
-                  placeholder="No instructions"
-                  onSave={(v) => handleEditField(selected.id, { instructions: v })}
-                  display={selected.instructions ? (
-                    <span style={{ whiteSpace: 'pre-wrap' }}><Linkify text={selected.instructions} /></span>
-                  ) : undefined}
-                />
-              </FieldRow>
-            </div>
-
-            {(review || selected.work_status === 'waiting-for-review' || selected.work_status === 'changes-requested') && (
-              <ReviewPanel
-                review={review}
-                workStatus={selected.work_status}
-                accentColor={selected.work_status ? WORK_STATUS_COLOR[selected.work_status] : undefined}
-                onSendFeedback={handleSendFeedback}
-              />
-            )}
-
-            {(question || selected.work_status === 'needs-input') && (
-              <QuestionPanel
-                question={question}
-                awaitingAnswer={selected.work_status === 'needs-input'}
-                accentColor={selected.work_status ? WORK_STATUS_COLOR[selected.work_status] : undefined}
-                onSendAnswer={handleSendAnswer}
-              />
-            )}
-
-            <NotesSection
-              notes={visibleNotes}
-              onCreate={handleCreateNote}
-              onOpen={handleOpenNote}
-              onUnlink={handleUnlinkNote}
-            />
-
-            {selected.agent && statusFor(selected.agent).state === 'waiting' && (
-              <div style={{ marginTop: 'auto', paddingTop: 20, borderTop: '1px solid var(--hairline)' }}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10 }}>
-                  <span style={{ width: 7, height: 7, borderRadius: 999, background: 'var(--citrine)' }} />
-                  <span style={{ fontFamily: 'var(--font-display)', fontWeight: 700, fontSize: 11, letterSpacing: '0.08em', textTransform: 'uppercase', color: 'var(--citrine)' }}>
-                    Agent waiting (preview — not yet live)
-                  </span>
-                </div>
-                <div style={{ padding: 14, borderRadius: 8, background: 'var(--ink-2)', border: '1px solid var(--hairline)', fontFamily: 'var(--font-mono)', fontSize: 12, color: 'var(--fg-2)' }}>
-                  {statusFor(selected.agent).detail ?? 'Waiting for input.'}
-                </div>
-              </div>
-            )}
-          </>
+        {selected && detailProps ? (
+          <TaskDetail
+            {...detailProps}
+            onClose={() => setRightOpen(false)}
+            actions={
+              <>
+                {selected.status === 'open' ? (
+                  <Button size="sm" onClick={() => handleMarkDone(selected)}>Mark done</Button>
+                ) : (
+                  <Button size="sm" variant="secondary" onClick={() => handleReopen(selected)}>Reopen</Button>
+                )}
+                <Button size="sm" variant="secondary" onClick={() => handleDelete(selected)}>Delete</Button>
+              </>
+            }
+          />
         ) : (
           'Select a task'
         )}
@@ -1068,55 +870,89 @@ export default function App() {
         <AgentEditor agent={editingAgent} onClose={() => setEditingAgent(null)} />
       )}
 
-      {showShortcuts && (
-        <div
-          onClick={() => setShowShortcuts(false)}
-          style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.5)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 100 }}
-        >
+      {paletteOpen && (
+        <CommandPalette
+          tasks={tasks}
+          commands={paletteCommands()}
+          onPickTask={(t) => { setPaletteOpen(false); selectTask(t); }}
+          onClose={() => setPaletteOpen(false)}
+        />
+      )}
+    </div>
+  );
+}
+
+function SidebarNav({ items, active, tasks, today, onPick }: {
+  items: FilterItem[];
+  active: DueFilter;
+  tasks: Task[];
+  today: Date;
+  onPick: (f: DueFilter) => void;
+}) {
+  return (
+    <nav style={{ display: 'flex', flexDirection: 'column', padding: '0 10px', gap: 2, marginBottom: 12 }}>
+      {items.map((item) => {
+        const on = active === item.value;
+        const Icon = item.icon;
+        return (
           <div
-            onClick={(e) => e.stopPropagation()}
-            style={{ background: 'var(--ink-2)', border: '1px solid var(--hairline)', borderRadius: 8, padding: 24, width: 420, color: 'var(--fg-1)' }}
+            key={item.value}
+            onClick={() => onPick(item.value)}
+            style={{
+              display: 'flex', alignItems: 'center', gap: 10, height: 36, padding: '0 10px', borderRadius: 5, cursor: 'pointer',
+              background: on ? 'var(--accent-soft)' : 'transparent',
+              boxShadow: on ? '0 0 0 1px var(--accent-ring)' : 'none',
+            }}
           >
-            <div style={{ display: 'flex', alignItems: 'center', marginBottom: 16 }}>
-              <span style={{ flex: 1, fontFamily: 'var(--font-display)', fontWeight: 700, fontSize: 16 }}>Keyboard shortcuts</span>
-              <button onClick={() => setShowShortcuts(false)} style={{ background: 'transparent', border: 'none', cursor: 'pointer', display: 'flex' }}>
-                <X size={16} color="var(--fg-4)" />
-              </button>
-            </div>
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 6, fontSize: 13 }}>
-              {[
-                ['j / k, ↓ / ↑', 'Move selection'],
-                ['Enter / Space', 'Toggle done'],
-                ['a', 'New task'],
-                ['e', 'Edit title'],
-                ['d', 'Edit due date'],
-                ['p', 'Edit priority'],
-                ['t', 'Edit tags'],
-                ['A', 'Edit agent'],
-                ['E', 'Edit effort'],
-                ['g', 'Open first linked note'],
-                ['T', 'Due: today'],
-                ['N', 'Due: tomorrow'],
-                ['W', 'Due: +1 week'],
-                ['M', 'Due: +1 month'],
-                ['Q', 'Due: +1 quarter'],
-                ['Y', 'Due: +1 year'],
-                ['X', 'Clear due date'],
-                ['/', 'Focus search'],
-                ['G', 'Cycle group-by'],
-                ['[ / ]', 'Cycle due window'],
-                ['Esc', 'Close inspector'],
-                ['?', 'Toggle this help'],
-              ].map(([key, desc]) => (
-                <div key={key} style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-                  <span style={{ width: 130, flex: 'none', fontFamily: 'var(--font-mono)', color: 'var(--accent)' }}>{key}</span>
-                  <span style={{ color: 'var(--fg-3)' }}>{desc}</span>
-                </div>
-              ))}
-            </div>
+            <Icon size={16} color={on ? 'var(--accent)' : 'var(--fg-4)'} />
+            <span style={{ flex: 1, fontSize: 14, fontWeight: on ? 600 : 400, color: on ? 'var(--fg-1)' : 'var(--fg-3)' }}>{item.label}</span>
+            <span style={{ fontFamily: 'var(--font-mono)', fontSize: 12, color: on ? 'var(--accent)' : 'var(--fg-5)' }}>
+              {countForFilter(tasks, today, item.value)}
+            </span>
           </div>
+        );
+      })}
+    </nav>
+  );
+}
+
+function EmptyState({ title, body, padding, onNewTask }: { title: string; body: string; padding: string; onNewTask?: () => void }) {
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: onNewTask ? 10 : 8, padding, textAlign: 'center' }}>
+      <div style={{ fontFamily: 'var(--font-display)', fontWeight: 600, fontSize: onNewTask ? 18 : 17 }}>{title}</div>
+      {body && <div style={{ fontSize: 14, color: 'var(--fg-4)', maxWidth: 360 }}>{body}</div>}
+      {onNewTask && (
+        <div style={{ marginTop: 6 }}>
+          <Button variant="secondary" onClick={onNewTask}>New task</Button>
         </div>
       )}
     </div>
+  );
+}
+
+function MobileIconButton({ label, onClick, children }: { label: string; onClick: () => void; children: ReactNode }) {
+  return (
+    <button
+      onClick={onClick}
+      aria-label={label}
+      style={{ width: 44, height: 44, display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'transparent', border: 'none', cursor: 'pointer' }}
+    >
+      {children}
+    </button>
+  );
+}
+
+function MobileActionButton({ primary, grow, onClick, children }: { primary?: boolean; grow?: boolean; onClick: () => void; children: ReactNode }) {
+  return (
+    <button
+      onClick={onClick}
+      style={{
+        flex: grow ? 1 : 'none', height: 48, padding: '0 20px', fontSize: 16, fontWeight: 600, borderRadius: 5, cursor: 'pointer',
+        background: primary ? 'var(--accent)' : 'transparent', color: primary ? 'var(--ink)' : 'var(--fg-1)',
+        border: `1px solid ${primary ? 'transparent' : 'var(--hairline)'}`,
+      }}
+    >
+      {children}
+    </button>
   );
 }

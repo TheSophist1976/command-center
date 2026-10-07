@@ -20,7 +20,7 @@ export function statusFor(agentName: string): MockAgentStatus {
 const STATE_COLOR: Record<MockAgentStatus['state'], string> = {
   running: 'var(--teal)',
   waiting: 'var(--citrine)',
-  idle: 'var(--fg-5)',
+  idle: 'var(--fg-faint)',
 };
 
 export function statusColor(state: MockAgentStatus['state']): string {

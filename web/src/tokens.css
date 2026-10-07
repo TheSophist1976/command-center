@@ -31,7 +31,10 @@
   --fg-2: var(--nord5);
   --fg-3: var(--nord4);
   --fg-4: #A5AFC2;
-  --fg-5: #7B88A1;
+  /* Faintest text — lifted from #7B88A1 so it clears the minimum contrast
+     ratio on the dark surfaces. Use --fg-faint for decoration only. */
+  --fg-5: #9AA5BB;
+  --fg-faint: #7B88A1;
 
   /* Brand / semantic (Frost + Aurora) */
   --accent: var(--nord8);
