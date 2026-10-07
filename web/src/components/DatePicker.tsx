@@ -1,10 +1,11 @@
-import { useEffect, useRef, useState, type CSSProperties } from 'react';
+import { useEffect, useRef, useState, type CSSProperties, type ReactNode } from 'react';
 import { ChevronLeft, ChevronRight } from 'lucide-react';
 
 interface DatePickerProps {
   id?: string;
   value: string; // 'YYYY-MM-DD' or ''
   onSave: (value: string) => void;
+  display?: ReactNode;
 }
 
 function parseLocalDate(s: string): Date {
@@ -47,7 +48,7 @@ const smallButtonStyle: CSSProperties = {
   color: 'var(--fg-2)', fontSize: 12, padding: '5px 0', cursor: 'pointer',
 };
 
-export function DatePicker({ id, value, onSave }: DatePickerProps) {
+export function DatePicker({ id, value, onSave, display }: DatePickerProps) {
   const [open, setOpen] = useState(false);
   const today = startOfToday();
   const selectedDate = value ? parseLocalDate(value) : null;
@@ -141,7 +142,7 @@ export function DatePicker({ id, value, onSave }: DatePickerProps) {
   return (
     <div ref={containerRef} style={{ position: 'relative' }}>
       <div id={id} onClick={openPicker} style={{ cursor: 'pointer', minHeight: 20 }} title="Click to pick a date">
-        {value || <span style={{ color: 'var(--fg-5)' }}>No due date</span>}
+        {display ?? (value || <span style={{ color: 'var(--fg-5)' }}>No due date</span>)}
       </div>
       {open && (
         <div

@@ -29,11 +29,11 @@ export function NewTaskForm({ onSubmit, onCancel }: NewTaskFormProps) {
           height: 34,
           padding: '0 12px',
           borderRadius: 5,
-          border: '1px solid var(--hairline)',
+          border: '1px solid var(--accent)',
           background: 'var(--ink-2)',
           color: 'var(--fg-1)',
           fontSize: 14,
-          width: 280,
+          width: 220,
         }}
       />
       <Button size="sm" type="submit">Add</Button>
