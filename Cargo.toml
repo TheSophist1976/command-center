@@ -27,6 +27,11 @@ tokio-stream = { version = "0.1", features = ["sync"] }
 futures-core = "0.3"
 tower-http = { version = "0.5", features = ["fs"] }
 notify = "6"
+p256 = { version = "0.13", default-features = false, features = ["ecdsa", "std"] }
+ciborium = "0.2"
+base64 = "0.22"
+getrandom = "0.2"
+qrcode = { version = "0.14", default-features = false, features = ["svg"] }
 
 [dev-dependencies]
 tempfile = "3"
@@ -34,6 +39,8 @@ serde_json = "1"
 mockito = "1.7.2"
 tower = { version = "0.4", features = ["util"] }
 filetime = "0.2"
+p256 = { version = "0.13", features = ["ecdsa", "std"] }
+rand_core = { version = "0.6", features = ["getrandom"] }
 
 [[bin]]
 name = "task"

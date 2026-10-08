@@ -1,6 +1,10 @@
-import type { Task, AgentProfile, Note, VersionInfo, UpdateStatus } from './types';
+import type { Task, AgentProfile, Note, VersionInfo, UpdateStatus, AuthStatus, PairingCode, PairedDevice } from './types';
+
+/** Fired when the server says this (remote) browser's session is missing or revoked. */
+export const UNAUTHORIZED_EVENT = 'cc-unauthorized';
 
 async function jsonOrThrow<T>(response: Response): Promise<T> {
+  if (response.status === 401) window.dispatchEvent(new Event(UNAUTHORIZED_EVENT));
   if (!response.ok) {
     const body = await response.json().catch(() => ({ error: response.statusText }));
     throw new Error(body.error ?? `Request failed: ${response.status}`);
@@ -189,4 +193,54 @@ export async function startUpdate(): Promise<void> {
 
 export async function fetchUpdateStatus(): Promise<UpdateStatus> {
   return jsonOrThrow(await fetch('/api/update/status'));
+}
+
+// ---- remote sign-in (passkeys) ----
+
+function postJson(url: string, body?: unknown): Promise<Response> {
+  return fetch(url, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
+}
+
+export async function fetchAuthStatus(): Promise<AuthStatus> {
+  return jsonOrThrow(await fetch('/api/auth/status'));
+}
+
+export async function createPairingCode(): Promise<PairingCode> {
+  return jsonOrThrow(await postJson('/api/auth/pair'));
+}
+
+export async function fetchDevices(): Promise<PairedDevice[]> {
+  return jsonOrThrow(await fetch('/api/auth/devices'));
+}
+
+export async function revokeDevice(id: string): Promise<void> {
+  const response = await fetch(`/api/auth/devices/${encodeURIComponent(id)}`, { method: 'DELETE' });
+  if (!response.ok) {
+    const body = await response.json().catch(() => ({}));
+    throw new Error(body.error ?? `Request failed: ${response.status}`);
+  }
+}
+
+export async function registerOptions(code: string): Promise<unknown> {
+  return jsonOrThrow(await postJson('/api/auth/register/options', { code }));
+}
+
+export async function registerVerify(code: string, name: string, credential: unknown): Promise<void> {
+  await jsonOrThrow(await postJson('/api/auth/register/verify', { code, name, credential }));
+}
+
+export async function loginOptions(): Promise<unknown> {
+  return jsonOrThrow(await postJson('/api/auth/login/options'));
+}
+
+export async function loginVerify(credential: unknown): Promise<void> {
+  await jsonOrThrow(await postJson('/api/auth/login/verify', { credential }));
+}
+
+export async function signOut(): Promise<void> {
+  await postJson('/api/auth/logout');
 }

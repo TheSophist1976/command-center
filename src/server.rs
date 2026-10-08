@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use axum::extract::{Path as AxumPath, Query, State};
 use axum::http::StatusCode;
-use axum::middleware::{self, Next};
+use axum::middleware;
 use axum::response::{IntoResponse, Json, Response};
 use axum::routing::get;
 use axum::Router;
@@ -28,6 +28,9 @@ pub struct AppState {
     pub change_tx: tokio::sync::broadcast::Sender<()>,
     /// Version cache, update status and the background update job.
     pub update: Arc<crate::update_state::UpdateState>,
+    /// `remote-host` and the passkey/session store for phones signing in
+    /// through a proxy. `RemoteAuth::disabled()` means local-only.
+    pub remote: Arc<crate::web_auth::RemoteAuth>,
 }
 
 #[derive(Deserialize)]
@@ -46,24 +49,6 @@ fn app_error(status: StatusCode, message: impl Into<String>) -> (StatusCode, Jso
         return (status, Json(serde_json::json!({ "error": "internal server error" })));
     }
     (status, Json(serde_json::json!({ "error": message })))
-}
-
-fn host_is_allowed(host_header: &str) -> bool {
-    let hostname = host_header.split(':').next().unwrap_or("");
-    hostname == "127.0.0.1" || hostname == "localhost"
-}
-
-async fn validate_host(request: axum::extract::Request, next: Next) -> Response {
-    let allowed = request
-        .headers()
-        .get(axum::http::header::HOST)
-        .and_then(|v| v.to_str().ok())
-        .is_some_and(host_is_allowed);
-
-    if !allowed {
-        return (StatusCode::FORBIDDEN, "Forbidden").into_response();
-    }
-    next.run(request).await
 }
 
 async fn list_tasks(
@@ -1008,22 +993,25 @@ fn api_routes() -> Router<Arc<AppState>> {
         .route("/api/agents/:name/instructions", get(get_agent_instructions).put(edit_agent_instructions))
         .route("/api/agents/:name/memory", get(get_agent_memory).put(edit_agent_memory))
         .route("/api/events", get(task_events))
+        .merge(crate::server_auth::auth_routes())
 }
 
 pub fn router_with_static(state: AppState, static_dir: Option<std::path::PathBuf>) -> Router {
+    let state = Arc::new(state);
     let mut app = api_routes();
     if let Some(dir) = static_dir {
         app = app.fallback_service(tower_http::services::ServeDir::new(dir));
     }
-    app.layer(middleware::from_fn(validate_host)).with_state(Arc::new(state))
+    app.layer(middleware::from_fn_with_state(state.clone(), crate::server_auth::guard)).with_state(state)
 }
 
 /// Serves the web UI embedded in the binary (read from `web/dist` in debug builds).
 pub fn router_embedded(state: AppState) -> Router {
+    let state = Arc::new(state);
     api_routes()
         .fallback(embedded_handler)
-        .layer(middleware::from_fn(validate_host))
-        .with_state(Arc::new(state))
+        .layer(middleware::from_fn_with_state(state.clone(), crate::server_auth::guard))
+        .with_state(state)
 }
 
 async fn embedded_handler(uri: axum::http::Uri) -> Response {
@@ -1044,7 +1032,12 @@ pub async fn serve(db_path: PathBuf) -> Result<(), String> {
         .and_then(|s| s.parse().ok())
         .unwrap_or(4287);
 
+    let remote = crate::web_auth::RemoteAuth::from_config()?;
     println!("task serve: serving {} on http://127.0.0.1:{}", db_path.display(), port);
+    match &remote.remote_host {
+        Some(host) => println!("task serve: phones can sign in at https://{} (pair one from Settings → Devices)", host),
+        None => println!("task serve: remote access off (set `remote-host` to enable phone sign-in)"),
+    }
 
     let (change_tx, _) = tokio::sync::broadcast::channel(16);
     // Held for the lifetime of the process — dropping it would stop the watch.
@@ -1062,6 +1055,7 @@ pub async fn serve(db_path: PathBuf) -> Result<(), String> {
         write_lock: Arc::new(tokio::sync::Mutex::new(())),
         change_tx,
         update: Arc::new(crate::update_state::UpdateState::from_env()),
+        remote: Arc::new(remote),
     });
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", port))
         .await
@@ -1081,7 +1075,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let db_path = dir.path().join("tasks.db");
         let notes_dir = dir.path().join("Notes");
-        (dir, AppState { db_path, notes_dir, write_lock: Arc::new(tokio::sync::Mutex::new(())), change_tx: tokio::sync::broadcast::channel(16).0, update: Arc::new(crate::update_state::UpdateState::for_tests("http://127.0.0.1:1", false)) })
+        (dir, AppState { db_path, notes_dir, write_lock: Arc::new(tokio::sync::Mutex::new(())), change_tx: tokio::sync::broadcast::channel(16).0, update: Arc::new(crate::update_state::UpdateState::for_tests("http://127.0.0.1:1", false)), remote: Arc::new(crate::web_auth::RemoteAuth::disabled()) })
     }
 
     /// `TASK_CONFIG_FILE` is process-global, so tests that set it must not run concurrently
@@ -1346,7 +1340,7 @@ mod tests {
         let config_path = dir.path().join("config.md");
         std::fs::write(&config_path, "agent-bot: /code/bot\n").unwrap();
         unsafe { std::env::set_var("TASK_CONFIG_FILE", &config_path) };
-        let app = router(AppState { notes_dir: dir.path().join("Notes"), db_path, write_lock: Arc::new(tokio::sync::Mutex::new(())), change_tx: tokio::sync::broadcast::channel(16).0, update: Arc::new(crate::update_state::UpdateState::for_tests("http://127.0.0.1:1", false)) });
+        let app = router(AppState { notes_dir: dir.path().join("Notes"), db_path, write_lock: Arc::new(tokio::sync::Mutex::new(())), change_tx: tokio::sync::broadcast::channel(16).0, update: Arc::new(crate::update_state::UpdateState::for_tests("http://127.0.0.1:1", false)), remote: Arc::new(crate::web_auth::RemoteAuth::disabled()) });
         let response = app
             .oneshot(
                 Request::builder()
@@ -1372,7 +1366,7 @@ mod tests {
         let config_path = dir.path().join("config.md");
         std::fs::write(&config_path, "agent-bot: /code/bot\n").unwrap();
         unsafe { std::env::set_var("TASK_CONFIG_FILE", &config_path) };
-        let app = router(AppState { notes_dir: dir.path().join("Notes"), db_path, write_lock: Arc::new(tokio::sync::Mutex::new(())), change_tx: tokio::sync::broadcast::channel(16).0, update: Arc::new(crate::update_state::UpdateState::for_tests("http://127.0.0.1:1", false)) });
+        let app = router(AppState { notes_dir: dir.path().join("Notes"), db_path, write_lock: Arc::new(tokio::sync::Mutex::new(())), change_tx: tokio::sync::broadcast::channel(16).0, update: Arc::new(crate::update_state::UpdateState::for_tests("http://127.0.0.1:1", false)), remote: Arc::new(crate::web_auth::RemoteAuth::disabled()) });
 
         let response = app
             .clone()
@@ -1433,7 +1427,7 @@ mod tests {
         let config_path = dir.path().join("config.md");
         std::fs::write(&config_path, "agent-bot: /code/bot\n").unwrap();
         unsafe { std::env::set_var("TASK_CONFIG_FILE", &config_path) };
-        let app = router(AppState { notes_dir: dir.path().join("Notes"), db_path, write_lock: Arc::new(tokio::sync::Mutex::new(())), change_tx: tokio::sync::broadcast::channel(16).0, update: Arc::new(crate::update_state::UpdateState::for_tests("http://127.0.0.1:1", false)) });
+        let app = router(AppState { notes_dir: dir.path().join("Notes"), db_path, write_lock: Arc::new(tokio::sync::Mutex::new(())), change_tx: tokio::sync::broadcast::channel(16).0, update: Arc::new(crate::update_state::UpdateState::for_tests("http://127.0.0.1:1", false)), remote: Arc::new(crate::web_auth::RemoteAuth::disabled()) });
 
         let body = serde_json::json!({ "body": "Remembered fact." });
         let response = app
@@ -1478,7 +1472,7 @@ mod tests {
         let config_path = dir.path().join("config.md");
         std::fs::write(&config_path, "agent-bot: /code/bot\n").unwrap();
         unsafe { std::env::set_var("TASK_CONFIG_FILE", &config_path) };
-        let app = router(AppState { notes_dir: dir.path().join("Notes"), db_path, write_lock: Arc::new(tokio::sync::Mutex::new(())), change_tx: tokio::sync::broadcast::channel(16).0, update: Arc::new(crate::update_state::UpdateState::for_tests("http://127.0.0.1:1", false)) });
+        let app = router(AppState { notes_dir: dir.path().join("Notes"), db_path, write_lock: Arc::new(tokio::sync::Mutex::new(())), change_tx: tokio::sync::broadcast::channel(16).0, update: Arc::new(crate::update_state::UpdateState::for_tests("http://127.0.0.1:1", false)), remote: Arc::new(crate::web_auth::RemoteAuth::disabled()) });
         let response = app
             .oneshot(
                 Request::builder()
@@ -1504,6 +1498,7 @@ mod tests {
             write_lock: Arc::new(tokio::sync::Mutex::new(())),
             change_tx: tokio::sync::broadcast::channel(16).0,
             update: Arc::new(crate::update_state::UpdateState::for_tests("http://127.0.0.1:1", false)),
+            remote: Arc::new(crate::web_auth::RemoteAuth::disabled()),
         };
         let app = router(state);
         let response = app

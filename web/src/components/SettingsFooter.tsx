@@ -1,8 +1,10 @@
 import { useEffect, useState } from 'react';
-import { Settings } from 'lucide-react';
+import { LogOut, Settings } from 'lucide-react';
 import type { UpdateStatus, VersionInfo } from '../types';
 import { fetchUpdateStatus, fetchVersion, startUpdate } from '../api';
 import { Button } from './Button';
+import { DevicesDialog } from './DevicesDialog';
+import { useAuth } from '../authContext';
 
 const PHASE_TEXT: Record<UpdateStatus['phase'], string> = {
   idle: 'Starting…',
@@ -96,7 +98,11 @@ export function SettingsFooter({ touch }: { touch?: boolean }) {
     setBusy(false);
   }
 
-  const updatable = !!info?.update_available && !!info.latest;
+  const { local, remoteHost, signOut } = useAuth();
+  const [devicesOpen, setDevicesOpen] = useState(false);
+  // Updating replaces the binary on the computer, so it's offered only there.
+  const updatable = local && !!info?.update_available && !!info.latest;
+  const rowStyle = { display: 'flex', alignItems: 'center', gap: touch ? 12 : 10, minHeight: touch ? 44 : undefined } as const;
 
   return (
     <div style={{ marginTop: 'auto', padding: touch ? '14px 22px 0' : '14px 20px 0', borderTop: '1px solid var(--hairline-soft)', display: 'flex', flexDirection: 'column', gap: 10 }}>
@@ -111,13 +117,27 @@ export function SettingsFooter({ touch }: { touch?: boolean }) {
         </div>
       )}
       {error && <div style={{ fontSize: 12, color: 'var(--danger)' }}>{error}</div>}
-      <div style={{ display: 'flex', alignItems: 'center', gap: touch ? 12 : 10, minHeight: touch ? 44 : undefined }}>
+      <div
+        onClick={local ? () => setDevicesOpen(true) : undefined}
+        title={local ? 'Devices and phone sign-in' : undefined}
+        style={{ ...rowStyle, cursor: local ? 'pointer' : 'default' }}
+      >
         <Settings size={touch ? 18 : 16} color="var(--fg-4)" />
-        <span style={{ flex: 1, fontSize: touch ? 15 : 14, color: 'var(--fg-3)' }}>Settings</span>
+        <span style={{ flex: 1, fontSize: touch ? 15 : 14, color: 'var(--fg-3)' }}>{local ? 'Settings · Devices' : 'Settings'}</span>
         {info && (
           <span style={{ fontFamily: 'var(--font-mono)', fontSize: touch ? 12 : 11.5, color: 'var(--fg-5)' }}>v{info.current}</span>
         )}
       </div>
+      {!local && (
+        <button
+          onClick={signOut}
+          style={{ ...rowStyle, background: 'transparent', border: 'none', padding: 0, cursor: 'pointer', textAlign: 'left' }}
+        >
+          <LogOut size={touch ? 18 : 16} color="var(--fg-4)" />
+          <span style={{ flex: 1, fontSize: touch ? 15 : 14, color: 'var(--fg-3)' }}>Sign out</span>
+        </button>
+      )}
+      {devicesOpen && <DevicesDialog remoteHost={remoteHost} onClose={() => setDevicesOpen(false)} />}
     </div>
   );
 }

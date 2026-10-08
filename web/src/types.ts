@@ -45,3 +45,25 @@ export interface UpdateStatus {
   error: { kind: string; message: string } | null;
   skipped_files: string[];
 }
+
+export interface AuthStatus {
+  /** True for the browser on the computer running the server. */
+  local: boolean;
+  authenticated: boolean;
+  remote_host: string | null;
+}
+
+export interface PairingCode {
+  code: string;
+  url: string;
+  qr_svg: string;
+  /** Unix seconds. */
+  expires_at: number;
+}
+
+export interface PairedDevice {
+  id: string;
+  name: string;
+  created: number;
+  last_used: number | null;
+}

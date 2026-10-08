@@ -10,11 +10,13 @@ pub mod note;
 pub mod parser;
 pub mod prompt;
 pub mod server;
+pub mod server_auth;
 pub mod setup;
 pub mod update;
 pub mod update_state;
 pub mod task;
 pub mod watch;
+pub mod web_auth;
 
 #[cfg(feature = "tui")]
 pub mod claude_session;

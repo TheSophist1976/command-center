@@ -283,6 +283,7 @@ Config is stored at `~/Library/Application Support/task-manager/config.md` (macO
 | `group-by` | Default grouping: `agent`, `project`, `priority`, or `none` |
 | `columns` | Comma-separated column list: `id,status,priority,title,due,agent,tags,project` |
 | `agent-<name>` | Agent profile — maps a name to a project directory |
+| `remote-host` | Hostname phones use to reach `task serve` (e.g. `desk.tail1234.ts.net`); enables passkey sign-in. See [Phone access](#phone-access-tailscale--passkeys) |
 
 ```sh
 task config set default-dir ~/projects
@@ -333,7 +334,22 @@ cd .. && cargo run --release --bin task_server
 # open http://127.0.0.1:4287
 ```
 
-`task_server` resolves the task database the same way the CLI does (`--file`/`TASK_FILE`/`default-dir` config/`./tasks.db`). Override the port with `TASK_SERVER_PORT`. It binds to `127.0.0.1` only and validates the `Host` header on every request (including static file serving) to guard against DNS-rebinding attacks from other sites open in your browser — there's no other authentication, since this is a local, single-user tool.
+`task_server` resolves the task database the same way the CLI does (`--file`/`TASK_FILE`/`default-dir` config/`./tasks.db`). Override the port with `TASK_SERVER_PORT`. It binds to `127.0.0.1` only and validates the `Host` header on every request (including static file serving) to guard against DNS-rebinding attacks from other sites open in your browser. The browser on this computer needs no sign-in; phones sign in with a passkey (below).
+
+### Phone access (Tailscale + passkeys)
+
+1. Put the server on your tailnet over HTTPS (phone and computer both signed in to Tailscale, MagicDNS and HTTPS certificates enabled):
+   ```sh
+   tailscale serve --bg 4287
+   task config set remote-host <machine>.<tailnet>.ts.net
+   ```
+   Restart `task serve`; it prints the phone URL on startup.
+2. On the computer, open **Settings · Devices** (sidebar footer) → **Pair a phone**. Scan the QR code with the phone, name the device, and confirm with Face ID / Touch ID. That creates a passkey for command center on the phone.
+3. From then on the phone signs in with Face ID. Sessions last 30 days from last use; **Sign out** is in the phone's menu.
+
+Lost a phone? Revoke it in **Settings · Devices**; its passkey and sessions stop working immediately.
+
+How it works: requests for `localhost`/`127.0.0.1` with no proxy forwarding headers are trusted as before. Requests for `remote-host` need a session cookie (`HttpOnly`, `Secure`, `SameSite=Strict`) from a passkey sign-in, writes must come from `https://<remote-host>`, and a few things stay desktop-only even when signed in: installing updates, opening notes in the desktop editor, and pairing or revoking devices. A phone can only register a passkey with a single-use pairing code (10 minutes) created on the computer. Passkeys and hashed session tokens are stored in `web-auth.json` next to `config.md` (mode 0600). Anything else is rejected.
 
 **Known limitation:** `task_server`'s write handlers (add/edit/done/reopen/delete) serialize against each other with an in-process lock, so two browser tabs hitting the same running server can't race each other into a lost write or duplicate id. This does *not* extend across processes — editing the same `tasks.db` with the CLI or TUI while `task_server` is running is still uncoordinated, and whichever process saves last wins, same as before this change.
 
