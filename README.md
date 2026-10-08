@@ -10,7 +10,7 @@ task setup     # choose your task/notes directories; installs AGENTS.md and Clau
 task serve     # web UI at http://127.0.0.1:4287
 ```
 
-The one-liner downloads prebuilt binaries from the `TheSophist1976/command-center-releases` repo, verifies their SHA-256 checksum, and installs `task` and `task-tui` into `~/.local/bin` (set `INSTALL_DIR` to change that). It installs the latest **stable** release; pre-releases (tags like `v4.1.0-rc.1`) are skipped, and you can install one explicitly with `RELEASE_TAG=v4.1.0-rc.1`. Supported platforms: macOS (Apple Silicon and Intel) and Linux (x86_64 and arm64). To build from source instead, see "Develop from source" below.
+The one-liner downloads prebuilt binaries from the `TheSophist1976/command-center-releases` repo, verifies their SHA-256 checksum, and installs `task` into `~/.local/bin` (set `INSTALL_DIR` to change that). It installs the latest **stable** release; pre-releases (tags like `v4.1.0-rc.1`) are skipped, and you can install one explicitly with `RELEASE_TAG=v4.1.0-rc.1`. Supported platforms: macOS (Apple Silicon and Intel) and Linux (x86_64 and arm64). To build from source instead, see "Develop from source" below.
 
 `task serve` serves the web UI embedded in the binary (no separate frontend build needed). Set `TASK_SERVER_PORT` to override the default port.
 

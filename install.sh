@@ -1,5 +1,5 @@
 #!/bin/sh
-# Install command-center (`task`, `task-tui`) from the public releases repo.
+# Install command-center (`task`; older releases also shipped `task-tui`) from the public releases repo.
 #   curl -fsSL https://raw.githubusercontent.com/TheSophist1976/command-center-releases/main/install.sh | sh
 # Env: INSTALL_DIR (default ~/.local/bin). Test hooks: RELEASE_TAG, RELEASE_BASE_URL.
 set -eu
