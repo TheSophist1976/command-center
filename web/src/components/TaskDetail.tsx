@@ -54,8 +54,9 @@ interface TaskDetailProps {
   onEdit: (changes: Parameters<typeof editTask>[1]) => void;
   onSendFeedback: (text: string) => Promise<void>;
   onSendAnswer: (text: string) => Promise<void>;
-  onCreateNote: (title: string) => void;
+  onCreateNote: (title: string) => Promise<string | undefined> | void;
   onOpenNote: (slug: string) => void;
+  onSaveNote: (slug: string, body: string) => Promise<void>;
   onUnlinkNote: (slug: string) => void;
 }
 
@@ -67,7 +68,7 @@ interface TaskDetailProps {
  */
 export function TaskDetail({
   task, today, mobile, showId = true, actions, onClose, agentOptions, review, question, notes,
-  onEdit, onSendFeedback, onSendAnswer, onCreateNote, onOpenNote, onUnlinkNote,
+  onEdit, onSendFeedback, onSendAnswer, onCreateNote, onOpenNote, onSaveNote, onUnlinkNote,
 }: TaskDetailProps) {
   const done = task.status === 'done';
   const agentStatus = task.agent ? statusFor(task.agent) : null;
@@ -261,7 +262,7 @@ export function TaskDetail({
         ))}
       </div>
 
-      <NotesSection notes={notes} onCreate={onCreateNote} onOpen={onOpenNote} onUnlink={onUnlinkNote} touch={mobile} />
+      <NotesSection notes={notes} onCreate={onCreateNote} onOpen={onOpenNote} onSave={onSaveNote} onUnlink={onUnlinkNote} touch={mobile} />
     </div>
   );
 }

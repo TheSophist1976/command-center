@@ -5,7 +5,7 @@ import './layout.css';
 import { Terminal, Search, PanelLeftClose, PanelLeftOpen, PanelRightClose, PanelRightOpen, Menu, ChevronLeft, Plus } from 'lucide-react';
 import { Button } from './components/Button';
 import { NewTaskForm } from './components/NewTaskForm';
-import { fetchTasks, fetchAgents, addTask, editTask, markDone, reopenTask, deleteTask, fetchTaskNotes, createTaskNote, openNote, unlinkTaskNote, fetchTaskReview, postTaskFeedback, fetchTaskQuestion, postTaskAnswer } from './api';
+import { fetchTasks, fetchAgents, addTask, editTask, markDone, reopenTask, deleteTask, fetchTaskNotes, createTaskNote, openNote, saveNote, unlinkTaskNote, fetchTaskReview, postTaskFeedback, fetchTaskQuestion, postTaskAnswer } from './api';
 import { AgentEditor } from './components/AgentEditor';
 import { SettingsFooter } from './components/SettingsFooter';
 import { TaskDetail } from './components/TaskDetail';
@@ -252,16 +252,23 @@ export default function App() {
     setSelected((prev) => (prev && prev.id === taskId ? { ...prev, notes } : prev));
   }
 
-  async function handleCreateNote(title: string) {
-    if (!selected) return;
+  async function handleCreateNote(title: string): Promise<string | undefined> {
+    if (!selected) return undefined;
     try {
       const note = await createTaskNote(selected.id, title);
       setTaskNotes((prev) => [...prev, note]);
       updateTaskNoteSlugs(selected.id, [...(selected.notes ?? []), note.slug]);
-      await handleOpenNote(note.slug);
+      return note.slug;
     } catch (e) {
       setError(String(e));
+      return undefined;
     }
+  }
+
+  // Throws on failure so the note editor can show the error next to its Save button.
+  async function handleSaveNote(slug: string, body: string) {
+    const saved = await saveNote(slug, { body });
+    setTaskNotes((prev) => prev.map((n) => (n.slug === slug ? saved : n)));
   }
 
   async function handleOpenNote(slug: string) {
@@ -519,6 +526,7 @@ export default function App() {
     onSendAnswer: handleSendAnswer,
     onCreateNote: handleCreateNote,
     onOpenNote: handleOpenNote,
+    onSaveNote: handleSaveNote,
     onUnlinkNote: handleUnlinkNote,
   };
 

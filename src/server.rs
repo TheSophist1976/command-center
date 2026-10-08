@@ -894,6 +894,31 @@ async fn open_note(
     Ok(StatusCode::NO_CONTENT)
 }
 
+async fn edit_note(
+    State(state): State<Arc<AppState>>,
+    AxumPath(slug): AxumPath<String>,
+    Json(req): Json<EditNoteRequest>,
+) -> Result<Json<NoteResponse>, (StatusCode, Json<serde_json::Value>)> {
+    if !is_valid_slug(&slug) {
+        return Err(app_error(StatusCode::BAD_REQUEST, "invalid note slug"));
+    }
+    let _guard = state.write_lock.lock().await;
+    let dir = notes_dir(&state);
+    let note_path = dir.join(format!("{}.md", slug));
+    let existing = crate::note::read_note(&note_path)
+        .map_err(|_| app_error(StatusCode::NOT_FOUND, format!("Note '{}' not found", slug)))?;
+
+    let note = crate::note::Note {
+        slug: slug.clone(),
+        title: req.title.unwrap_or(existing.title),
+        body: req.body.unwrap_or(existing.body),
+    };
+    let note_path = crate::note::write_note(&dir, &note)
+        .map_err(|e| app_error(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    let modified = modified_time(&note_path);
+    Ok(Json(note_response(note, modified)))
+}
+
 async fn unlink_task_note(
     State(state): State<Arc<AppState>>,
     AxumPath((id, slug)): AxumPath<(u32, String)>,
@@ -977,6 +1002,7 @@ fn api_routes() -> Router<Arc<AppState>> {
         .route("/api/tasks/:id/notes/:slug", axum::routing::delete(unlink_task_note))
         .route("/api/tasks/:id/review", get(get_task_review).post(add_task_review_feedback))
         .route("/api/tasks/:id/question", get(get_task_question).post(answer_task_question))
+        .route("/api/notes/:slug", axum::routing::put(edit_note))
         .route("/api/notes/:slug/open", axum::routing::post(open_note))
         .route("/api/agents", get(list_agents))
         .route("/api/agents/:name/instructions", get(get_agent_instructions).put(edit_agent_instructions))
@@ -2204,6 +2230,71 @@ mod tests {
         let json = body_json(response).await;
         let slugs: Vec<&str> = json.as_array().unwrap().iter().map(|n| n["slug"].as_str().unwrap()).collect();
         assert_eq!(slugs, vec!["linked"]);
+    }
+
+    #[tokio::test]
+    async fn test_edit_note_updates_body_and_keeps_title() {
+        let (_dir, state) = make_state();
+        std::fs::create_dir_all(&state.notes_dir).unwrap();
+        std::fs::write(state.notes_dir.join("n.md"), "# Original\n\nold body\n").unwrap();
+        let notes_dir = state.notes_dir.clone();
+        let app = router(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/api/notes/n")
+                    .header("host", "127.0.0.1")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"body":"new body"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let json = body_json(response).await;
+        assert_eq!(json["title"], "Original");
+        assert_eq!(json["body"], "new body");
+        let on_disk = std::fs::read_to_string(notes_dir.join("n.md")).unwrap();
+        assert_eq!(on_disk, "# Original\n\nnew body\n");
+    }
+
+    #[tokio::test]
+    async fn test_edit_note_missing_note_is_404() {
+        let (_dir, state) = make_state();
+        let app = router(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/api/notes/ghost")
+                    .header("host", "127.0.0.1")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"body":"x"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn test_edit_note_rejects_path_traversal_slug() {
+        let (_dir, state) = make_state();
+        let app = router(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/api/notes/..%2f..%2fetc%2fpasswd")
+                    .header("host", "127.0.0.1")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"body":"x"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]

@@ -119,6 +119,16 @@ export async function createTaskNote(taskId: number, title: string): Promise<Not
   );
 }
 
+export async function saveNote(slug: string, changes: { title?: string; body?: string }): Promise<Note> {
+  return jsonOrThrow(
+    await fetch(`/api/notes/${encodeURIComponent(slug)}`, {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(changes),
+    }),
+  );
+}
+
 export async function openNote(slug: string): Promise<void> {
   const response = await fetch(`/api/notes/${slug}/open`, { method: 'POST' });
   if (!response.ok && response.status !== 204) {
