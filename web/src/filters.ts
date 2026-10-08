@@ -1,8 +1,8 @@
-import { CalendarDays, HelpCircle, Inbox, Repeat, Sun, type LucideIcon } from 'lucide-react';
+import { CalendarDays, HelpCircle, Inbox, ListTodo, Repeat, Sun, type LucideIcon } from 'lucide-react';
 import type { Task } from './types';
 import { dueMatches, isOverdue, type DueWindow } from './dueWindow';
 
-export type DueFilter = DueWindow | 'no-due-date' | 'recurring' | 'all-tasks' | 'inbox';
+export type DueFilter = DueWindow | 'no-due-date' | 'recurring' | 'all-tasks' | 'inbox' | 'next';
 
 export interface FilterItem {
   value: DueFilter;
@@ -11,6 +11,11 @@ export interface FilterItem {
   /** Empty-state title and body. */
   empty: [string, string];
 }
+
+export const NEXT_ITEM: FilterItem = {
+  value: 'next', label: 'Next', icon: ListTodo,
+  empty: ['Nothing needs you.', 'No open tasks are assigned to you, awaiting review, or blocked on your input.'],
+};
 
 export const INBOX_ITEM: FilterItem = {
   value: 'inbox', label: 'Inbox', icon: Inbox,
@@ -27,7 +32,7 @@ export const DUE_WINDOW_ITEMS: FilterItem[] = [
   { value: 'all-tasks', label: 'All tasks', icon: CalendarDays, empty: ['No tasks yet.', 'Add your first task.'] },
 ];
 
-export const ALL_FILTER_ITEMS: FilterItem[] = [INBOX_ITEM, ...DUE_WINDOW_ITEMS];
+export const ALL_FILTER_ITEMS: FilterItem[] = [NEXT_ITEM, INBOX_ITEM, ...DUE_WINDOW_ITEMS];
 
 export function hasNoDueDate(t: Task): boolean {
   return t.status === 'open' && !t.due_date;
@@ -41,8 +46,15 @@ export function isInboxTask(t: Task, today: Date): boolean {
   return t.status === 'open' && (!t.agent || !t.due_date || isOverdue(t, today));
 }
 
+/** Open work only a human can move: human-assigned, awaiting review, or blocked on input. */
+export function needsHumanAction(t: Task): boolean {
+  return t.status === 'open' && (t.agent?.toLowerCase() === 'human' || t.work_status === 'waiting-for-review' || t.work_status === 'needs-input');
+}
+
 export function matchesFilter(t: Task, today: Date, filter: DueFilter): boolean {
   switch (filter) {
+    case 'next':
+      return needsHumanAction(t);
     case 'inbox':
       return isInboxTask(t, today);
     case 'all-tasks':
@@ -91,7 +103,17 @@ function byPriority(a: Task, b: Task): number {
   return (PRIORITY_ORDER[a.priority] ?? 99) - (PRIORITY_ORDER[b.priority] ?? 99);
 }
 
-export function groupTasks(tasks: Task[], groupBy: GroupBy): Map<string, Task[]> {
+/** Earliest due date first (undated last), then highest priority. */
+export function byDueThenPriority(a: Task, b: Task): number {
+  if (a.due_date !== b.due_date) {
+    if (!a.due_date) return 1;
+    if (!b.due_date) return -1;
+    return a.due_date < b.due_date ? -1 : 1;
+  }
+  return byPriority(a, b);
+}
+
+export function groupTasks(tasks: Task[], groupBy: GroupBy, compare: (a: Task, b: Task) => number = byPriority): Map<string, Task[]> {
   const groups = new Map<string, Task[]>();
   for (const t of tasks) {
     const key = groupKey(t, groupBy);
@@ -99,7 +121,7 @@ export function groupTasks(tasks: Task[], groupBy: GroupBy): Map<string, Task[]>
     groups.get(key)!.push(t);
   }
   for (const group of groups.values()) {
-    group.sort(byPriority);
+    group.sort(compare);
   }
   if (groupBy === 'priority') {
     return new Map([...groups.entries()].sort((a, b) => (PRIORITY_ORDER[a[0]] ?? 99) - (PRIORITY_ORDER[b[0]] ?? 99)));

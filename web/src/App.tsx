@@ -20,8 +20,8 @@ import { startOfToday } from './dueWindow';
 import { statusFor, statusColor } from './mockAgentStatus';
 import { addDays, addMonths, formatLocalDate } from './taskFormat';
 import {
-  ALL_FILTER_ITEMS, DUE_WINDOW_ITEMS, GROUP_BY_OPTIONS, INBOX_ITEM,
-  countForFilter, groupTasks, matchesFilter, type DueFilter, type FilterItem, type GroupBy,
+  ALL_FILTER_ITEMS, DUE_WINDOW_ITEMS, GROUP_BY_OPTIONS, INBOX_ITEM, NEXT_ITEM,
+  byDueThenPriority, countForFilter, groupTasks, matchesFilter, type DueFilter, type FilterItem, type GroupBy,
 } from './filters';
 import { useMediaQuery } from './useMediaQuery';
 
@@ -69,7 +69,7 @@ export default function App() {
   const [selected, setSelected] = useState<Task | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [showNewTaskForm, setShowNewTaskForm] = useState(false);
-  const [groupBy, setGroupBy] = useState<GroupBy>('agent');
+  const [groupByChoice, setGroupBy] = useState<GroupBy>('agent');
   const [dueFilter, setDueFilter] = useState<DueFilter>('day');
   const [leftOpen, setLeftOpen] = useState(true);
   const [rightOpen, setRightOpen] = useState(true);
@@ -105,6 +105,8 @@ export default function App() {
   const reviewSlug = selected ? `task-${selected.id}-review-thread` : null;
   const questionSlug = selected ? `task-${selected.id}-question` : null;
   const visibleNotes = taskNotes.filter((n) => n.slug !== reviewSlug && n.slug !== questionSlug);
+  // Next is a single queue ordered by due date then priority, so it ignores the chosen grouping.
+  const groupBy: GroupBy = dueFilter === 'next' ? 'none' : groupByChoice;
   const filterItem: FilterItem = ALL_FILTER_ITEMS.find((i) => i.value === dueFilter) ?? INBOX_ITEM;
 
   function selectTask(task: Task) {
@@ -328,7 +330,7 @@ export default function App() {
     return result;
   }, [tasks, dueFilter, query, today]);
 
-  const grouped = useMemo(() => groupTasks(filteredTasks, groupBy), [filteredTasks, groupBy]);
+  const grouped = useMemo(() => groupTasks(filteredTasks, groupBy, dueFilter === 'next' ? byDueThenPriority : undefined), [filteredTasks, groupBy, dueFilter]);
   const flatOrder = useMemo(() => [...grouped.values()].flat(), [grouped]);
 
   function moveSelection(delta: number) {
@@ -707,7 +709,7 @@ export default function App() {
           </div>
           <span style={{ fontFamily: 'var(--font-display)', fontWeight: 700, fontSize: 14 }}>command center</span>
         </div>
-        <SidebarNav items={[INBOX_ITEM]} active={dueFilter} tasks={tasks} today={today} onPick={setDueFilter} />
+        <SidebarNav items={[NEXT_ITEM, INBOX_ITEM]} active={dueFilter} tasks={tasks} today={today} onPick={setDueFilter} />
         <div style={{ ...sectionLabelStyle, padding: '0 20px 8px' }}>Due window</div>
         <SidebarNav items={DUE_WINDOW_ITEMS} active={dueFilter} tasks={tasks} today={today} onPick={setDueFilter} />
         {agents.length > 0 && <div style={{ ...sectionLabelStyle, padding: '4px 20px 8px' }}>Agents</div>}
