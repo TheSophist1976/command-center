@@ -31,16 +31,37 @@ The web UI also shows the running version and an **Update** button when a newer 
 Requires [Rust](https://rustup.rs/) (1.75+).
 
 ```sh
-# CLI only
+cd web && npm ci && npm run build && cd ..   # the web UI is embedded in the binary
 cargo build --release
-
-# CLI + TUI
-cargo build --release --features tui
 ```
 
-Two binaries are produced:
-- `target/release/task` — CLI (auth, config, notes)
-- `target/release/task-tui` — interactive terminal UI (requires `--features tui`)
+This produces `target/release/task` (CLI, notes and `task serve`). The terminal UI (`task-tui`) is deprecated: its source and the `tui` cargo feature remain, but it no longer compiles and is not built or released.
+
+## Releasing
+
+Releases are cut by GitHub Actions (`.github/workflows/release.yml`); there is no local deploy step. (`deploy.sh` is deprecated and only prints a pointer here.)
+
+1. Merge your change to `main` through a PR.
+2. Bump `version` in `Cargo.toml`, merge that, and update `main`.
+3. Tag the merge commit and push the tag:
+
+   ```sh
+   git tag v4.5.0 && git push origin v4.5.0
+   ```
+
+   Tags matching `v*` trigger the workflow. A tag containing `-` (e.g. `v4.5.0-rc.1`) is published as a pre-release, which `install.sh` and `task update` skip.
+
+The workflow runs these jobs in order, and any failure stops the release:
+
+| Job | What it does |
+|-----|--------------|
+| `verify` | Fails unless the tag equals the `Cargo.toml` version; builds the web UI; runs `cargo test` and the `install.sh` shellcheck and tests |
+| `build` | Builds the web UI and `task` (release) for macOS arm64/x64 and Linux x64/arm64, and packages each as a `.tar.gz` |
+| `checksums` | Generates `SHA256SUMS` for the archives |
+| `smoke` | Installs the just-built artifact with `install.sh` on clean macOS and Linux runners and checks `task --version` |
+| `publish` | Copies `install.sh` to the `command-center-releases` repo and creates the GitHub release there with generated notes |
+
+Publishing needs the `RELEASES_REPO_TOKEN` repository secret. Once the release exists, users get it with `task update` or the web UI's **Update** button.
 
 ## Quick Start
 
@@ -342,7 +363,7 @@ cd .. && cargo run --release --bin task_server
 ## Running Tests
 
 ```sh
-cargo test --features tui
+cargo test
 ```
 
 Frontend build check:
