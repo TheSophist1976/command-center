@@ -19,7 +19,7 @@ const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
  * Sidebar footer: the Settings row with the running version, plus the
  * in-app updater when a newer release is available.
  */
-export function SettingsFooter({ touch }: { touch?: boolean }) {
+export function SettingsFooter({ touch, onOpenSettings }: { touch?: boolean; onOpenSettings: () => void }) {
   const [info, setInfo] = useState<VersionInfo | null>(null);
   const [busy, setBusy] = useState(false);
   const [text, setText] = useState('');
@@ -111,7 +111,10 @@ export function SettingsFooter({ touch }: { touch?: boolean }) {
         </div>
       )}
       {error && <div style={{ fontSize: 12, color: 'var(--danger)' }}>{error}</div>}
-      <div style={{ display: 'flex', alignItems: 'center', gap: touch ? 12 : 10, minHeight: touch ? 44 : undefined }}>
+      <div
+        onClick={onOpenSettings}
+        style={{ display: 'flex', alignItems: 'center', gap: touch ? 12 : 10, minHeight: touch ? 44 : undefined, cursor: 'pointer' }}
+      >
         <Settings size={touch ? 18 : 16} color="var(--fg-4)" />
         <span style={{ flex: 1, fontSize: touch ? 15 : 14, color: 'var(--fg-3)' }}>Settings</span>
         {info && (

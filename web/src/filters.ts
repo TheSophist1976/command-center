@@ -113,6 +113,16 @@ export function byDueThenPriority(a: Task, b: Task): number {
   return byPriority(a, b);
 }
 
+/** Next-queue order: deferred tasks sink below everything else, each half sorted by due date then priority. */
+export function byDeferredThenDue(deferred: ReadonlySet<number>): (a: Task, b: Task) => number {
+  return (a, b) => {
+    const da = deferred.has(a.id);
+    const db = deferred.has(b.id);
+    if (da !== db) return da ? 1 : -1;
+    return byDueThenPriority(a, b);
+  };
+}
+
 export function groupTasks(tasks: Task[], groupBy: GroupBy, compare: (a: Task, b: Task) => number = byPriority): Map<string, Task[]> {
   const groups = new Map<string, Task[]>();
   for (const t of tasks) {

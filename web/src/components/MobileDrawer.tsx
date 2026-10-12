@@ -14,9 +14,10 @@ interface MobileDrawerProps {
   onFilter: (f: DueFilter) => void;
   onGroupBy: (g: GroupBy) => void;
   onClose: () => void;
+  onOpenSettings: () => void;
 }
 
-export function MobileDrawer({ tasks, today, agents, filter, groupBy, onFilter, onGroupBy, onClose }: MobileDrawerProps) {
+export function MobileDrawer({ tasks, today, agents, filter, groupBy, onFilter, onGroupBy, onClose, onOpenSettings }: MobileDrawerProps) {
   return (
     <>
       <div onClick={onClose} style={{ position: 'fixed', inset: 0, zIndex: 30, background: 'rgba(0, 0, 0, 0.5)' }} />
@@ -94,7 +95,7 @@ export function MobileDrawer({ tasks, today, agents, filter, groupBy, onFilter, 
             );
           })}
         </div>
-        <SettingsFooter touch />
+        <SettingsFooter touch onOpenSettings={onOpenSettings} />
       </aside>
     </>
   );
