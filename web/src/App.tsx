@@ -7,6 +7,7 @@ import { Button } from './components/Button';
 import { NewTaskForm } from './components/NewTaskForm';
 import { fetchTasks, fetchAgents, addTask, editTask, markDone, reopenTask, deleteTask, fetchTaskNotes, createTaskNote, openNote, saveNote, unlinkTaskNote, fetchTaskReview, postTaskFeedback, fetchTaskQuestion, postTaskAnswer } from './api';
 import { AgentEditor } from './components/AgentEditor';
+import { SettingsDialog } from './components/SettingsDialog';
 import { SettingsFooter } from './components/SettingsFooter';
 import { TaskDetail } from './components/TaskDetail';
 import { TaskRow } from './components/TaskRow';
@@ -21,9 +22,10 @@ import { statusFor, statusColor } from './mockAgentStatus';
 import { addDays, addMonths, formatLocalDate } from './taskFormat';
 import {
   ALL_FILTER_ITEMS, DUE_WINDOW_ITEMS, GROUP_BY_OPTIONS, INBOX_ITEM, NEXT_ITEM,
-  byDueThenPriority, countForFilter, groupTasks, matchesFilter, type DueFilter, type FilterItem, type GroupBy,
+  byDeferredThenDue, countForFilter, groupTasks, matchesFilter, needsHumanAction, type DueFilter, type FilterItem, type GroupBy,
 } from './filters';
 import { useMediaQuery } from './useMediaQuery';
+import { loadDeferrals, loadSettings, saveDeferrals, saveSettings, type Deferrals, type Settings } from './settings';
 
 const PANEL_MIN_WIDTH = 352;
 const PANEL_MAX_WIDTH = 880;
@@ -84,6 +86,11 @@ export default function App() {
   const [question, setQuestion] = useState<Note | null>(null);
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [editingAgent, setEditingAgent] = useState<AgentProfile | null>(null);
+  const [settings, setSettings] = useState<Settings>(loadSettings);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [deferrals, setDeferrals] = useState<Deferrals>(() => loadDeferrals(Date.now()));
+  // Ticks so a deferral expires (and the task returns to its place) without a reload.
+  const [now, setNow] = useState(() => Date.now());
   // Phone-only UI state.
   const isMobile = useMediaQuery(MOBILE_QUERY);
   const [mobileSearch, setMobileSearch] = useState<string | null>(null);
@@ -330,8 +337,33 @@ export default function App() {
     return result;
   }, [tasks, dueFilter, query, today]);
 
-  const grouped = useMemo(() => groupTasks(filteredTasks, groupBy, dueFilter === 'next' ? byDueThenPriority : undefined), [filteredTasks, groupBy, dueFilter]);
+  const deferredIds = useMemo(
+    () => new Set(Object.entries(deferrals).filter(([, until]) => until > now).map(([id]) => Number(id))),
+    [deferrals, now],
+  );
+  const grouped = useMemo(
+    () => groupTasks(filteredTasks, groupBy, dueFilter === 'next' ? byDeferredThenDue(deferredIds) : undefined),
+    [filteredTasks, groupBy, dueFilter, deferredIds],
+  );
   const flatOrder = useMemo(() => [...grouped.values()].flat(), [grouped]);
+
+  function deferTask(task: Task) {
+    const until = Date.now() + settings.deferMinutes * 60_000;
+    const next = { ...loadDeferrals(Date.now()), [task.id]: until };
+    saveDeferrals(next);
+    setDeferrals(next);
+    setNow(Date.now());
+    // Deferring sinks the task, so move on to whatever is now first, like completing does.
+    const remaining = flatOrder.filter((t) => t.id !== task.id && !deferredIds.has(t.id));
+    if (remaining.length) selectTask(remaining[0]);
+  }
+
+  function undeferTask(task: Task) {
+    const next = loadDeferrals(Date.now());
+    delete next[task.id];
+    saveDeferrals(next);
+    setDeferrals(next);
+  }
 
   function moveSelection(delta: number) {
     if (flatOrder.length === 0) return;
@@ -415,6 +447,12 @@ export default function App() {
         if (isMobile) setNewSheetOpen(true);
         else setShowNewTaskForm(true);
         break;
+      case 'z':
+        if (selected && dueFilter === 'next' && needsHumanAction(selected)) {
+          e.preventDefault();
+          deferTask(selected);
+        }
+        break;
       case 'g':
         openFirstNote();
         break;
@@ -491,6 +529,11 @@ export default function App() {
   }, [isResizingPanel]);
 
   useEffect(() => {
+    const t = window.setInterval(() => setNow(Date.now()), 30_000);
+    return () => window.clearInterval(t);
+  }, []);
+
+  useEffect(() => {
     localStorage.setItem('taskPanelWidth', String(panelWidth));
   }, [panelWidth]);
 
@@ -508,6 +551,9 @@ export default function App() {
             cmd(`Selected: ${selected.status === 'done' ? 'reopen' : 'mark done'}`, 'Enter', () => toggleDone(selected)),
             ...QUICK_DUE.map(([key, label, fn]) => cmd(`Selected: ${label.toLowerCase()}`, key, () => setQuickDue(selected, fn ? fn(today) : null))),
             ...FIELD_KEYS.map(([key, label, id]) => cmd(`Selected: ${label.toLowerCase()}`, key, () => clickField(id))),
+            ...(dueFilter === 'next' && needsHumanAction(selected)
+              ? [cmd(`Selected: defer ${settings.deferMinutes} min`, 'z', () => deferTask(selected))]
+              : []),
             ...(selected.notes?.length ? [cmd('Selected: open first linked note', 'g', openFirstNote)] : []),
           ]
         : []),
@@ -664,6 +710,11 @@ export default function App() {
               <MobileActionButton grow primary={selected.status === 'open'} onClick={() => toggleDone(selected)}>
                 {selected.status === 'open' ? 'Mark done' : 'Reopen'}
               </MobileActionButton>
+              {needsHumanAction(selected) && (
+                deferredIds.has(selected.id)
+                  ? <MobileActionButton onClick={() => undeferTask(selected)}>Undefer</MobileActionButton>
+                  : <MobileActionButton onClick={() => deferTask(selected)}>Defer</MobileActionButton>
+              )}
               <MobileActionButton onClick={() => handleDelete(selected)}>Delete</MobileActionButton>
             </div>
           </div>
@@ -679,6 +730,15 @@ export default function App() {
             onFilter={(f) => { setDueFilter(f); setDrawerOpen(false); }}
             onGroupBy={setGroupBy}
             onClose={() => setDrawerOpen(false)}
+            onOpenSettings={() => { setDrawerOpen(false); setSettingsOpen(true); }}
+          />
+        )}
+
+        {settingsOpen && (
+          <SettingsDialog
+            settings={settings}
+            onSave={(s) => { saveSettings(s); setSettings(s); }}
+            onClose={() => setSettingsOpen(false)}
           />
         )}
 
@@ -732,7 +792,7 @@ export default function App() {
             );
           })}
         </div>
-        <SettingsFooter />
+        <SettingsFooter onOpenSettings={() => setSettingsOpen(true)} />
       </aside>
       )}
 
@@ -864,6 +924,11 @@ export default function App() {
                 ) : (
                   <Button size="sm" variant="secondary" onClick={() => handleReopen(selected)}>Reopen</Button>
                 )}
+                {needsHumanAction(selected) && (
+                  deferredIds.has(selected.id)
+                    ? <Button size="sm" variant="secondary" onClick={() => undeferTask(selected)}>Undefer</Button>
+                    : <Button size="sm" variant="secondary" onClick={() => deferTask(selected)}>Defer {settings.deferMinutes}m</Button>
+                )}
                 <Button size="sm" variant="secondary" onClick={() => handleDelete(selected)}>Delete</Button>
               </>
             }
@@ -878,6 +943,14 @@ export default function App() {
 
       {editingAgent && (
         <AgentEditor agent={editingAgent} onClose={() => setEditingAgent(null)} />
+      )}
+
+      {settingsOpen && (
+        <SettingsDialog
+          settings={settings}
+          onSave={(s) => { saveSettings(s); setSettings(s); }}
+          onClose={() => setSettingsOpen(false)}
+        />
       )}
 
       {paletteOpen && (
