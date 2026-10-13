@@ -279,6 +279,13 @@ async fn edit_task(
         let t = task_file
             .find_task_mut(id)
             .ok_or_else(|| app_error(StatusCode::NOT_FOUND, format!("Task {} not found", id)))?;
+        let review_transition = if work_status.is_none()
+            && t.work_status == Some(crate::task::WorkStatus::WaitingForReview)
+        {
+            review_handoff(t, req.agent.as_deref(), due_date)
+        } else {
+            None
+        };
         if let Some(title) = req.title {
             t.title = title;
         }
@@ -312,6 +319,16 @@ async fn edit_task(
         if let Some(r) = recurrence {
             t.recurrence = r;
         }
+        match review_transition {
+            Some(ReviewHandoff::Defer) => {
+                t.agent = Some("human".to_string());
+                t.work_status = None;
+            }
+            Some(ReviewHandoff::Reassign) => {
+                t.work_status = Some(crate::task::WorkStatus::Todo);
+            }
+            None => {}
+        }
         t.updated = Some(chrono::Utc::now());
         (t.clone(), t.project.clone())
     };
@@ -324,6 +341,38 @@ async fn edit_task(
     let updated_task = task_file.find_task(id).cloned().unwrap_or(updated_task);
     task_file.commit().map_err(|e| app_error(StatusCode::INTERNAL_SERVER_ERROR, e))?;
     Ok(Json(updated_task))
+}
+
+enum ReviewHandoff {
+    /// Due date pushed later: the human takes the task back and its work status is cleared.
+    Defer,
+    /// A (non-human) agent was assigned: the task goes back on that agent's queue.
+    Reassign,
+}
+
+/// Decides how an edit to a `waiting-for-review` task moves it out of review (task 36).
+/// Only called when the edit does not set `work_status` itself; an explicit status wins.
+/// Deferring takes precedence over assigning an agent in the same edit.
+fn review_handoff(
+    t: &Task,
+    new_agent: Option<&str>,
+    new_due: Option<Option<chrono::NaiveDate>>,
+) -> Option<ReviewHandoff> {
+    if let Some(Some(due)) = new_due {
+        if t.due_date.map_or(true, |old| due > old) {
+            return Some(ReviewHandoff::Defer);
+        }
+    }
+    match new_agent {
+        Some(a)
+            if !a.is_empty()
+                && !a.eq_ignore_ascii_case("human")
+                && !t.agent.as_deref().is_some_and(|old| old.eq_ignore_ascii_case(a)) =>
+        {
+            Some(ReviewHandoff::Reassign)
+        }
+        _ => None,
+    }
 }
 
 /// Captures the project's current git commit (best-effort — silently does nothing if
@@ -1648,6 +1697,70 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
         let json = body_json(response).await;
         assert_eq!(json["work_status"], "in-progress");
+    }
+
+    /// Seeds one waiting-for-review task assigned to "bot", due 2026-10-13, then PATCHes it.
+    async fn patch_review_task(body: serde_json::Value) -> serde_json::Value {
+        let (_dir, state) = make_state();
+        {
+            let mut tf = crate::task::TaskFile::new();
+            tf.tasks.push(crate::task::Task {
+                id: 1, title: "In review".to_string(), status: Status::Open, priority: crate::task::Priority::Medium,
+                tags: Vec::new(), created: chrono::Utc::now(), updated: None, description: None, instructions: None,
+                due_date: chrono::NaiveDate::from_ymd_opt(2026, 10, 13), project: None, recurrence: None,
+                notes: Vec::new(), agent: Some("bot".to_string()), effort: None,
+                work_status: Some(crate::task::WorkStatus::WaitingForReview),
+            });
+            db::save(&state.db_path, &tf).unwrap();
+        }
+        let response = router(state)
+            .oneshot(
+                Request::builder()
+                    .method("PATCH")
+                    .uri("/api/tasks/1")
+                    .header("host", "127.0.0.1")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        body_json(response).await
+    }
+
+    #[tokio::test]
+    async fn test_assigning_agent_to_review_task_moves_it_to_todo() {
+        let json = patch_review_task(serde_json::json!({ "agent": "other-bot" })).await;
+        assert_eq!(json["agent"], "other-bot");
+        assert_eq!(json["work_status"], "todo");
+    }
+
+    #[tokio::test]
+    async fn test_assigning_human_to_review_task_keeps_status() {
+        let json = patch_review_task(serde_json::json!({ "agent": "human" })).await;
+        assert_eq!(json["work_status"], "waiting-for-review");
+    }
+
+    #[tokio::test]
+    async fn test_explicit_work_status_wins_over_review_handoff() {
+        let json = patch_review_task(serde_json::json!({ "agent": "other-bot", "work_status": "in-progress" })).await;
+        assert_eq!(json["work_status"], "in-progress");
+    }
+
+    #[tokio::test]
+    async fn test_deferring_review_task_hands_it_to_human() {
+        let json = patch_review_task(serde_json::json!({ "due": "2026-10-20" })).await;
+        assert_eq!(json["due_date"], "2026-10-20");
+        assert_eq!(json["agent"], "human");
+        assert!(json["work_status"].is_null());
+    }
+
+    #[tokio::test]
+    async fn test_pulling_review_task_earlier_is_not_a_defer() {
+        let json = patch_review_task(serde_json::json!({ "due": "2026-10-10" })).await;
+        assert_eq!(json["agent"], "bot");
+        assert_eq!(json["work_status"], "waiting-for-review");
     }
 
     #[tokio::test]

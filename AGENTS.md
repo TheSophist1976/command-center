@@ -181,6 +181,8 @@ Valid values: `todo`, `in-progress`, `waiting-for-review`, `changes-requested`, 
 
 **`changes-requested`** means the human left feedback and this task needs another round — read the full review thread note (slug `task-<id>-review-thread`) via `task note show task-<id>-review-thread` for the complete history before doing anything, do the requested work, then append your response with `task note append task-<id>-review-thread --body "## Agent response — <YYYY-MM-DD>\n\n<summary>"` and set `--work-status waiting-for-review` again.
 
+When the human edits a `waiting-for-review` task in the web UI without setting a work status themselves, two hand-offs happen automatically: assigning it to a (non-human) agent resets it to `todo`, so it shows up in that agent's `task next` again; deferring it (moving its due date later) reassigns it to `human` and clears the work status.
+
 **`needs-input`** signals you've paused a task on a blocking question. Before asking, write the question into a note with slug `task-<id>-question` and set `--work-status needs-input` — this surfaces the question as a badge in the command-center web UI even if the human isn't watching the terminal where you asked:
 
 ```bash
