@@ -121,33 +121,41 @@ export default function App() {
     setRightOpen(true);
   }
 
-  useEffect(() => {
-    Promise.all([fetchTasks(), fetchAgents()])
-      .then(([t, a]) => {
-        setTasks(t);
-        setAgents(a);
-      })
-      .catch((e) => setError(String(e)));
-  }, []);
-
   // Live updates: task_server broadcasts over SSE whenever tasks.db changes
   // on disk, from any writer (this tab, another tab, the CLI, an agent).
   // Refetch everything and re-sync `selected` by id rather than trying to
   // diff/merge — simplest correct approach at this app's scale.
+  // A successful refetch also clears any earlier error: fetches fail transiently
+  // (server restart, phone waking from sleep) and the error would otherwise stick
+  // on screen until a reload. Changes missed while disconnected are picked up by
+  // refetching when the stream (re)opens and when the tab becomes visible again.
   useEffect(() => {
-    const source = new EventSource('/api/events');
-    source.onmessage = () => {
-      fetchTasks()
-        .then((t) => {
+    function refresh() {
+      Promise.all([fetchTasks(), fetchAgents()])
+        .then(([t, a]) => {
           setTasks(t);
+          setAgents(a);
           setSelected((prev) => (prev ? t.find((task) => task.id === prev.id) ?? null : prev));
+          setError(null);
         })
         .catch((e) => setError(String(e)));
-      fetchAgents()
-        .then(setAgents)
-        .catch((e) => setError(String(e)));
+    }
+    function onVisibilityChange() {
+      if (document.visibilityState === 'visible') refresh();
+    }
+    refresh();
+    const source = new EventSource('/api/events');
+    let opened = false;
+    source.onopen = () => {
+      if (opened) refresh();
+      opened = true;
     };
-    return () => source.close();
+    source.onmessage = refresh;
+    document.addEventListener('visibilitychange', onVisibilityChange);
+    return () => {
+      source.close();
+      document.removeEventListener('visibilitychange', onVisibilityChange);
+    };
   }, []);
 
   useEffect(() => {
