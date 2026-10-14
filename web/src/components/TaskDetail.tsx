@@ -215,10 +215,11 @@ export function TaskDetail({
         <ReviewPanel review={review} workStatus={task.work_status} accentColor={accent} onSendFeedback={onSendFeedback} />
       )}
 
-      {(question || task.work_status === 'needs-input') && (
+      {/* An answered question stays hidden until the agent asks again (needs-input). */}
+      {task.work_status === 'needs-input' && (
         <QuestionPanel
           question={question}
-          awaitingAnswer={task.work_status === 'needs-input'}
+          awaitingAnswer
           accentColor={accent}
           onSendAnswer={onSendAnswer}
         />
