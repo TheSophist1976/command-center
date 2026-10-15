@@ -110,7 +110,8 @@ export default function App() {
   const panelRaf1 = useRef<number>(0);
   const panelRaf2 = useRef<number>(0);
   const reviewSlug = selected ? `task-${selected.id}-review-thread` : null;
-  const questionSlug = selected ? `task-${selected.id}-question` : null;
+  // The question note only gets its own panel while the agent awaits an answer; otherwise list it with the other notes.
+  const questionSlug = selected?.work_status === 'needs-input' ? `task-${selected.id}-question` : null;
   const visibleNotes = taskNotes.filter((n) => n.slug !== reviewSlug && n.slug !== questionSlug);
   // Next is a single queue ordered by due date then priority, so it ignores the chosen grouping.
   const groupBy: GroupBy = dueFilter === 'next' ? 'none' : groupByChoice;
