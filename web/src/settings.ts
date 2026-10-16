@@ -4,15 +4,20 @@ const DEFERRALS_KEY = 'ccDeferrals';
 export interface Settings {
   /** How long a deferred Next task sinks to the bottom of the list. */
   deferMinutes: number;
+  /** Desktop/phone notifications for new, overdue and needs-you tasks. On unless turned off. */
+  notifications: boolean;
 }
 
-export const DEFAULT_SETTINGS: Settings = { deferMinutes: 60 };
+export const DEFAULT_SETTINGS: Settings = { deferMinutes: 60, notifications: true };
 
 export function loadSettings(): Settings {
   try {
     const parsed = JSON.parse(localStorage.getItem(SETTINGS_KEY) ?? '{}');
     const minutes = Number(parsed.deferMinutes);
-    return { deferMinutes: Number.isFinite(minutes) && minutes > 0 ? minutes : DEFAULT_SETTINGS.deferMinutes };
+    return {
+      deferMinutes: Number.isFinite(minutes) && minutes > 0 ? minutes : DEFAULT_SETTINGS.deferMinutes,
+      notifications: typeof parsed.notifications === 'boolean' ? parsed.notifications : DEFAULT_SETTINGS.notifications,
+    };
   } catch {
     return DEFAULT_SETTINGS;
   }
