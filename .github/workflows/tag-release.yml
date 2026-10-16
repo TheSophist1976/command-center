@@ -1,0 +1,45 @@
+name: tag-release
+
+# When a "chore: release X.Y.Z" commit lands on main, push the vX.Y.Z tag, which starts release.yml.
+# The tag is pushed with RELEASE_TAG_TOKEN (a PAT with Contents: write on this repo) because tags pushed
+# with the default GITHUB_TOKEN do not trigger other workflows.
+
+on:
+  push:
+    branches: [main]
+    paths: [Cargo.toml]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tag-release
+  cancel-in-progress: false
+
+jobs:
+  tag:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.RELEASE_TAG_TOKEN }}
+      - name: Tag the release commit
+        env:
+          SUBJECT: ${{ github.event.head_commit.message }}
+        run: |
+          subject=$(printf '%s\n' "$SUBJECT" | head -n 1)
+          case "$subject" in
+            "chore: release "[0-9]*) ;;
+            *) echo "not a release commit ($subject); nothing to tag"; exit 0 ;;
+          esac
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)
+          echo "$subject" | grep -Eq "^chore: release ${version//./\\.}( \(#[0-9]+\))?$" \
+            || { echo "commit subject does not match Cargo.toml version $version"; exit 1; }
+          if git rev-parse -q --verify "refs/tags/v$version" >/dev/null; then
+            echo "v$version already exists; nothing to do"; exit 0
+          fi
+          git config user.name "release-bot"
+          git config user.email "release-bot@users.noreply.github.com"
+          git tag -a "v$version" -m "v$version" "$GITHUB_SHA"
+          git push origin "v$version"
