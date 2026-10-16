@@ -291,6 +291,18 @@ pub fn parse_due_date_input(s: &str, today: NaiveDate) -> Option<NaiveDate> {
     today.checked_add_signed(Duration::days(days_ahead))
 }
 
+/// Parse a due date input for assignment to a task, rejecting dates before `today`.
+///
+/// Same accepted forms as [`parse_due_date_input`]. Today itself is allowed.
+pub fn parse_new_due_date(s: &str, today: NaiveDate) -> Result<NaiveDate, String> {
+    let d = parse_due_date_input(s, today)
+        .ok_or_else(|| format!("Invalid due date: '{}'. Use YYYY-MM-DD or a weekday name.", s))?;
+    if d < today {
+        return Err(format!("Due date {} is in the past.", d.format("%Y-%m-%d")));
+    }
+    Ok(d)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -786,6 +798,30 @@ Some description here.
     #[test]
     fn test_parse_due_empty_returns_none() {
         assert!(parse_due_date_input("", tue()).is_none());
+    }
+
+    // -- parse_new_due_date tests --
+
+    #[test]
+    fn test_new_due_rejects_past_date() {
+        let err = parse_new_due_date("2026-03-30", tue()).unwrap_err();
+        assert!(err.contains("in the past"), "{}", err);
+    }
+
+    #[test]
+    fn test_new_due_allows_today_and_future() {
+        assert_eq!(parse_new_due_date("2026-03-31", tue()).unwrap(), tue());
+        assert_eq!(
+            parse_new_due_date("2026-04-15", tue()).unwrap(),
+            NaiveDate::from_ymd_opt(2026, 4, 15).unwrap()
+        );
+        assert!(parse_new_due_date("mon", tue()).is_ok());
+    }
+
+    #[test]
+    fn test_new_due_rejects_invalid() {
+        let err = parse_new_due_date("soon", tue()).unwrap_err();
+        assert!(err.contains("Invalid due date"), "{}", err);
     }
 
     // -- Effort field tests --

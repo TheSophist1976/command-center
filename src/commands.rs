@@ -52,7 +52,11 @@ pub fn add(path: &Path, args: AddArgs) -> Result<String, (i32, String)> {
     let mut task_file = db::begin(path).map_err(|e| (1, e))?;
     let priority = Priority::from_str(&args.priority).map_err(|e| (1, e))?;
     let today = chrono::Local::now().date_naive();
-    let due_date = args.due.as_deref().and_then(|d| parser::parse_due_date_input(d, today));
+    let due_date = args
+        .due
+        .as_deref()
+        .map(|d| parser::parse_new_due_date(d, today).map_err(|e| (1, e)))
+        .transpose()?;
     let tags = parse_csv(args.tags.as_deref());
 
     let id = task_file.next_id;
@@ -247,9 +251,7 @@ pub fn edit(path: &Path, id: u32, args: EditArgs) -> Result<String, (i32, String
     let due_date = args
         .due
         .as_deref()
-        .map(|d| {
-            parser::parse_due_date_input(d, today).ok_or_else(|| (1, format!("Invalid due date: '{}'", d)))
-        })
+        .map(|d| parser::parse_new_due_date(d, today).map_err(|e| (1, e)))
         .transpose()?;
     let tags = args.tags.as_deref().map(|s| parse_csv(Some(s)));
 
@@ -426,7 +428,7 @@ mod tests {
         let msg = add(&path, AddArgs {
             title: "New task".to_string(),
             priority: "high".to_string(),
-            due: Some("2026-12-31".to_string()),
+            due: Some("2099-12-31".to_string()),
             project: Some("Work".to_string()),
             tags: Some("a,b".to_string()),
             agent: Some("bot".to_string()),
@@ -449,6 +451,22 @@ mod tests {
         }).unwrap_err();
         assert_eq!(err.0, 1);
         assert!(err.1.contains("Invalid priority"));
+    }
+
+    #[test]
+    fn test_add_and_edit_reject_past_due_date() {
+        let (_dir, path) = setup();
+        let err = add(&path, AddArgs {
+            title: "X".to_string(), priority: "medium".to_string(), due: Some("2000-01-01".to_string()),
+            project: None, tags: None, agent: None, description: None, instructions: None,
+        }).unwrap_err();
+        assert!(err.1.contains("in the past"), "{}", err.1);
+        assert!(db::load(&path).unwrap().tasks.is_empty());
+
+        add(&path, AddArgs { title: "Y".to_string(), priority: "medium".to_string(), due: None, project: None, tags: None, agent: None, description: None, instructions: None }).unwrap();
+        let err = edit(&path, 1, EditArgs { title: None, priority: None, due: Some("2000-01-01".to_string()), project: None, tags: None, agent: None, description: None, instructions: None, effort: None, work_status: None, recur: None }).unwrap_err();
+        assert!(err.1.contains("in the past"), "{}", err.1);
+        assert!(db::load(&path).unwrap().tasks[0].due_date.is_none());
     }
 
     #[test]
@@ -534,9 +552,10 @@ mod tests {
     #[test]
     fn test_done_recurring_task_spawns_next_occurrence() {
         let (_dir, path) = setup();
-        add(&path, AddArgs { title: "Recurring".to_string(), priority: "medium".to_string(), due: Some("2026-01-05".to_string()), project: None, tags: None, agent: None, description: None, instructions: None }).unwrap();
+        add(&path, AddArgs { title: "Recurring".to_string(), priority: "medium".to_string(), due: None, project: None, tags: None, agent: None, description: None, instructions: None }).unwrap();
         {
             let mut tf = db::load(&path).unwrap();
+            tf.tasks[0].due_date = chrono::NaiveDate::from_ymd_opt(2026, 1, 5);
             tf.tasks[0].recurrence = Some(crate::task::Recurrence::from_str("weekly").unwrap());
             db::save(&path, &tf).unwrap();
         }
@@ -559,11 +578,12 @@ mod tests {
         let (_dir, path) = setup();
         add(&path, AddArgs {
             title: "Recurring".to_string(), priority: "medium".to_string(),
-            due: Some("2026-01-05".to_string()), project: None, tags: None,
+            due: None, project: None, tags: None,
             agent: Some("bot".to_string()), description: None, instructions: None,
         }).unwrap();
         {
             let mut tf = db::load(&path).unwrap();
+            tf.tasks[0].due_date = chrono::NaiveDate::from_ymd_opt(2026, 1, 5);
             tf.tasks[0].recurrence = Some(crate::task::Recurrence::from_str("weekly").unwrap());
             db::save(&path, &tf).unwrap();
         }

@@ -154,10 +154,7 @@ async fn add_task(
     let due_date = req
         .due
         .as_deref()
-        .map(|d| {
-            crate::parser::parse_due_date_input(d, today)
-                .ok_or_else(|| format!("Invalid due date: '{}'", d))
-        })
+        .map(|d| crate::parser::parse_new_due_date(d, today))
         .transpose()
         .map_err(|e| app_error(StatusCode::BAD_REQUEST, e))?;
 
@@ -244,9 +241,7 @@ async fn edit_task(
             if d.is_empty() {
                 Ok(None)
             } else {
-                crate::parser::parse_due_date_input(d, today)
-                    .map(Some)
-                    .ok_or_else(|| format!("Invalid due date: '{}'", d))
+                crate::parser::parse_new_due_date(d, today).map(Some)
             }
         })
         .transpose()
@@ -1699,7 +1694,11 @@ mod tests {
         assert_eq!(json["work_status"], "in-progress");
     }
 
-    /// Seeds one waiting-for-review task assigned to "bot", due 2026-10-13, then PATCHes it.
+    fn days_from_today(days: i64) -> chrono::NaiveDate {
+        chrono::Local::now().date_naive() + chrono::Duration::days(days)
+    }
+
+    /// Seeds one waiting-for-review task assigned to "bot", due 10 days from today, then PATCHes it.
     async fn patch_review_task(body: serde_json::Value) -> serde_json::Value {
         let (_dir, state) = make_state();
         {
@@ -1707,7 +1706,7 @@ mod tests {
             tf.tasks.push(crate::task::Task {
                 id: 1, title: "In review".to_string(), status: Status::Open, priority: crate::task::Priority::Medium,
                 tags: Vec::new(), created: chrono::Utc::now(), updated: None, description: None, instructions: None,
-                due_date: chrono::NaiveDate::from_ymd_opt(2026, 10, 13), project: None, recurrence: None,
+                due_date: Some(days_from_today(10)), project: None, recurrence: None,
                 notes: Vec::new(), agent: Some("bot".to_string()), effort: None,
                 work_status: Some(crate::task::WorkStatus::WaitingForReview),
             });
@@ -1750,17 +1749,49 @@ mod tests {
 
     #[tokio::test]
     async fn test_deferring_review_task_hands_it_to_human() {
-        let json = patch_review_task(serde_json::json!({ "due": "2026-10-20" })).await;
-        assert_eq!(json["due_date"], "2026-10-20");
+        let later = days_from_today(20).format("%Y-%m-%d").to_string();
+        let json = patch_review_task(serde_json::json!({ "due": later })).await;
+        assert_eq!(json["due_date"], later);
         assert_eq!(json["agent"], "human");
         assert!(json["work_status"].is_null());
     }
 
     #[tokio::test]
     async fn test_pulling_review_task_earlier_is_not_a_defer() {
-        let json = patch_review_task(serde_json::json!({ "due": "2026-10-10" })).await;
+        let earlier = days_from_today(5).format("%Y-%m-%d").to_string();
+        let json = patch_review_task(serde_json::json!({ "due": earlier })).await;
         assert_eq!(json["agent"], "bot");
         assert_eq!(json["work_status"], "waiting-for-review");
+    }
+
+    #[tokio::test]
+    async fn test_edit_task_past_due_date_returns_400() {
+        let (_dir, state) = make_state();
+        {
+            let mut tf = crate::task::TaskFile::new();
+            tf.tasks.push(crate::task::Task {
+                id: 1, title: "T".to_string(), status: Status::Open, priority: crate::task::Priority::Medium,
+                tags: Vec::new(), created: chrono::Utc::now(), updated: None, description: None, instructions: None,
+                due_date: None, project: None, recurrence: None,
+                notes: Vec::new(), agent: None, effort: None, work_status: None,
+            });
+            db::save(&state.db_path, &tf).unwrap();
+        }
+        let past = days_from_today(-1).format("%Y-%m-%d").to_string();
+        let body = serde_json::json!({ "due": past });
+        let response = router(state)
+            .oneshot(
+                Request::builder()
+                    .method("PATCH")
+                    .uri("/api/tasks/1")
+                    .header("host", "127.0.0.1")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]
