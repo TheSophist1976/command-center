@@ -3,6 +3,7 @@ import { X } from 'lucide-react';
 import { Button } from './Button';
 import { sectionLabelStyle } from '../styles';
 import type { Settings } from '../settings';
+import { notificationPermission, requestNotificationPermission } from '../notifications';
 
 interface SettingsDialogProps {
   settings: Settings;
@@ -12,13 +13,21 @@ interface SettingsDialogProps {
 
 export function SettingsDialog({ settings, onSave, onClose }: SettingsDialogProps) {
   const [deferMinutes, setDeferMinutes] = useState(String(settings.deferMinutes));
+  const [notifications, setNotifications] = useState(settings.notifications);
+  const [permission, setPermission] = useState(notificationPermission);
   const minutes = Math.round(Number(deferMinutes));
   const valid = Number.isFinite(minutes) && minutes >= 1;
 
   function save() {
     if (!valid) return;
-    onSave({ ...settings, deferMinutes: minutes });
+    onSave({ ...settings, deferMinutes: minutes, notifications });
     onClose();
+  }
+
+  async function toggleNotifications(on: boolean) {
+    setNotifications(on);
+    // Ask for permission here: browsers only allow the prompt from a click.
+    if (on) setPermission(await requestNotificationPermission());
   }
 
   return (
@@ -51,6 +60,21 @@ export function SettingsDialog({ settings, onSave, onClose }: SettingsDialogProp
             A deferred task in Next moves to the bottom of the list for this long, then returns to its normal place.
           </div>
         </label>
+        <div style={{ marginTop: 20 }}>
+          <div style={{ ...sectionLabelStyle, marginBottom: 8 }}>Notifications</div>
+          <label style={{ display: 'flex', alignItems: 'center', gap: 10, fontSize: 14, cursor: 'pointer' }}>
+            <input type="checkbox" checked={notifications} onChange={(e) => toggleNotifications(e.target.checked)} />
+            Notify me about new tasks, overdue tasks and tasks that need me
+          </label>
+          <div style={{ marginTop: 6, fontSize: 12, color: notifications && permission !== 'granted' ? 'var(--danger)' : 'var(--fg-4)' }}>
+            {notificationHint(notifications, permission)}
+          </div>
+          {notifications && permission === 'default' && (
+            <div style={{ marginTop: 8 }}>
+              <Button size="sm" variant="secondary" onClick={async () => setPermission(await requestNotificationPermission())}>Allow notifications</Button>
+            </div>
+          )}
+        </div>
         <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, marginTop: 24 }}>
           <Button variant="secondary" onClick={onClose}>Cancel</Button>
           <Button onClick={save} disabled={!valid}>Save</Button>
@@ -58,4 +82,18 @@ export function SettingsDialog({ settings, onSave, onClose }: SettingsDialogProp
       </div>
     </div>
   );
+}
+
+function notificationHint(on: boolean, permission: NotificationPermission | 'unsupported'): string {
+  if (!on) return 'Off. Turn on to get alerts on this device.';
+  switch (permission) {
+    case 'granted':
+      return 'On for this device while Command Center is open or in the background.';
+    case 'denied':
+      return 'Blocked by the browser. Allow notifications for this site in the browser settings.';
+    case 'unsupported':
+      return 'This browser does not support notifications. On iPhone, add Command Center to the Home Screen and open it from there.';
+    default:
+      return 'The browser has not been allowed to show notifications yet.';
+  }
 }

@@ -26,6 +26,7 @@ import {
 } from './filters';
 import { useMediaQuery } from './useMediaQuery';
 import { loadDeferrals, loadSettings, saveDeferrals, saveSettings, type Deferrals, type Settings } from './settings';
+import { diffNotifications, loadSnapshot, saveSnapshot, showNotification, snapshotOf } from './notifications';
 
 const PANEL_MIN_WIDTH = 352;
 const PANEL_MAX_WIDTH = 880;
@@ -67,6 +68,8 @@ function countLabel(n: number): string {
 
 export default function App() {
   const [tasks, setTasks] = useState<Task[]>([]);
+  // False until the first fetch, so the empty initial list is not taken as the notification baseline.
+  const [tasksLoaded, setTasksLoaded] = useState(false);
   const [agents, setAgents] = useState<AgentProfile[]>([]);
   const [selected, setSelected] = useState<Task | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -135,6 +138,7 @@ export default function App() {
       Promise.all([fetchTasks(), fetchAgents()])
         .then(([t, a]) => {
           setTasks(t);
+          setTasksLoaded(true);
           setAgents(a);
           setSelected((prev) => (prev ? t.find((task) => task.id === prev.id) ?? null : prev));
           setError(null);
@@ -158,6 +162,19 @@ export default function App() {
       document.removeEventListener('visibilitychange', onVisibilityChange);
     };
   }, []);
+
+  // Notify about tasks that are new, newly need the human, or newly overdue since the last check.
+  // Runs on every refresh and on the clock tick (so tasks turn overdue at midnight). The snapshot is
+  // kept up to date even while notifications are off, so turning them on does not replay old changes.
+  useEffect(() => {
+    if (!tasksLoaded) return;
+    const day = startOfToday();
+    const prev = loadSnapshot();
+    if (prev && settings.notifications) {
+      for (const n of diffNotifications(prev, tasks, day)) showNotification(n).catch(() => {});
+    }
+    saveSnapshot(snapshotOf(tasks, day));
+  }, [tasks, tasksLoaded, now, settings.notifications]);
 
   useEffect(() => {
     if (!selected) {
