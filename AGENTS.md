@@ -149,7 +149,7 @@ Do not rewrite a task's instructions yourself — the human owns them. If they a
 task add "Task title" --priority high --due 2026-03-15 --project Work --tags frontend,auth --agent command-center --description "Optional longer description" --instructions "Optional: what to do for this task"
 ```
 
-Only `title` is required; `--priority` defaults to `medium`. The id is assigned automatically — it will be printed in the output (`Created task 12: Task title`).
+Only `title` is required; `--priority` defaults to `medium`. `--due` takes `YYYY-MM-DD` or a weekday name (next future occurrence); a date before today is rejected with an error, here and in `task edit`. The id is assigned automatically — it will be printed in the output (`Created task 12: Task title`).
 
 ### Editing a task
 
