@@ -4,7 +4,7 @@ use std::sync::mpsc;
 use std::time::Duration;
 
 use chrono::{Datelike, Days, Local, Months, NaiveDate, Utc};
-use crate::parser::parse_due_date_input;
+use crate::parser::{parse_due_date_input, parse_new_due_date};
 use crossterm::{
     event::{self, Event, KeyCode, KeyEventKind},
     execute,
@@ -2060,8 +2060,8 @@ fn handle_input(app: &mut App, key: KeyCode, action: InputAction) -> Result<(), 
                         }
                     } else {
                         let today = Local::now().date_naive();
-                        match parse_due_date_input(&trimmed, today) {
-                            Some(date) => {
+                        match parse_new_due_date(&trimmed, today) {
+                            Ok(date) => {
                                 let filtered = app.visual_task_order();
                                 if let Some(&task_idx) = filtered.get(app.selected) {
                                     let task = &mut app.task_file.tasks[task_idx];
@@ -2070,8 +2070,8 @@ fn handle_input(app: &mut App, key: KeyCode, action: InputAction) -> Result<(), 
                                     app.save()?;
                                 }
                             }
-                            None => {
-                                app.status_message = Some("Invalid date (use YYYY-MM-DD or a weekday name)".to_string());
+                            Err(e) => {
+                                app.status_message = Some(e);
                                 app.mode = Mode::EditingDue;
                                 return Ok(());
                             }
@@ -2357,8 +2357,15 @@ fn handle_detail_confirm(app: &mut App, key: KeyCode) -> Result<(), String> {
             if let Some(ref draft) = app.detail_draft {
                 if !draft.due_date.trim().is_empty() {
                     let today = Local::now().date_naive();
-                    if parse_due_date_input(draft.due_date.trim(), today).is_none() {
-                        app.status_message = Some("Invalid date (use YYYY-MM-DD or a weekday name)".to_string());
+                    let existing = app
+                        .visual_task_order()
+                        .get(app.selected)
+                        .and_then(|&i| app.task_file.tasks[i].due_date);
+                    // An overdue task keeps its existing date when other fields are edited.
+                    let unchanged = existing.is_some()
+                        && parse_due_date_input(draft.due_date.trim(), today) == existing;
+                    if let (false, Err(e)) = (unchanged, parse_new_due_date(draft.due_date.trim(), today)) {
+                        app.status_message = Some(e);
                         app.detail_field_index = 4;
                         load_field_to_buffer(app);
                         app.mode = Mode::EditingDetailPanel;

@@ -67,6 +67,8 @@ export function DatePicker({ id, value, onSave, display }: DatePickerProps) {
   }
 
   function choose(d: Date) {
+    // Tasks can't be given a due date in the past; the server rejects it too.
+    if (d < today) return;
     onSave(formatLocalDate(d));
     setOpen(false);
   }
@@ -177,16 +179,18 @@ export function DatePicker({ id, value, onSave, display }: DatePickerProps) {
               const isToday = sameDay(d, today);
               const isSelected = !!selectedDate && sameDay(d, selectedDate);
               const isHighlighted = sameDay(d, highlighted);
+              const isPast = d < today;
               return (
                 <button
                   key={i}
+                  disabled={isPast}
                   onClick={() => choose(d)}
                   onMouseEnter={() => setHighlighted(d)}
                   style={{
-                    height: 26, borderRadius: 4, border: 'none', cursor: 'pointer', fontSize: 12,
+                    height: 26, borderRadius: 4, border: 'none', cursor: isPast ? 'default' : 'pointer', fontSize: 12,
                     boxShadow: isHighlighted ? '0 0 0 1px var(--accent)' : 'none',
                     background: isSelected ? 'var(--accent)' : isToday ? 'var(--accent-soft)' : 'transparent',
-                    color: isSelected ? 'var(--ink)' : 'var(--fg-2)',
+                    color: isSelected ? 'var(--ink)' : isPast ? 'var(--fg-5)' : 'var(--fg-2)',
                   }}
                 >
                   {d.getDate()}
