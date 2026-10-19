@@ -19,7 +19,7 @@ Tasks can be assigned to specific AI agents via the `agent` field in task metada
    task next            # one line per task, in the order to work them
    task next --json     # full queue: your instructions, memory, tasks, review threads, linked notes
    ```
-   `task next` already skips tasks that were handed back (`waiting-for-review`, `complete`), tasks blocked on the human (`needs-input`), and recurring tasks that are not due yet. Open tasks with no agent and no due date are listed first, for triage. Each task in the JSON has a `pickup` of `new`, `continue`, `review_feedback`, `answered_question` or `unassigned`, telling you why it is there.
+   `task next` already skips tasks that were handed back (`waiting-for-review`, `complete`), tasks blocked on the human (`needs-input`), and recurring tasks that are not due yet. Open tasks missing an agent or a due date (unassigned tasks, and your own undated tasks) are listed first, highest priority first. Each task in the JSON has a `pickup` of `new`, `continue`, `review_feedback`, `answered_question` or `unassigned`, telling you why it is there.
 
 Only work on tasks assigned to your agent profile. Tasks with `agent:human` are for the human. Tasks with no `agent` field are unassigned — do not work on these unless explicitly told to, even when `task next` lists them (`pickup: unassigned`).
 

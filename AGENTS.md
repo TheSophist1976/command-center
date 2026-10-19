@@ -28,7 +28,7 @@ task next              # tasks you should work now, in order, one line each
 task next --json       # the full queue: your instructions, your memory, and every task with its notes
 ```
 
-`task next` uses `TASK_AGENT` (or the working directory) unless you pass `--agent <name>`, and `--limit N` caps the list. It applies the selection rules for you: at the top it lists open tasks with **no agent and no due date** (highest priority first, `pickup: unassigned`), then open tasks assigned to you; it **skips** tasks at `waiting-for-review` or `complete` (already handed back), tasks at `needs-input` (blocked on the human), and recurring tasks that are not due yet; it orders by due date (earliest first, undated last) and then priority.
+`task next` uses `TASK_AGENT` (or the working directory) unless you pass `--agent <name>`, and `--limit N` caps the list. It applies the selection rules for you: only open tasks that are assigned to you or have no agent; at the top it lists the ones **missing an agent or a due date** (unassigned tasks with `pickup: unassigned`, and your own undated tasks), highest priority first, then your remaining tasks by due date (earliest first) and then priority; it **skips** tasks at `waiting-for-review` or `complete` (already handed back), tasks at `needs-input` (blocked on the human), and recurring tasks that are not due yet. Other agents' tasks are never listed.
 
 Each task in the JSON has a `pickup` value telling you why it is there:
 
@@ -38,7 +38,7 @@ Each task in the JSON has a `pickup` value telling you why it is there:
 | `continue` | Already `in-progress`; resume it. |
 | `review_feedback` | The human left feedback; read `review_thread` first. |
 | `answered_question` | The human answered your `needs-input` question; the answer is at the end of `question`. |
-| `unassigned` | No agent and no due date; listed for triage. Do not work it unless the human tells you to. |
+| `unassigned` | No agent; listed for triage. Do not work it unless the human tells you to. |
 
 Alongside `task` it carries `review_thread` and `question` (note bodies, or `null`) and `notes` (the other linked notes, each with `slug`, `title`, `body`). Top-level `instructions` and `memory` are your standing instructions and memory, so you do not need to read them separately.
 
