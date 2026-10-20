@@ -14,7 +14,7 @@ export interface FilterItem {
 
 export const NEXT_ITEM: FilterItem = {
   value: 'next', label: 'Next', icon: ListTodo,
-  empty: ['Nothing needs you.', 'No open tasks are assigned to you, awaiting review, or blocked on your input.'],
+  empty: ['Nothing needs you.', 'No open tasks are unassigned, assigned to you, awaiting review, or blocked on your input.'],
 };
 
 export const INBOX_ITEM: FilterItem = {
@@ -46,9 +46,9 @@ export function isInboxTask(t: Task, today: Date): boolean {
   return t.status === 'open' && (!t.agent || !t.due_date || isOverdue(t, today));
 }
 
-/** Open work only a human can move: human-assigned, awaiting review, or blocked on input. */
+/** Open work only a human can move: unassigned, human-assigned, awaiting review, or blocked on input. */
 export function needsHumanAction(t: Task): boolean {
-  return t.status === 'open' && (t.agent?.toLowerCase() === 'human' || t.work_status === 'waiting-for-review' || t.work_status === 'needs-input');
+  return t.status === 'open' && (!t.agent || t.agent.toLowerCase() === 'human' || t.work_status === 'waiting-for-review' || t.work_status === 'needs-input');
 }
 
 export function matchesFilter(t: Task, today: Date, filter: DueFilter): boolean {
@@ -113,13 +113,16 @@ export function byDueThenPriority(a: Task, b: Task): number {
   return byPriority(a, b);
 }
 
-/** Next-queue order: deferred tasks sink below everything else, each half sorted by due date then priority. */
+/** Next-queue order: deferred tasks sink below everything else; in each half, tasks missing an agent or due date come first (by priority), then the rest by due date then priority. */
 export function byDeferredThenDue(deferred: ReadonlySet<number>): (a: Task, b: Task) => number {
   return (a, b) => {
     const da = deferred.has(a.id);
     const db = deferred.has(b.id);
     if (da !== db) return da ? 1 : -1;
-    return byDueThenPriority(a, b);
+    const ta = !a.agent || !a.due_date;
+    const tb = !b.agent || !b.due_date;
+    if (ta !== tb) return ta ? -1 : 1;
+    return ta ? byPriority(a, b) : byDueThenPriority(a, b);
   };
 }
 
