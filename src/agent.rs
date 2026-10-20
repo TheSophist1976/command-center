@@ -114,6 +114,8 @@ pub enum Pickup {
     ReviewFeedback,
     /// The human answered the `needs-input` question; the answer is in the question note.
     AnsweredQuestion,
+    /// No agent: listed for triage, not assigned to anyone yet.
+    Unassigned,
 }
 
 impl Pickup {
@@ -123,6 +125,7 @@ impl Pickup {
             Pickup::Continue => "continue",
             Pickup::ReviewFeedback => "review_feedback",
             Pickup::AnsweredQuestion => "answered_question",
+            Pickup::Unassigned => "unassigned",
         }
     }
 }
@@ -133,6 +136,9 @@ fn ends_with_answer(question: &str) -> bool {
 }
 
 pub fn pickup_kind(task: &Task, question: Option<&str>) -> Pickup {
+    if task.agent.is_none() {
+        return Pickup::Unassigned;
+    }
     match task.work_status {
         Some(WorkStatus::ChangesRequested) if question.is_some_and(ends_with_answer) => Pickup::AnsweredQuestion,
         Some(WorkStatus::ChangesRequested) => Pickup::ReviewFeedback,
@@ -141,21 +147,25 @@ pub fn pickup_kind(task: &Task, question: Option<&str>) -> Pickup {
     }
 }
 
-/// Open tasks assigned to `agent` (case-insensitive) that are ready to be worked now, in
-/// the order they should be worked: earliest due date first (none last), then priority.
+/// The `task next` list for `agent`: first the open tasks missing an agent or a due date
+/// (unassigned tasks, plus `agent`'s own undated tasks), highest priority first; then the
+/// rest of the tasks assigned to `agent` (case-insensitive) that are ready to be worked
+/// now, earliest due date first, then priority. Other agents' tasks are never listed.
 ///
 /// Excluded: tasks already handed back (`waiting-for-review`, `complete`), tasks blocked
 /// on the human (`needs-input` — the web UI moves them to `changes-requested` once
 /// answered), and recurring tasks that are not due yet.
 pub fn eligible<'a>(tasks: &'a [Task], agent: &str, today: NaiveDate) -> Vec<&'a Task> {
-    let ready: Vec<&Task> = tasks
+    let (mut top, rest): (Vec<&Task>, Vec<&Task>) = tasks
         .iter()
         .filter(|t| t.status == Status::Open)
-        .filter(|t| t.agent.as_deref().is_some_and(|a| a.eq_ignore_ascii_case(agent)))
+        .filter(|t| t.agent.as_deref().is_none_or(|a| a.eq_ignore_ascii_case(agent)))
         .filter(|t| !matches!(t.work_status, Some(WorkStatus::WaitingForReview | WorkStatus::Complete | WorkStatus::NeedsInput)))
         .filter(|t| t.recurrence.is_none() || t.due_date.is_none_or(|d| d <= today))
-        .collect();
-    crate::commands::sort_by_due_then_priority(ready)
+        .partition(|t| t.agent.is_none() || t.due_date.is_none());
+    top.sort_by_key(|t| t.priority);
+    top.extend(crate::commands::sort_by_due_then_priority(rest));
+    top
 }
 
 pub struct QueueEntry<'a> {
@@ -301,11 +311,11 @@ mod tests {
 
         let tasks = vec![waiting, complete, blocked, future_recurring, due_recurring, changes, done, other, plain];
         let ids: Vec<u32> = eligible(&tasks, "Bot", today()).iter().map(|t| t.id).collect();
-        assert_eq!(ids, vec![5, 6, 9]);
+        assert_eq!(ids, vec![6, 9, 5]); // undated tasks first
     }
 
     #[test]
-    fn eligible_orders_by_due_date_then_priority_with_undated_last() {
+    fn eligible_orders_undated_first_then_by_due_date_then_priority() {
         let mut a = task(1, "Bot");
         a.priority = Priority::Low;
         a.due_date = Some(today());
@@ -319,7 +329,37 @@ mod tests {
         d.due_date = Some(today() - chrono::Duration::days(3));
         let tasks = vec![a, b, c, d];
         let ids: Vec<u32> = eligible(&tasks, "Bot", today()).iter().map(|t| t.id).collect();
-        assert_eq!(ids, vec![4, 2, 1, 3]);
+        assert_eq!(ids, vec![3, 4, 2, 1]);
+    }
+
+    #[test]
+    fn eligible_lists_tasks_without_agent_or_due_date_first() {
+        let mut mine = task(1, "Bot");
+        mine.due_date = Some(today());
+        mine.priority = Priority::Critical;
+        let mut low = task(2, "Bot");
+        low.agent = None;
+        low.priority = Priority::Low;
+        let mut high = task(3, "Bot");
+        high.agent = None;
+        high.priority = Priority::High;
+        let mut unassigned_dated = task(4, "Bot");
+        unassigned_dated.agent = None;
+        unassigned_dated.due_date = Some(today());
+        let mut reviewing = task(5, "Bot");
+        reviewing.agent = None;
+        reviewing.work_status = Some(WorkStatus::WaitingForReview);
+        let mut done = task(6, "Bot");
+        done.agent = None;
+        done.status = Status::Done;
+        let mut mine_undated = task(7, "Bot");
+        mine_undated.priority = Priority::Low;
+        let other_undated = task(8, "Other");
+        let tasks = vec![mine, low, high, unassigned_dated, reviewing, done, mine_undated, other_undated];
+        let ids: Vec<u32> = eligible(&tasks, "Bot", today()).iter().map(|t| t.id).collect();
+        assert_eq!(ids, vec![3, 4, 2, 7, 1]);
+        assert_eq!(pickup_kind(&tasks[1], None), Pickup::Unassigned);
+        assert_eq!(pickup_kind(&tasks[6], None), Pickup::New);
     }
 
     #[test]
