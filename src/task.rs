@@ -40,6 +40,7 @@ pub enum WorkStatus {
     ChangesRequested,
     NeedsInput,
     Complete,
+    Failing,
 }
 
 impl std::fmt::Display for WorkStatus {
@@ -51,6 +52,7 @@ impl std::fmt::Display for WorkStatus {
             WorkStatus::ChangesRequested => write!(f, "changes-requested"),
             WorkStatus::NeedsInput => write!(f, "needs-input"),
             WorkStatus::Complete => write!(f, "complete"),
+            WorkStatus::Failing => write!(f, "failing"),
         }
     }
 }
@@ -65,10 +67,41 @@ impl std::str::FromStr for WorkStatus {
             "changes-requested" | "changes_requested" | "changesrequested" | "changes" => Ok(WorkStatus::ChangesRequested),
             "needs-input" | "needs_input" | "needsinput" | "needs input" => Ok(WorkStatus::NeedsInput),
             "complete" | "done" => Ok(WorkStatus::Complete),
+            "failing" | "fail" | "failed" => Ok(WorkStatus::Failing),
             _ => Err(format!(
-                "Invalid work status: '{}'. Valid values: todo, in-progress, waiting-for-review, changes-requested, needs-input, complete",
+                "Invalid work status: '{}'. Valid values: todo, in-progress, waiting-for-review, changes-requested, needs-input, complete, failing",
                 s
             )),
+        }
+    }
+}
+
+/// Whether a row is a normal task or a service: a recurring agent job that
+/// advances its own schedule with `task service run` and never goes to review.
+#[derive(Debug, Clone, Copy, PartialEq, Default, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TaskKind {
+    #[default]
+    Task,
+    Service,
+}
+
+impl std::fmt::Display for TaskKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            TaskKind::Task => write!(f, "task"),
+            TaskKind::Service => write!(f, "service"),
+        }
+    }
+}
+
+impl std::str::FromStr for TaskKind {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "task" => Ok(TaskKind::Task),
+            "service" => Ok(TaskKind::Service),
+            _ => Err(format!("Invalid kind: '{}'. Valid values: task, service", s)),
         }
     }
 }
@@ -253,6 +286,18 @@ pub fn next_due_date(recurrence: &Recurrence, current_due: Option<NaiveDate>) ->
     }
 }
 
+/// Step `next_due_date` from `due` until the result is after `today` (or on or
+/// after `today` when `inclusive`). Services use this so missed runs are
+/// skipped, not caught up. Returns `due` unchanged when it already qualifies.
+pub fn next_due_after(recurrence: &Recurrence, due: NaiveDate, today: NaiveDate, inclusive: bool) -> NaiveDate {
+    let ok = |d: NaiveDate| if inclusive { d >= today } else { d > today };
+    let mut d = due;
+    while !ok(d) {
+        d = next_due_date(recurrence, Some(d));
+    }
+    d
+}
+
 /// Add N months to a date, clamping to month-end if needed.
 fn add_months(date: NaiveDate, months: u32) -> NaiveDate {
     let total_months = date.month0() + months;
@@ -352,6 +397,30 @@ pub struct Task {
     pub effort: Option<Effort>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub work_status: Option<WorkStatus>,
+    pub kind: TaskKind,
+    pub paused: bool,
+}
+
+impl Task {
+    pub fn is_service(&self) -> bool {
+        self.kind == TaskKind::Service
+    }
+
+    /// Check the service rules: a service must recur and have a due date,
+    /// and only services may be `failing`.
+    pub fn validate_kind(&self) -> Result<(), String> {
+        if self.is_service() {
+            if self.recurrence.is_none() {
+                return Err(format!("Task {} is a service and must have a recurrence (--recur)", self.id));
+            }
+            if self.due_date.is_none() {
+                return Err(format!("Task {} is a service and must have a due date (--due)", self.id));
+            }
+        } else if self.work_status == Some(WorkStatus::Failing) {
+            return Err("work status 'failing' is only valid on services".to_string());
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -485,6 +554,38 @@ where
 }
 
 #[cfg(test)]
+mod service_tests {
+    use super::*;
+
+    fn d(s: &str) -> NaiveDate {
+        NaiveDate::parse_from_str(s, "%Y-%m-%d").unwrap()
+    }
+
+    #[test]
+    fn failing_work_status_round_trips_with_aliases() {
+        for s in ["failing", "fail", "failed"] {
+            assert_eq!(s.parse::<WorkStatus>().unwrap(), WorkStatus::Failing);
+        }
+        assert_eq!(WorkStatus::Failing.to_string(), "failing");
+    }
+
+    #[test]
+    fn next_due_after_skips_missed_dates() {
+        let daily: Recurrence = "daily".parse().unwrap();
+        assert_eq!(next_due_after(&daily, d("2026-10-01"), d("2026-10-05"), false), d("2026-10-06"));
+        assert_eq!(next_due_after(&daily, d("2026-10-01"), d("2026-10-05"), true), d("2026-10-05"));
+        let fri: Recurrence = "weekly:fri".parse().unwrap();
+        // 2026-10-02 is a Friday; Monday 10-12 → next Friday 10-16.
+        assert_eq!(next_due_after(&fri, d("2026-10-02"), d("2026-10-12"), false), d("2026-10-16"));
+        let second_mon: Recurrence = "monthly:2:mon".parse().unwrap();
+        // 2nd Mondays: 2026-08-10, 09-14, 10-12, 11-09.
+        assert_eq!(next_due_after(&second_mon, d("2026-08-10"), d("2026-10-20"), false), d("2026-11-09"));
+        // Already in the future: unchanged.
+        assert_eq!(next_due_after(&daily, d("2026-12-01"), d("2026-10-05"), false), d("2026-12-01"));
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use chrono::TimeZone;
@@ -506,7 +607,7 @@ mod tests {
             notes: vec![],
             agent: None,
             effort: None,
-            work_status: None,
+            work_status: None, kind: Default::default(), paused: false,
         }
     }
 

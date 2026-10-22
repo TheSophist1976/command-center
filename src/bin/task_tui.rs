@@ -311,9 +311,9 @@ fn run(cli: Cli) -> Result<(), (i32, String)> {
             Ok(())
         }
 
-        Some(Command::List { status, agent, project, tag, due_before }) => {
+        Some(Command::List { status, agent, project, tag, due_before, services }) => {
             let msg = task::commands::list(&path, task::commands::ListArgs {
-                status, agent, project, tag, due_before,
+                status, agent, project, tag, due_before, services,
             })?;
             println!("{}", msg);
             Ok(())
@@ -324,11 +324,17 @@ fn run(cli: Cli) -> Result<(), (i32, String)> {
             Ok(())
         }
 
-        Some(Command::Edit { id, title, priority, due, project, tags, agent, description, instructions, effort, work_status, recur }) => {
+        Some(Command::Edit { id, title, priority, due, project, tags, agent, description, instructions, effort, work_status, recur, service, no_service }) => {
+            let service = if service { Some(true) } else if no_service { Some(false) } else { None };
             let msg = task::commands::edit(&path, id, task::commands::EditArgs {
-                title, priority, due, project, tags, agent, description, instructions, effort, work_status, recur,
+                title, priority, due, project, tags, agent, description, instructions, effort, work_status, recur, service,
             })?;
             println!("{}", msg);
+            Ok(())
+        }
+
+        Some(Command::Service { subcommand }) => {
+            println!("{}", task::commands::service(&path, subcommand, task::agent::env_agent().as_deref())?);
             Ok(())
         }
 

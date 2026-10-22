@@ -114,6 +114,8 @@ pub enum Pickup {
     ReviewFeedback,
     /// The human answered the `needs-input` question; the answer is in the question note.
     AnsweredQuestion,
+    /// A due service: do the run, then record it with `task service run`.
+    ServiceRun,
 }
 
 impl Pickup {
@@ -123,6 +125,7 @@ impl Pickup {
             Pickup::Continue => "continue",
             Pickup::ReviewFeedback => "review_feedback",
             Pickup::AnsweredQuestion => "answered_question",
+            Pickup::ServiceRun => "service_run",
         }
     }
 }
@@ -137,6 +140,7 @@ pub fn pickup_kind(task: &Task, question: Option<&str>) -> Pickup {
         Some(WorkStatus::ChangesRequested) if question.is_some_and(ends_with_answer) => Pickup::AnsweredQuestion,
         Some(WorkStatus::ChangesRequested) => Pickup::ReviewFeedback,
         Some(WorkStatus::InProgress) => Pickup::Continue,
+        None | Some(WorkStatus::Failing) if task.is_service() => Pickup::ServiceRun,
         _ => Pickup::New,
     }
 }
@@ -146,11 +150,12 @@ pub fn pickup_kind(task: &Task, question: Option<&str>) -> Pickup {
 ///
 /// Excluded: tasks already handed back (`waiting-for-review`, `complete`), tasks blocked
 /// on the human (`needs-input` — the web UI moves them to `changes-requested` once
-/// answered), and recurring tasks that are not due yet.
+/// answered), recurring tasks (and services) that are not due yet, and paused services.
 pub fn eligible<'a>(tasks: &'a [Task], agent: &str, today: NaiveDate) -> Vec<&'a Task> {
     let ready: Vec<&Task> = tasks
         .iter()
         .filter(|t| t.status == Status::Open)
+        .filter(|t| !(t.is_service() && t.paused))
         .filter(|t| t.agent.as_deref().is_some_and(|a| a.eq_ignore_ascii_case(agent)))
         .filter(|t| !matches!(t.work_status, Some(WorkStatus::WaitingForReview | WorkStatus::Complete | WorkStatus::NeedsInput)))
         .filter(|t| t.recurrence.is_none() || t.due_date.is_none_or(|d| d <= today))
@@ -229,7 +234,7 @@ mod tests {
             notes: vec![],
             agent: Some(agent.to_string()),
             effort: None,
-            work_status: None,
+            work_status: None, kind: Default::default(), paused: false,
         }
     }
 
@@ -302,6 +307,42 @@ mod tests {
         let tasks = vec![waiting, complete, blocked, future_recurring, due_recurring, changes, done, other, plain];
         let ids: Vec<u32> = eligible(&tasks, "Bot", today()).iter().map(|t| t.id).collect();
         assert_eq!(ids, vec![5, 6, 9]);
+    }
+
+    fn service(id: u32, agent: Option<&str>, due: NaiveDate) -> Task {
+        let mut t = task(id, "Bot");
+        t.agent = agent.map(str::to_string);
+        t.kind = crate::task::TaskKind::Service;
+        t.recurrence = Some("daily".parse::<Recurrence>().unwrap());
+        t.due_date = Some(due);
+        t
+    }
+
+    #[test]
+    fn eligible_queues_due_and_failing_services_but_not_paused_future_or_unassigned() {
+        let due = service(1, Some("Bot"), today());
+        let mut paused = service(2, Some("Bot"), today());
+        paused.paused = true;
+        let mut failing = service(3, Some("Bot"), today());
+        failing.work_status = Some(WorkStatus::Failing);
+        let future = service(4, Some("Bot"), today() + chrono::Duration::days(1));
+        let unassigned = service(5, None, today());
+
+        let tasks = vec![due, paused, failing, future, unassigned];
+        let queued = eligible(&tasks, "Bot", today());
+        let ids: Vec<u32> = queued.iter().map(|t| t.id).collect();
+        assert_eq!(ids, vec![1, 3]);
+        assert!(queued.iter().all(|t| pickup_kind(t, None) == Pickup::ServiceRun));
+    }
+
+    #[test]
+    fn service_pickup_defers_to_in_progress_and_review() {
+        let mut s = service(1, Some("Bot"), today());
+        s.work_status = Some(WorkStatus::InProgress);
+        assert_eq!(pickup_kind(&s, None), Pickup::Continue);
+        s.work_status = Some(WorkStatus::ChangesRequested);
+        assert_eq!(pickup_kind(&s, None), Pickup::ReviewFeedback);
+        assert_eq!(Pickup::ServiceRun.as_str(), "service_run");
     }
 
     #[test]

@@ -4,7 +4,7 @@ use chrono::{DateTime, NaiveDate, Utc};
 use std::str::FromStr;
 use std::fs;
 
-use crate::task::{Effort, Priority, Recurrence, Status, Task, TaskFile, WorkStatus};
+use crate::task::{Effort, Priority, Recurrence, Status, Task, TaskFile, TaskKind, WorkStatus};
 
 const SCHEMA_SQL: &str = "
 CREATE TABLE IF NOT EXISTS tasks (
@@ -23,7 +23,31 @@ CREATE TABLE IF NOT EXISTS tasks (
     agent       TEXT,
     effort      TEXT
 );
+-- One row per recorded service run. No foreign key: write_all deletes and
+-- reinserts every task row on each commit, and a cascade would wipe runs.
+CREATE TABLE IF NOT EXISTS service_runs (
+    id            INTEGER PRIMARY KEY,
+    task_id       INTEGER NOT NULL,
+    agent         TEXT,
+    scheduled_for TEXT NOT NULL,
+    ran_at        TEXT NOT NULL,
+    result        TEXT NOT NULL,
+    summary       TEXT
+);
+CREATE INDEX IF NOT EXISTS service_runs_task ON service_runs(task_id, ran_at);
 ";
+
+/// One recorded run of a service (`task service run`).
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct ServiceRun {
+    pub id: i64,
+    pub task_id: u32,
+    pub agent: Option<String>,
+    pub scheduled_for: String,
+    pub ran_at: String,
+    pub result: String,
+    pub summary: Option<String>,
+}
 
 pub fn resolve_file_path(flag: Option<&str>) -> PathBuf {
     resolve_file_path_inner(flag, crate::config::config_path().as_deref())
@@ -87,6 +111,10 @@ fn open_conn(path: &Path) -> Result<Connection, String> {
         .ok();
     conn.execute("ALTER TABLE tasks ADD COLUMN instructions TEXT", [])
         .ok();
+    conn.execute("ALTER TABLE tasks ADD COLUMN kind TEXT", [])
+        .ok();
+    conn.execute("ALTER TABLE tasks ADD COLUMN paused INTEGER", [])
+        .ok();
     Ok(conn)
 }
 
@@ -118,6 +146,8 @@ fn row_to_task(row: &rusqlite::Row) -> rusqlite::Result<Task> {
     let effort_s: Option<String> = row.get(13)?;
     let work_status_s: Option<String> = row.get(14)?;
     let instructions: Option<String> = row.get(15)?;
+    let kind_s: Option<String> = row.get(16)?;
+    let paused: Option<i64> = row.get(17)?;
 
     Ok(Task {
         id,
@@ -140,13 +170,15 @@ fn row_to_task(row: &rusqlite::Row) -> rusqlite::Result<Task> {
         agent,
         effort: effort_s.and_then(|s| Effort::from_str(&s).ok()),
         work_status: work_status_s.and_then(|s| WorkStatus::from_str(&s).ok()),
+        kind: kind_s.and_then(|s| TaskKind::from_str(&s).ok()).unwrap_or_default(),
+        paused: paused.unwrap_or(0) != 0,
     })
 }
 
 fn insert_task_row(conn: &Connection, t: &Task) -> Result<(), String> {
     conn.execute(
-        "INSERT INTO tasks (id, title, status, priority, tags, created, updated, description, due_date, project, recurrence, notes, agent, effort, work_status, instructions)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
+        "INSERT INTO tasks (id, title, status, priority, tags, created, updated, description, due_date, project, recurrence, notes, agent, effort, work_status, instructions, kind, paused)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
         params![
             t.id,
             t.title,
@@ -164,6 +196,8 @@ fn insert_task_row(conn: &Connection, t: &Task) -> Result<(), String> {
             t.effort.as_ref().map(|e| e.to_string()),
             t.work_status.as_ref().map(|w| w.to_string()),
             t.instructions,
+            t.is_service().then(|| t.kind.to_string()),
+            t.paused.then_some(1i64),
         ],
     )
     .map_err(|e| format!("Failed to insert task {}: {}", t.id, e))?;
@@ -197,7 +231,7 @@ fn migrate_from_markdown(db_path: &Path, conn: &mut Connection) -> Result<(), St
 
 fn load_from_conn(conn: &Connection) -> Result<TaskFile, String> {
     let mut stmt = conn
-        .prepare("SELECT id, title, status, priority, tags, created, updated, description, due_date, project, recurrence, notes, agent, effort, work_status, instructions FROM tasks ORDER BY id")
+        .prepare("SELECT id, title, status, priority, tags, created, updated, description, due_date, project, recurrence, notes, agent, effort, work_status, instructions, kind, paused FROM tasks ORDER BY id")
         .map_err(|e| format!("Failed to prepare query: {}", e))?;
     let rows = stmt
         .query_map([], row_to_task)
@@ -287,6 +321,17 @@ impl TaskTxn {
         self.version
     }
 
+    /// Record a service run inside this transaction; it is dropped if the
+    /// transaction is rolled back.
+    pub fn insert_run(&self, run: &ServiceRun) -> Result<i64, String> {
+        insert_run(&self.conn, run)
+    }
+
+    /// Delete every run of `task_id` inside this transaction.
+    pub fn delete_runs(&self, task_id: u32) -> Result<(), String> {
+        delete_runs(&self.conn, task_id)
+    }
+
     pub fn commit(mut self) -> Result<(), String> {
         write_all(&self.conn, &self.task_file, self.version + 1)?;
         self.conn
@@ -316,6 +361,76 @@ impl std::ops::DerefMut for TaskTxn {
     fn deref_mut(&mut self) -> &mut TaskFile {
         &mut self.task_file
     }
+}
+
+fn insert_run(conn: &Connection, run: &ServiceRun) -> Result<i64, String> {
+    conn.execute(
+        "INSERT INTO service_runs (task_id, agent, scheduled_for, ran_at, result, summary)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        params![run.task_id, run.agent, run.scheduled_for, run.ran_at, run.result, run.summary],
+    )
+    .map_err(|e| format!("Failed to record run for task {}: {}", run.task_id, e))?;
+    Ok(conn.last_insert_rowid())
+}
+
+fn delete_runs(conn: &Connection, task_id: u32) -> Result<(), String> {
+    conn.execute("DELETE FROM service_runs WHERE task_id = ?1", params![task_id])
+        .map_err(|e| format!("Failed to delete runs for task {}: {}", task_id, e))?;
+    Ok(())
+}
+
+fn row_to_run(row: &rusqlite::Row) -> rusqlite::Result<ServiceRun> {
+    Ok(ServiceRun {
+        id: row.get(0)?,
+        task_id: row.get(1)?,
+        agent: row.get(2)?,
+        scheduled_for: row.get(3)?,
+        ran_at: row.get(4)?,
+        result: row.get(5)?,
+        summary: row.get(6)?,
+    })
+}
+
+/// Runs of one service, newest first. `before` is a run id to page from.
+pub fn list_runs(path: &Path, task_id: u32, limit: usize, before: Option<i64>) -> Result<Vec<ServiceRun>, String> {
+    let conn = open_migrated(path)?;
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, task_id, agent, scheduled_for, ran_at, result, summary FROM service_runs
+             WHERE task_id = ?1 AND id < ?2 ORDER BY id DESC LIMIT ?3",
+        )
+        .map_err(|e| format!("Failed to prepare runs query: {}", e))?;
+    let rows = stmt
+        .query_map(params![task_id, before.unwrap_or(i64::MAX), limit as i64], row_to_run)
+        .map_err(|e| format!("Failed to query runs: {}", e))?;
+    rows.map(|r| r.map_err(|e| format!("Failed to read run row: {}", e))).collect()
+}
+
+/// Newest run of each service plus its run count, keyed by task id.
+pub fn run_summaries(path: &Path) -> Result<std::collections::HashMap<u32, (ServiceRun, i64)>, String> {
+    let conn = open_migrated(path)?;
+    let mut stmt = conn
+        .prepare(
+            "SELECT r.id, r.task_id, r.agent, r.scheduled_for, r.ran_at, r.result, r.summary, c.n
+             FROM service_runs r
+             JOIN (SELECT task_id, MAX(id) AS last, COUNT(*) AS n FROM service_runs GROUP BY task_id) c
+               ON r.id = c.last",
+        )
+        .map_err(|e| format!("Failed to prepare runs query: {}", e))?;
+    let rows = stmt
+        .query_map([], |row| Ok((row_to_run(row)?, row.get::<_, i64>(7)?)))
+        .map_err(|e| format!("Failed to query runs: {}", e))?;
+    let mut out = std::collections::HashMap::new();
+    for r in rows {
+        let (run, n) = r.map_err(|e| format!("Failed to read run row: {}", e))?;
+        out.insert(run.task_id, (run, n));
+    }
+    Ok(out)
+}
+
+/// The newest run of one service, if any.
+pub fn last_run(path: &Path, task_id: u32) -> Result<Option<ServiceRun>, String> {
+    Ok(list_runs(path, task_id, 1, None)?.into_iter().next())
 }
 
 /// Unconditionally replaces every task. Last writer wins, so only use it to seed
@@ -472,7 +587,7 @@ mod tests {
             notes: vec![],
             agent: None,
             effort: None,
-            work_status: None,
+            work_status: None, kind: Default::default(), paused: false,
         }
     }
 
@@ -586,7 +701,7 @@ mod tests {
             notes: vec!["note-a".to_string(), "note-b".to_string()],
             agent: Some("command-center".to_string()),
             effort: Some(Effort::Medium),
-            work_status: Some(WorkStatus::InProgress),
+            work_status: Some(WorkStatus::InProgress), kind: Default::default(), paused: false,
         });
         save(&path, &tf).unwrap();
 

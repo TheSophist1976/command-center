@@ -37,6 +37,7 @@ Each task in the JSON has a `pickup` value telling you why it is there:
 | `new` | Not started. |
 | `continue` | Already `in-progress`; resume it. |
 | `review_feedback` | The human left feedback; read `review_thread` first. |
+| `service_run` | A due service. Do the run, then record it with `task service run` (see "Services" below). |
 | `answered_question` | The human answered your `needs-input` question; the answer is at the end of `question`. |
 
 Alongside `task` it carries `review_thread` and `question` (note bodies, or `null`) and `notes` (the other linked notes, each with `slug`, `title`, `body`). Top-level `instructions` and `memory` are your standing instructions and memory, so you do not need to read them separately.
@@ -177,7 +178,24 @@ Tasks have a `work_status` field, separate from open/done, so the human can trac
 task edit <id> --work-status in-progress
 ```
 
-Valid values: `todo`, `in-progress`, `waiting-for-review`, `changes-requested`, `needs-input`, `complete` (aliases `to-do`, `in_progress`/`inprogress`, `review`, `changes`, `needs_input`, and `done` are also accepted).
+Valid values: `todo`, `in-progress`, `waiting-for-review`, `changes-requested`, `needs-input`, `complete`, and `failing` for services only (aliases `to-do`, `in_progress`/`inprogress`, `review`, `changes`, `needs_input`, `done`, and `fail`/`failed` are also accepted).
+
+## Services
+
+A service is a task with `kind: service`: a recurring agent job that needs no review. Every service must have a recurrence and a due date, and the due date always means "next run". A service can also be `paused`. Services are hidden from `task list`, the TUI and the web task views. They appear only in `task list --services`, `task service list` and the web Services screen.
+
+```bash
+task service add "<title>" --recur <pattern> [--due <date>] [--agent <name>] [--instructions "<text>"]
+task service run <id> --result ok|failed [--summary "<text>"] [--json]
+task service pause <id>
+task service resume <id>
+task service runs <id> [--limit N]
+task service list
+task service show <id>
+task edit <id> --service | --no-service
+```
+
+`task service run` only works when the service is due (`due <= today`), not paused, and assigned to you. In one transaction it records a run (kept in its own `service_runs` table), moves the due date to the first scheduled date after today (missed dates are skipped, not caught up), and clears `work_status` on `ok` or sets it to `failing` on `failed`. `task done` is refused on a service, and `task rm` also deletes its runs. Resuming a service whose date has passed moves it to the first scheduled date on or after today.
 
 **`changes-requested`** means the human left feedback and this task needs another round — read the full review thread note (slug `task-<id>-review-thread`) via `task note show task-<id>-review-thread` for the complete history before doing anything, do the requested work, then append your response with `task note append task-<id>-review-thread --body "## Agent response — <YYYY-MM-DD>\n\n<summary>"` and set `--work-status waiting-for-review` again.
 

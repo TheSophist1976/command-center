@@ -134,6 +134,10 @@ pub enum Command {
         /// Only show tasks due on or before this date (YYYY-MM-DD)
         #[arg(long)]
         due_before: Option<String>,
+
+        /// List services instead of tasks (services are hidden otherwise)
+        #[arg(long)]
+        services: bool,
     },
 
     /// Show a task's full detail
@@ -179,6 +183,20 @@ pub enum Command {
 
         #[arg(long)]
         recur: Option<String>,
+
+        /// Turn the task into a service (needs a recurrence and a due date)
+        #[arg(long, conflicts_with = "no_service")]
+        service: bool,
+
+        /// Turn a service back into a normal task
+        #[arg(long)]
+        no_service: bool,
+    },
+
+    /// Manage services: recurring agent jobs that advance their own schedule
+    Service {
+        #[command(subcommand)]
+        subcommand: ServiceCommand,
     },
 
     /// Mark a task done
@@ -197,6 +215,86 @@ pub enum Command {
     Rm {
         /// Task id
         id: u32,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum ServiceCommand {
+    /// Add a service
+    Add {
+        /// Service title
+        title: String,
+
+        /// Recurrence pattern (required)
+        #[arg(long)]
+        recur: String,
+
+        /// First run date (YYYY-MM-DD or weekday; default: today)
+        #[arg(short, long)]
+        due: Option<String>,
+
+        /// Agent that runs the service
+        #[arg(long)]
+        agent: Option<String>,
+
+        #[arg(short, long, default_value = "medium")]
+        priority: String,
+
+        #[arg(long)]
+        project: Option<String>,
+
+        #[arg(long)]
+        tags: Option<String>,
+
+        #[arg(long)]
+        description: Option<String>,
+
+        /// What the agent should do on each run
+        #[arg(long)]
+        instructions: Option<String>,
+    },
+
+    /// List services
+    List,
+
+    /// Show a service with its last run
+    Show {
+        id: u32,
+    },
+
+    /// Record a run and advance the service to its next scheduled date
+    Run {
+        id: u32,
+
+        /// ok or failed
+        #[arg(long)]
+        result: String,
+
+        /// What the run did, or why it failed
+        #[arg(long)]
+        summary: Option<String>,
+
+        /// Print the run and the next due date as JSON
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Pause a service (task next stops listing it)
+    Pause {
+        id: u32,
+    },
+
+    /// Resume a paused service
+    Resume {
+        id: u32,
+    },
+
+    /// Show a service's run history, newest first
+    Runs {
+        id: u32,
+
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
     },
 }
 

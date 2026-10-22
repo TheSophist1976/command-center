@@ -18,7 +18,24 @@ export interface Task {
   notes?: string[];
   agent?: string;
   effort?: Effort;
-  work_status?: 'todo' | 'in-progress' | 'waiting-for-review' | 'changes-requested' | 'needs-input' | 'complete';
+  work_status?: 'todo' | 'in-progress' | 'waiting-for-review' | 'changes-requested' | 'needs-input' | 'complete' | 'failing';
+  kind?: 'task' | 'service';
+  paused?: boolean;
+}
+
+export interface ServiceRun {
+  id: number;
+  task_id: number;
+  agent?: string;
+  scheduled_for: string;
+  ran_at: string;
+  result: 'ok' | 'failed';
+  summary?: string;
+}
+
+export interface Service extends Task {
+  last_run?: ServiceRun | null;
+  run_count: number;
 }
 
 export interface AgentProfile {

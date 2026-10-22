@@ -29,7 +29,17 @@ Only work on tasks assigned to your agent profile. Tasks with `agent:human` are 
 task list [--status open|done] [--agent <name>] [--project <name>] [--tag <tag>] [--due-before <YYYY-MM-DD>]
 ```
 
-With no flags, lists all tasks. Output is one line per task: status, id, priority, due date, title.
+With no flags, lists all tasks. Output is one line per task: status, id, priority, due date, title. Services are never listed here; use `task list --services` or `task service list`.
+
+## Services
+
+A service is a recurring agent job that needs no review (`kind: service`). It must have a recurrence and a due date, and it keeps one task id for good. When `task next` returns one with `pickup: service_run`, do the work and then record it:
+
+```
+task service run <id> --result ok|failed [--summary "<text>"]
+```
+
+This logs the run and moves the due date to the next scheduled date after today, skipping missed dates. A `failed` result sets `work_status` to `failing`, and the next `ok` run clears it. Never run `task done` (refused), set `waiting-for-review` or edit `--due` on a service. Other commands: `task service add "<title>" --recur <pattern> [--due <date>] [--agent <name>] [--instructions "<text>"]`, `task service list|show <id>|pause <id>|resume <id>|runs <id>`, and `task edit <id> --service|--no-service`.
 
 ## Viewing a Task
 
@@ -107,7 +117,7 @@ task rm <id>
 
 **Due date:** `YYYY-MM-DD`, or a weekday name/abbreviation (resolves to the next future occurrence) — e.g. `--due 2026-03-25` or `--due friday`
 
-**Work status:** `todo`, `in-progress`, `waiting-for-review`, `changes-requested`, `needs-input`, `complete` — set via `--work-status` (see "Reporting Progress" above). Independent of open/done.
+**Work status:** `todo`, `in-progress`, `waiting-for-review`, `changes-requested`, `needs-input`, `complete`, and `failing` (services only) — set via `--work-status` (see "Reporting Progress" above). Independent of open/done.
 
 **Recurrence:** set via `--recur <pattern>`. Valid patterns: `daily`, `weekly`, `monthly`, `yearly` (every occurrence); `daily:N`, `weekly:N`, `monthly:N`, `yearly:N` (every N); `weekly:DAY` (e.g. `weekly:fri`); `weekly:N:DAY` (every N weeks on DAY); `monthly:N:DAY` (the Nth DAY of the month, e.g. `monthly:2:mon` for the 2nd Monday). `DAY` is a 3-letter abbreviation (`mon`, `tue`, `wed`, `thu`, `fri`, `sat`, `sun`).
 

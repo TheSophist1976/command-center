@@ -994,6 +994,8 @@ impl App {
             .tasks
             .iter()
             .enumerate()
+            // Services are managed on the web Services screen, never in task views.
+            .filter(|(_, t)| !t.is_service())
             .filter(|(_, t)| {
                 if self.view == View::Due {
                     due_matches(t, today, due_window)

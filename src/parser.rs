@@ -95,7 +95,7 @@ pub fn parse(content: &str, strict: bool) -> Result<TaskFile, Vec<ParseError>> {
                         notes: metadata.notes,
                         agent: metadata.agent,
                         effort: metadata.effort,
-                        work_status: None,
+                        work_status: None, kind: Default::default(), paused: false,
                     });
                 } else if strict {
                     errors.push(ParseError {
