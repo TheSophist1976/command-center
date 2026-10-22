@@ -2,11 +2,13 @@ import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import './tokens.css';
 import './taskPanel.css';
 import './layout.css';
-import { Terminal, Search, PanelLeftClose, PanelLeftOpen, PanelRightClose, PanelRightOpen, Menu, ChevronLeft, Plus } from 'lucide-react';
+import { Terminal, Search, PanelLeftClose, PanelLeftOpen, PanelRightClose, PanelRightOpen, Menu, ChevronLeft, Plus, Repeat } from 'lucide-react';
 import { Button } from './components/Button';
 import { NewTaskForm } from './components/NewTaskForm';
 import { fetchTasks, fetchAgents, addTask, editTask, markDone, reopenTask, deleteTask, fetchTaskNotes, createTaskNote, openNote, saveNote, unlinkTaskNote, fetchTaskReview, postTaskFeedback, fetchTaskQuestion, postTaskAnswer } from './api';
 import { AgentEditor } from './components/AgentEditor';
+import { ServicesView } from './components/ServicesView';
+import { fetchServices } from './api';
 import { SettingsDialog } from './components/SettingsDialog';
 import { SettingsFooter } from './components/SettingsFooter';
 import { TaskDetail } from './components/TaskDetail';
@@ -89,6 +91,8 @@ export default function App() {
   const [question, setQuestion] = useState<Note | null>(null);
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [editingAgent, setEditingAgent] = useState<AgentProfile | null>(null);
+  const [servicesOpen, setServicesOpen] = useState(false);
+  const [failingServices, setFailingServices] = useState(0);
   const [settings, setSettings] = useState<Settings>(loadSettings);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [deferrals, setDeferrals] = useState<Deferrals>(() => loadDeferrals(Date.now()));
@@ -135,6 +139,9 @@ export default function App() {
   // refetching when the stream (re)opens and when the tab becomes visible again.
   useEffect(() => {
     function refresh() {
+      fetchServices()
+        .then((s) => setFailingServices(s.filter((x) => x.work_status === 'failing' && !x.paused).length))
+        .catch(() => {});
       Promise.all([fetchTasks(), fetchAgents()])
         .then(([t, a]) => {
           setTasks(t);
@@ -796,6 +803,20 @@ export default function App() {
           <span style={{ fontFamily: 'var(--font-display)', fontWeight: 700, fontSize: 14 }}>command center</span>
         </div>
         <SidebarNav items={[NEXT_ITEM, INBOX_ITEM]} active={dueFilter} tasks={tasks} today={today} onPick={setDueFilter} />
+        <div style={{ padding: '0 10px', marginBottom: 12 }}>
+          <div
+            onClick={() => setServicesOpen(true)}
+            style={{ display: 'flex', alignItems: 'center', gap: 10, height: 36, padding: '0 10px', borderRadius: 5, cursor: 'pointer' }}
+          >
+            <Repeat size={16} color="var(--fg-4)" />
+            <span style={{ flex: 1, fontSize: 14, color: 'var(--fg-3)' }}>Services</span>
+            {failingServices > 0 && (
+              <span title="Failing services" style={{ fontFamily: 'var(--font-mono)', fontSize: 12, color: 'var(--danger, #e5484d)', fontWeight: 600 }}>
+                {failingServices}
+              </span>
+            )}
+          </div>
+        </div>
         <div style={{ ...sectionLabelStyle, padding: '0 20px 8px' }}>Due window</div>
         <SidebarNav items={DUE_WINDOW_ITEMS} active={dueFilter} tasks={tasks} today={today} onPick={setDueFilter} />
         {agents.length > 0 && <div style={{ ...sectionLabelStyle, padding: '4px 20px 8px' }}>Agents</div>}
@@ -970,6 +991,8 @@ export default function App() {
       {editingAgent && (
         <AgentEditor agent={editingAgent} onClose={() => setEditingAgent(null)} />
       )}
+
+      {servicesOpen && <ServicesView agents={agents} onClose={() => setServicesOpen(false)} />}
 
       {settingsOpen && (
         <SettingsDialog

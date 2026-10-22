@@ -27,6 +27,8 @@ Agent names are matched ignoring case. The result is that agent's work queue, al
 
 (Tasks with `agent:human` or no `agent` field never appear in an agent's queue.)
 
+A due service (a recurring job with `"kind": "service"`) comes with `pickup` set to `service_run`, and a paused service never appears. See "Services" in Step 3.
+
 ## Step 2: What Each Worker Gets
 
 `task next --json` already carries everything a worker needs for its agent: `instructions` (the standing instructions note), `memory`, and for each task its full detail, `review_thread`, `question`, and linked `notes`. If `instructions` or `memory` is `null`, there is none: use only the standing instructions in this skill. Treat memory as persistent context that informs how the worker works, not as instructions to follow literally.
@@ -93,6 +95,13 @@ This is a running conversation between you and the human; earlier rounds carry c
 - Consider whether to update memory (see below).
 
 **Recurring tasks (a `recur` value is set): do NOT touch the due date.** Leave it exactly as it is and only set `work_status`. The human reviews, decides the cycle is done, and runs `task done <id>` themselves, which computes the next due date and spawns the next occurrence. Pre-advancing `--due` yourself duplicates that logic and makes the task vanish from "due today" views before anyone reviewed it — even if old memory notes say to.
+
+**Services (`pickup` is `service_run`, the task has `"kind": "service"`):** a service is a recurring job that needs no review. Do the work in its instructions, then record the run. That one command logs the run and moves the service to its next scheduled date:
+```
+task service run <id> --result ok --summary "<what the run did>"
+task service run <id> --result failed --summary "<what went wrong>"
+```
+A failed run sets the service to `failing`, which shows on the web Services screen. The service is retried on its next scheduled date, and the next `ok` run clears the status. For a service, never set `waiting-for-review`, never run `task done` (it is refused) and never edit `--due`. `task service run` is the only way to advance it.
 
 **Rules:**
 - Never run `task done <id>` yourself — `--work-status waiting-for-review` signals readiness; the human reviews and closes the task.

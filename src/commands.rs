@@ -32,6 +32,8 @@ pub struct ListArgs {
     pub project: Option<String>,
     pub tag: Option<String>,
     pub due_before: Option<String>,
+    /// List services instead of tasks.
+    pub services: bool,
 }
 
 pub struct EditArgs {
@@ -46,6 +48,8 @@ pub struct EditArgs {
     pub effort: Option<String>,
     pub work_status: Option<String>,
     pub recur: Option<String>,
+    /// `Some(true)` makes the task a service, `Some(false)` a normal task.
+    pub service: Option<bool>,
 }
 
 pub fn add(path: &Path, args: AddArgs) -> Result<String, (i32, String)> {
@@ -77,7 +81,7 @@ pub fn add(path: &Path, args: AddArgs) -> Result<String, (i32, String)> {
         notes: Vec::new(),
         agent: args.agent,
         effort: None,
-        work_status: None,
+        work_status: None, kind: Default::default(), paused: false,
     });
     task_file.commit().map_err(|e| (1, e))?;
     Ok(format!("Created task {}: {}", id, args.title))
@@ -134,8 +138,9 @@ pub fn list(path: &Path, args: ListArgs) -> Result<String, (i32, String)> {
         })
         .transpose()?;
 
+    let rows: Vec<Task> = task_file.tasks.into_iter().filter(|t| t.is_service() == args.services).collect();
     let tasks = filter_and_sort_tasks(
-        &task_file.tasks,
+        &rows,
         status_filter,
         args.agent.as_deref(),
         args.project.as_deref(),
@@ -144,7 +149,7 @@ pub fn list(path: &Path, args: ListArgs) -> Result<String, (i32, String)> {
     );
 
     if tasks.is_empty() {
-        return Ok("No matching tasks.".to_string());
+        return Ok(if args.services { "No matching services." } else { "No matching tasks." }.to_string());
     }
     let mut lines = Vec::new();
     for t in tasks {
@@ -224,6 +229,14 @@ pub fn show(path: &Path, id: u32) -> Result<String, (i32, String)> {
     if let Some(ref w) = t.work_status {
         out.push_str(&format!("work_status: {}\n", w));
     }
+    if t.is_service() {
+        out.push_str("kind: service\n");
+        out.push_str(&format!("paused: {}\n", if t.paused { "yes" } else { "no" }));
+        match db::last_run(path, t.id).map_err(|e| (1, e))? {
+            Some(r) => out.push_str(&format!("last_run: {} {}{}\n", r.ran_at, r.result, r.summary.map(|s| format!(" — {}", s)).unwrap_or_default())),
+            None => out.push_str("last_run: never\n"),
+        }
+    }
     out.push_str(&format!("created: {}\n", t.created.to_rfc3339()));
     if let Some(u) = t.updated {
         out.push_str(&format!("updated: {}\n", u.to_rfc3339()));
@@ -289,6 +302,18 @@ pub fn edit(path: &Path, id: u32, args: EditArgs) -> Result<String, (i32, String
     if let Some(r) = recur {
         t.recurrence = Some(r);
     }
+    match args.service {
+        Some(true) => t.kind = crate::task::TaskKind::Service,
+        Some(false) => {
+            t.kind = crate::task::TaskKind::Task;
+            t.paused = false;
+            if t.work_status == Some(crate::task::WorkStatus::Failing) {
+                t.work_status = None;
+            }
+        }
+        None => {}
+    }
+    t.validate_kind().map_err(|e| (1, e))?;
     t.updated = Some(Utc::now());
     let title = t.title.clone();
 
@@ -304,6 +329,12 @@ pub fn done(path: &Path, id: u32) -> Result<String, (i32, String)> {
         .position(|t| t.id == id)
         .ok_or_else(|| (1, format!("Task {} not found", id)))?;
 
+    if task_file.tasks[idx].is_service() {
+        return Err((1, format!(
+            "Task {} is a service and is never done: record runs with `task service run`, or use `task service pause` or `task rm`",
+            id
+        )));
+    }
     if task_file.tasks[idx].status == Status::Done {
         return Ok(format!("Task {} already done", id));
     }
@@ -333,7 +364,7 @@ pub fn done(path: &Path, id: u32) -> Result<String, (i32, String)> {
             notes: parent.notes.clone(),
             agent: parent.agent.clone(),
             effort: parent.effort,
-            work_status: None,
+            work_status: None, kind: Default::default(), paused: false,
         });
         spawned = Some((new_id, next_due));
     }
@@ -360,8 +391,171 @@ pub fn reopen(path: &Path, id: u32) -> Result<String, (i32, String)> {
 pub fn rm(path: &Path, id: u32) -> Result<String, (i32, String)> {
     let mut task_file = db::begin(path).map_err(|e| (1, e))?;
     let removed = task_file.remove_task(id).ok_or_else(|| (1, format!("Task {} not found", id)))?;
+    if removed.is_service() {
+        task_file.delete_runs(id).map_err(|e| (1, e))?;
+    }
     task_file.commit().map_err(|e| (1, e))?;
     Ok(format!("Deleted task {}: {}", id, removed.title))
+}
+
+// -- Services --
+
+/// Dispatch a `task service` subcommand. `caller` is the agent identity in
+/// effect (TASK_AGENT or the cwd profile), if any.
+pub fn service(path: &Path, cmd: crate::cli::ServiceCommand, caller: Option<&str>) -> Result<String, (i32, String)> {
+    use crate::cli::ServiceCommand as S;
+    let today = chrono::Local::now().date_naive();
+    match cmd {
+        S::Add { title, recur, due, agent, priority, project, tags, description, instructions } => {
+            service_add(path, AddArgs { title, priority, due, project, tags, agent, description, instructions }, &recur, today)
+        }
+        S::List => list(path, ListArgs { status: None, agent: None, project: None, tag: None, due_before: None, services: true }),
+        S::Show { id } => {
+            load_service(path, id)?;
+            show(path, id)
+        }
+        S::Run { id, result, summary, json } => {
+            let ok = match result.to_lowercase().as_str() {
+                "ok" => true,
+                "failed" | "fail" => false,
+                _ => return Err((1, format!("Invalid result: '{}'. Valid values: ok, failed", result))),
+            };
+            service_run(path, id, ok, summary, caller, today, json)
+        }
+        S::Pause { id } => set_paused(path, id, true, today),
+        S::Resume { id } => set_paused(path, id, false, today),
+        S::Runs { id, limit } => {
+            load_service(path, id)?;
+            let runs = db::list_runs(path, id, limit, None).map_err(|e| (1, e))?;
+            if runs.is_empty() {
+                return Ok(format!("No runs recorded for service {}.", id));
+            }
+            Ok(runs
+                .iter()
+                .map(|r| format!("{}  {:<6}  for {}  {}", r.ran_at, r.result, r.scheduled_for, r.summary.as_deref().unwrap_or("")).trim_end().to_string())
+                .collect::<Vec<_>>()
+                .join("\n"))
+        }
+    }
+}
+
+fn load_service(path: &Path, id: u32) -> Result<Task, (i32, String)> {
+    let tf = db::load(path).map_err(|e| (1, e))?;
+    let t = tf.find_task(id).ok_or_else(|| (1, format!("Task {} not found", id)))?;
+    if !t.is_service() {
+        return Err((1, format!("Task {} is not a service", id)));
+    }
+    Ok(t.clone())
+}
+
+pub fn service_add(path: &Path, args: AddArgs, recur: &str, today: chrono::NaiveDate) -> Result<String, (i32, String)> {
+    let recurrence = crate::task::Recurrence::from_str(recur).map_err(|e| (1, e))?;
+    let due_date = match args.due.as_deref() {
+        Some(d) => parser::parse_new_due_date(d, today).map_err(|e| (1, e))?,
+        None => today,
+    };
+    let priority = Priority::from_str(&args.priority).map_err(|e| (1, e))?;
+    let mut task_file = db::begin(path).map_err(|e| (1, e))?;
+    let id = task_file.next_id;
+    task_file.next_id += 1;
+    task_file.tasks.push(Task {
+        id,
+        title: args.title.clone(),
+        status: Status::Open,
+        priority,
+        tags: parse_csv(args.tags.as_deref()),
+        created: Utc::now(),
+        updated: None,
+        description: args.description,
+        instructions: args.instructions,
+        due_date: Some(due_date),
+        project: args.project,
+        recurrence: Some(recurrence),
+        notes: Vec::new(),
+        agent: args.agent,
+        effort: None,
+        work_status: None,
+        kind: crate::task::TaskKind::Service,
+        paused: false,
+    });
+    task_file.commit().map_err(|e| (1, e))?;
+    Ok(format!("Created service {}: {} (next run {})", id, args.title, due_date))
+}
+
+/// Record one run of a service and move it to its next scheduled date after
+/// `today`, skipping any missed dates.
+pub fn service_run(
+    path: &Path,
+    id: u32,
+    ok: bool,
+    summary: Option<String>,
+    caller: Option<&str>,
+    today: chrono::NaiveDate,
+    json: bool,
+) -> Result<String, (i32, String)> {
+    let mut task_file = db::begin(path).map_err(|e| (1, e))?;
+    let t = task_file.find_task_mut(id).ok_or_else(|| (1, format!("Task {} not found", id)))?;
+    if !t.is_service() {
+        return Err((1, format!("Task {} is not a service", id)));
+    }
+    if t.paused {
+        return Err((1, format!("Service {} is paused; resume it first", id)));
+    }
+    if let (Some(c), Some(a)) = (caller, t.agent.as_deref()) {
+        if !c.eq_ignore_ascii_case(a) {
+            return Err((1, format!("Service {} belongs to {}, not {}", id, a, c)));
+        }
+    }
+    let (Some(recur), Some(due)) = (t.recurrence, t.due_date) else {
+        return Err((1, format!("Service {} has no recurrence or due date", id)));
+    };
+    if due > today {
+        return Err((1, format!("Service {} is not due until {}", id, due)));
+    }
+    let next = crate::task::next_due_after(&recur, due, today, false);
+    t.due_date = Some(next);
+    t.work_status = if ok { None } else { Some(crate::task::WorkStatus::Failing) };
+    t.updated = Some(Utc::now());
+    let mut run = db::ServiceRun {
+        id: 0,
+        task_id: id,
+        agent: caller.map(str::to_string).or_else(|| t.agent.clone()),
+        scheduled_for: due.format("%Y-%m-%d").to_string(),
+        ran_at: Utc::now().to_rfc3339(),
+        result: if ok { "ok" } else { "failed" }.to_string(),
+        summary,
+    };
+    run.id = task_file.insert_run(&run).map_err(|e| (1, e))?;
+    task_file.commit().map_err(|e| (1, e))?;
+    if json {
+        let v = serde_json::json!({"run": run, "next_due": next.format("%Y-%m-%d").to_string()});
+        return serde_json::to_string_pretty(&v).map_err(|e| (1, e.to_string()));
+    }
+    Ok(format!("Recorded {} run of service {}. Next run: {}", run.result, id, next))
+}
+
+/// Pause or resume a service. Resuming a service whose date has passed moves
+/// it to its first scheduled date on or after today.
+pub fn set_paused(path: &Path, id: u32, paused: bool, today: chrono::NaiveDate) -> Result<String, (i32, String)> {
+    let mut task_file = db::begin(path).map_err(|e| (1, e))?;
+    let t = task_file.find_task_mut(id).ok_or_else(|| (1, format!("Task {} not found", id)))?;
+    if !t.is_service() {
+        return Err((1, format!("Task {} is not a service", id)));
+    }
+    t.paused = paused;
+    if !paused {
+        if let (Some(recur), Some(due)) = (t.recurrence, t.due_date) {
+            t.due_date = Some(crate::task::next_due_after(&recur, due, today, true));
+        }
+    }
+    t.updated = Some(Utc::now());
+    let msg = if paused {
+        format!("Paused service {}", id)
+    } else {
+        format!("Resumed service {}. Next run: {}", id, t.due_date.map(|d| d.to_string()).unwrap_or_default())
+    };
+    task_file.commit().map_err(|e| (1, e))?;
+    Ok(msg)
 }
 
 #[cfg(test)]
@@ -418,7 +612,7 @@ mod tests {
             notes: Vec::new(),
             agent: Some(agent.to_string()),
             effort: None,
-            work_status: None,
+            work_status: None, kind: Default::default(), paused: false,
         }
     }
 
@@ -464,7 +658,7 @@ mod tests {
         assert!(db::load(&path).unwrap().tasks.is_empty());
 
         add(&path, AddArgs { title: "Y".to_string(), priority: "medium".to_string(), due: None, project: None, tags: None, agent: None, description: None, instructions: None }).unwrap();
-        let err = edit(&path, 1, EditArgs { title: None, priority: None, due: Some("2000-01-01".to_string()), project: None, tags: None, agent: None, description: None, instructions: None, effort: None, work_status: None, recur: None }).unwrap_err();
+        let err = edit(&path, 1, EditArgs { title: None, priority: None, due: Some("2000-01-01".to_string()), project: None, tags: None, agent: None, description: None, instructions: None, effort: None, work_status: None, recur: None, service: None }).unwrap_err();
         assert!(err.1.contains("in the past"), "{}", err.1);
         assert!(db::load(&path).unwrap().tasks[0].due_date.is_none());
     }
@@ -476,7 +670,7 @@ mod tests {
         add(&path, AddArgs { title: "Other agent".to_string(), priority: "medium".to_string(), due: None, project: None, tags: None, agent: Some("human".to_string()), description: None, instructions: None }).unwrap();
         done(&path, 2).unwrap();
 
-        let out = list(&path, ListArgs { status: Some("open".to_string()), agent: Some("bot".to_string()), project: None, tag: None, due_before: None }).unwrap();
+        let out = list(&path, ListArgs { status: Some("open".to_string()), agent: Some("bot".to_string()), project: None, tag: None, due_before: None, services: false }).unwrap();
         assert!(out.contains("Open task"));
         assert!(!out.contains("Other agent"));
     }
@@ -484,7 +678,7 @@ mod tests {
     #[test]
     fn test_list_no_matches() {
         let (_dir, path) = setup();
-        let out = list(&path, ListArgs { status: None, agent: Some("nobody".to_string()), project: None, tag: None, due_before: None }).unwrap();
+        let out = list(&path, ListArgs { status: None, agent: Some("nobody".to_string()), project: None, tag: None, due_before: None, services: false }).unwrap();
         assert_eq!(out, "No matching tasks.");
     }
 
@@ -505,7 +699,7 @@ mod tests {
         let out = show(&path, 1).unwrap();
         assert!(out.contains("the desc"));
         assert!(out.contains("## Instructions\ndo step 1"));
-        edit(&path, 1, EditArgs { title: None, priority: None, due: None, project: None, tags: None, agent: None, description: None, instructions: Some("do step 2".to_string()), effort: None, work_status: None, recur: None }).unwrap();
+        edit(&path, 1, EditArgs { title: None, priority: None, due: None, project: None, tags: None, agent: None, description: None, instructions: Some("do step 2".to_string()), effort: None, work_status: None, recur: None, service: None }).unwrap();
         let tf = db::load(&path).unwrap();
         assert_eq!(tf.tasks[0].instructions.as_deref(), Some("do step 2"));
         assert_eq!(tf.tasks[0].description.as_deref(), Some("the desc"));
@@ -523,7 +717,7 @@ mod tests {
     fn test_edit_updates_only_given_fields() {
         let (_dir, path) = setup();
         add(&path, AddArgs { title: "Original".to_string(), priority: "medium".to_string(), due: None, project: None, tags: None, agent: None, description: None, instructions: None }).unwrap();
-        edit(&path, 1, EditArgs { title: None, priority: Some("critical".to_string()), due: None, project: None, tags: None, agent: None, description: None, instructions: None, effort: None, work_status: None, recur: None }).unwrap();
+        edit(&path, 1, EditArgs { title: None, priority: Some("critical".to_string()), due: None, project: None, tags: None, agent: None, description: None, instructions: None, effort: None, work_status: None, recur: None, service: None }).unwrap();
 
         let tf = db::load(&path).unwrap();
         assert_eq!(tf.tasks[0].title, "Original");
@@ -534,7 +728,7 @@ mod tests {
     #[test]
     fn test_edit_missing_task_errors() {
         let (_dir, path) = setup();
-        let err = edit(&path, 1, EditArgs { title: Some("x".to_string()), priority: None, due: None, project: None, tags: None, agent: None, description: None, instructions: None, effort: None, work_status: None, recur: None }).unwrap_err();
+        let err = edit(&path, 1, EditArgs { title: Some("x".to_string()), priority: None, due: None, project: None, tags: None, agent: None, description: None, instructions: None, effort: None, work_status: None, recur: None, service: None }).unwrap_err();
         assert_eq!(err.0, 1);
     }
 
@@ -639,7 +833,7 @@ mod tests {
         edit(&path, 1, EditArgs {
             title: None, priority: None, due: None, project: None, tags: None,
             agent: None, description: None, instructions: None, effort: None,
-            work_status: Some("in-progress".to_string()), recur: None,
+            work_status: Some("in-progress".to_string()), recur: None, service: None,
         }).unwrap();
 
         let output = show(&path, 1).unwrap();
@@ -654,7 +848,7 @@ mod tests {
         let result = edit(&path, 1, EditArgs {
             title: None, priority: None, due: None, project: None, tags: None,
             agent: None, description: None, instructions: None, effort: None,
-            work_status: Some("bogus".to_string()), recur: None,
+            work_status: Some("bogus".to_string()), recur: None, service: None,
         });
         assert!(result.is_err());
     }
@@ -666,7 +860,7 @@ mod tests {
 
         edit(&path, 1, EditArgs {
             title: None, priority: None, due: None, project: None, tags: None,
-            agent: None, description: None, instructions: None, effort: None, work_status: None,
+            agent: None, description: None, instructions: None, effort: None, work_status: None, service: None,
             recur: Some("weekly:fri".to_string()),
         }).unwrap();
 
@@ -681,9 +875,99 @@ mod tests {
 
         let result = edit(&path, 1, EditArgs {
             title: None, priority: None, due: None, project: None, tags: None,
-            agent: None, description: None, instructions: None, effort: None, work_status: None,
+            agent: None, description: None, instructions: None, effort: None, work_status: None, service: None,
             recur: Some("bogus".to_string()),
         });
         assert!(result.is_err());
+    }
+
+    fn d(s: &str) -> chrono::NaiveDate {
+        chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d").unwrap()
+    }
+
+    fn add_service(path: &Path, due: &str) {
+        let args = AddArgs {
+            title: "Sync".to_string(), priority: "medium".to_string(), due: Some(due.to_string()),
+            project: None, tags: None, agent: Some("Bot".to_string()), description: None, instructions: None,
+        };
+        service_add(path, args, "daily", d("2000-01-01")).unwrap();
+    }
+
+    #[test]
+    fn test_service_run_skips_missed_dates_and_records_run() {
+        let (_dir, path) = setup();
+        add_service(&path, "2026-10-01");
+        let msg = service_run(&path, 1, true, Some("synced".to_string()), Some("bot"), d("2026-10-05"), false).unwrap();
+        assert!(msg.contains("Next run: 2026-10-06"), "{}", msg);
+        let tf = db::load(&path).unwrap();
+        assert_eq!(tf.tasks.len(), 1, "a run must not spawn a new row");
+        assert_eq!(tf.tasks[0].due_date, Some(d("2026-10-06")));
+        let runs = db::list_runs(&path, 1, 10, None).unwrap();
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].scheduled_for, "2026-10-01");
+        assert_eq!(runs[0].summary.as_deref(), Some("synced"));
+    }
+
+    #[test]
+    fn test_service_run_failed_sets_failing_and_ok_clears_it() {
+        let (_dir, path) = setup();
+        add_service(&path, "2026-10-01");
+        service_run(&path, 1, false, None, None, d("2026-10-01"), false).unwrap();
+        let t = db::load(&path).unwrap().tasks[0].clone();
+        assert_eq!(t.work_status, Some(crate::task::WorkStatus::Failing));
+        assert_eq!(t.due_date, Some(d("2026-10-02")));
+        service_run(&path, 1, true, None, None, d("2026-10-02"), false).unwrap();
+        assert_eq!(db::load(&path).unwrap().tasks[0].work_status, None);
+    }
+
+    #[test]
+    fn test_service_run_rejects_not_due_paused_wrong_agent_and_plain_tasks() {
+        let (_dir, path) = setup();
+        add_service(&path, "2026-10-10");
+        assert!(service_run(&path, 1, true, None, None, d("2026-10-05"), false).unwrap_err().1.contains("not due until"));
+        assert!(service_run(&path, 1, true, None, Some("Other"), d("2026-10-10"), false).is_err());
+        set_paused(&path, 1, true, d("2026-10-10")).unwrap();
+        assert!(service_run(&path, 1, true, None, None, d("2026-10-10"), false).unwrap_err().1.contains("paused"));
+        add(&path, AddArgs { title: "Plain".to_string(), priority: "medium".to_string(), due: None, project: None, tags: None, agent: None, description: None, instructions: None }).unwrap();
+        assert!(service_run(&path, 2, true, None, None, d("2026-10-10"), false).is_err());
+        assert!(db::list_runs(&path, 1, 10, None).unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_resume_moves_past_due_date_to_today_or_later() {
+        let (_dir, path) = setup();
+        add_service(&path, "2026-10-01");
+        set_paused(&path, 1, true, d("2026-10-01")).unwrap();
+        let msg = set_paused(&path, 1, false, d("2026-10-05")).unwrap();
+        assert!(msg.contains("2026-10-05"), "{}", msg);
+        assert!(!db::load(&path).unwrap().tasks[0].paused);
+    }
+
+    #[test]
+    fn test_services_hidden_from_list_and_done_refused_and_rm_drops_runs() {
+        let (_dir, path) = setup();
+        add_service(&path, "2026-10-01");
+        let plain = ListArgs { status: None, agent: None, project: None, tag: None, due_before: None, services: false };
+        assert_eq!(list(&path, plain).unwrap(), "No matching tasks.");
+        let svc = ListArgs { status: None, agent: None, project: None, tag: None, due_before: None, services: true };
+        assert!(list(&path, svc).unwrap().contains("Sync"));
+        assert!(done(&path, 1).is_err());
+        assert!(show(&path, 1).unwrap().contains("kind: service"));
+        service_run(&path, 1, true, None, None, d("2026-10-01"), false).unwrap();
+        rm(&path, 1).unwrap();
+        assert!(db::list_runs(&path, 1, 10, None).unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_edit_service_requires_recurrence_and_failing_only_on_services() {
+        let (_dir, path) = setup();
+        add(&path, AddArgs { title: "Plain".to_string(), priority: "medium".to_string(), due: None, project: None, tags: None, agent: None, description: None, instructions: None }).unwrap();
+        let to_service = EditArgs { title: None, priority: None, due: None, project: None, tags: None, agent: None, description: None, instructions: None, effort: None, work_status: None, recur: None, service: Some(true) };
+        assert!(edit(&path, 1, to_service).unwrap_err().1.contains("recurrence"));
+        let failing = EditArgs { title: None, priority: None, due: None, project: None, tags: None, agent: None, description: None, instructions: None, effort: None, work_status: Some("failing".to_string()), recur: None, service: None };
+        assert!(edit(&path, 1, failing).is_err());
+        let ok = EditArgs { title: None, priority: None, due: Some("2099-01-01".to_string()), project: None, tags: None, agent: None, description: None, instructions: None, effort: None, work_status: None, recur: Some("weekly".to_string()), service: Some(true) };
+        edit(&path, 1, ok).unwrap();
+        assert!(db::load(&path).unwrap().tasks[0].is_service());
     }
 }

@@ -89,8 +89,10 @@ async fn list_tasks(
         .transpose()
         .map_err(|e| app_error(StatusCode::BAD_REQUEST, e))?;
 
+    // Services live on the Services screen (/api/services), never in task lists.
+    let rows: Vec<Task> = task_file.tasks.into_iter().filter(|t| !t.is_service()).collect();
     let tasks: Vec<Task> = filter_and_sort_tasks(
-        &task_file.tasks,
+        &rows,
         status,
         query.agent.as_deref(),
         query.project.as_deref(),
@@ -102,6 +104,109 @@ async fn list_tasks(
     .collect();
 
     Ok(Json(tasks))
+}
+
+#[derive(Serialize)]
+pub struct ServiceView {
+    #[serde(flatten)]
+    pub task: Task,
+    pub last_run: Option<db::ServiceRun>,
+    pub run_count: i64,
+}
+
+async fn list_services(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<Vec<ServiceView>>, (StatusCode, Json<serde_json::Value>)> {
+    let task_file = db::load(&state.db_path)
+        .map_err(|e| app_error(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    let mut runs = db::run_summaries(&state.db_path)
+        .map_err(|e| app_error(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    let services: Vec<&Task> = task_file.tasks.iter().filter(|t| t.is_service()).collect();
+    let out = crate::commands::sort_by_due_then_priority(services)
+        .into_iter()
+        .map(|t| {
+            let (last_run, run_count) = match runs.remove(&t.id) {
+                Some((r, n)) => (Some(r), n),
+                None => (None, 0),
+            };
+            ServiceView { task: t.clone(), last_run, run_count }
+        })
+        .collect();
+    Ok(Json(out))
+}
+
+#[derive(Deserialize)]
+pub struct AddServiceRequest {
+    pub title: String,
+    pub recurrence: String,
+    pub due: Option<String>,
+    pub priority: Option<String>,
+    pub project: Option<String>,
+    pub tags: Option<String>,
+    pub agent: Option<String>,
+    pub description: Option<String>,
+    pub instructions: Option<String>,
+}
+
+fn cli_error((_, msg): (i32, String)) -> (StatusCode, Json<serde_json::Value>) {
+    let status = if msg.contains("not found") { StatusCode::NOT_FOUND } else { StatusCode::BAD_REQUEST };
+    app_error(status, msg)
+}
+
+async fn add_service(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<AddServiceRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    let today = chrono::Local::now().date_naive();
+    let args = crate::commands::AddArgs {
+        title: req.title,
+        priority: req.priority.unwrap_or_else(|| "medium".to_string()),
+        due: req.due.filter(|d| !d.is_empty()),
+        project: req.project.filter(|p| !p.is_empty()),
+        tags: req.tags,
+        agent: req.agent.filter(|a| !a.is_empty()),
+        description: req.description,
+        instructions: req.instructions,
+    };
+    let _guard = state.write_lock.lock().await;
+    let msg = crate::commands::service_add(&state.db_path, args, &req.recurrence, today).map_err(cli_error)?;
+    Ok(Json(serde_json::json!({ "message": msg })))
+}
+
+async fn pause_service(
+    State(state): State<Arc<AppState>>,
+    AxumPath(id): AxumPath<u32>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    let _guard = state.write_lock.lock().await;
+    let today = chrono::Local::now().date_naive();
+    let msg = crate::commands::set_paused(&state.db_path, id, true, today).map_err(cli_error)?;
+    Ok(Json(serde_json::json!({ "message": msg })))
+}
+
+async fn resume_service(
+    State(state): State<Arc<AppState>>,
+    AxumPath(id): AxumPath<u32>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    let _guard = state.write_lock.lock().await;
+    let today = chrono::Local::now().date_naive();
+    let msg = crate::commands::set_paused(&state.db_path, id, false, today).map_err(cli_error)?;
+    Ok(Json(serde_json::json!({ "message": msg })))
+}
+
+#[derive(Deserialize)]
+pub struct RunsQuery {
+    pub limit: Option<usize>,
+    pub before: Option<i64>,
+}
+
+async fn list_service_runs(
+    State(state): State<Arc<AppState>>,
+    AxumPath(id): AxumPath<u32>,
+    Query(q): Query<RunsQuery>,
+) -> Result<Json<Vec<db::ServiceRun>>, (StatusCode, Json<serde_json::Value>)> {
+    let runs = db::list_runs(&state.db_path, id, q.limit.unwrap_or(50).min(500), q.before)
+        .map_err(|e| app_error(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    Ok(Json(runs))
 }
 
 async fn get_task(
@@ -180,7 +285,7 @@ async fn add_task(
         notes: Vec::new(),
         agent: req.agent,
         effort: None,
-        work_status: None,
+        work_status: None, kind: Default::default(), paused: false,
     };
     task_file.tasks.push(new_task.clone());
     task_file.commit().map_err(|e| app_error(StatusCode::INTERNAL_SERVER_ERROR, e))?;
@@ -324,6 +429,7 @@ async fn edit_task(
             }
             None => {}
         }
+        t.validate_kind().map_err(|e| app_error(StatusCode::BAD_REQUEST, e))?;
         t.updated = Some(chrono::Utc::now());
         (t.clone(), t.project.clone())
     };
@@ -439,6 +545,9 @@ async fn done_task(
         .position(|t| t.id == id)
         .ok_or_else(|| app_error(StatusCode::NOT_FOUND, format!("Task {} not found", id)))?;
 
+    if task_file.tasks[idx].is_service() {
+        return Err(app_error(StatusCode::BAD_REQUEST, format!("Task {} is a service and is never done; pause or delete it instead", id)));
+    }
     if task_file.tasks[idx].status == Status::Done {
         return Ok(Json(DoneResponse { completed: task_file.tasks[idx].clone(), spawned: None }));
     }
@@ -468,7 +577,7 @@ async fn done_task(
             notes: parent.notes.clone(),
             agent: parent.agent.clone(),
             effort: parent.effort,
-            work_status: None,
+            work_status: None, kind: Default::default(), paused: false,
         };
         task_file.tasks.push(new_task.clone());
         spawned = Some(new_task);
@@ -505,9 +614,12 @@ async fn delete_task(
     let _guard = state.write_lock.lock().await;
     let mut task_file = db::begin(&state.db_path)
         .map_err(|e| app_error(StatusCode::INTERNAL_SERVER_ERROR, e))?;
-    task_file
+    let removed = task_file
         .remove_task(id)
         .ok_or_else(|| app_error(StatusCode::NOT_FOUND, format!("Task {} not found", id)))?;
+    if removed.is_service() {
+        task_file.delete_runs(id).map_err(|e| app_error(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    }
     task_file.commit().map_err(|e| app_error(StatusCode::INTERNAL_SERVER_ERROR, e))?;
     Ok(StatusCode::NO_CONTENT)
 }
@@ -1040,6 +1152,10 @@ fn api_routes() -> Router<Arc<AppState>> {
         .route("/api/update/status", get(get_update_status))
         .route("/api/tasks", get(list_tasks).post(add_task))
         .route("/api/tasks/:id", get(get_task).patch(edit_task).delete(delete_task))
+        .route("/api/services", get(list_services).post(add_service))
+        .route("/api/services/:id/pause", axum::routing::post(pause_service))
+        .route("/api/services/:id/resume", axum::routing::post(resume_service))
+        .route("/api/services/:id/runs", get(list_service_runs))
         .route("/api/tasks/:id/done", axum::routing::post(done_task))
         .route("/api/tasks/:id/reopen", axum::routing::post(reopen_task))
         .route("/api/tasks/:id/notes", get(list_task_notes).post(create_task_note))
@@ -1170,7 +1286,7 @@ mod tests {
                 notes: Vec::new(),
                 agent: None,
                 effort: None,
-                work_status: None,
+                work_status: None, kind: Default::default(), paused: false,
             });
             db::save(&state.db_path, &tf).unwrap();
         }
@@ -1193,7 +1309,7 @@ mod tests {
             let t1 = crate::task::Task {
                 id: 1, title: "Open".to_string(), status: Status::Open, priority: crate::task::Priority::Medium,
                 tags: Vec::new(), created: chrono::Utc::now(), updated: None, description: None, instructions: None,
-                due_date: None, project: None, recurrence: None, notes: Vec::new(), agent: None, effort: None, work_status: None,
+                due_date: None, project: None, recurrence: None, notes: Vec::new(), agent: None, effort: None, work_status: None, kind: Default::default(), paused: false,
             };
             let mut t2 = t1.clone();
             t2.id = 2; t2.title = "Done".to_string(); t2.status = Status::Done;
@@ -1219,7 +1335,7 @@ mod tests {
             tf.tasks.push(crate::task::Task {
                 id: 7, title: "Found me".to_string(), status: Status::Open, priority: crate::task::Priority::Medium,
                 tags: Vec::new(), created: chrono::Utc::now(), updated: None, description: None, instructions: None,
-                due_date: None, project: None, recurrence: None, notes: Vec::new(), agent: None, effort: None, work_status: None,
+                due_date: None, project: None, recurrence: None, notes: Vec::new(), agent: None, effort: None, work_status: None, kind: Default::default(), paused: false,
             });
             db::save(&state.db_path, &tf).unwrap();
         }
@@ -1573,7 +1689,7 @@ mod tests {
             tf.tasks.push(crate::task::Task {
                 id: 1, title: "Original".to_string(), status: Status::Open, priority: crate::task::Priority::Medium,
                 tags: Vec::new(), created: chrono::Utc::now(), updated: None, description: None, instructions: None,
-                due_date: None, project: None, recurrence: None, notes: Vec::new(), agent: None, effort: None, work_status: None,
+                due_date: None, project: None, recurrence: None, notes: Vec::new(), agent: None, effort: None, work_status: None, kind: Default::default(), paused: false,
             });
             db::save(&state.db_path, &tf).unwrap();
         }
@@ -1607,7 +1723,7 @@ mod tests {
                 id: 1, title: "Has a due date".to_string(), status: Status::Open, priority: crate::task::Priority::Medium,
                 tags: Vec::new(), created: chrono::Utc::now(), updated: None, description: None, instructions: None,
                 due_date: chrono::NaiveDate::from_ymd_opt(2026, 1, 5), project: None, recurrence: None,
-                notes: Vec::new(), agent: None, effort: None, work_status: None,
+                notes: Vec::new(), agent: None, effort: None, work_status: None, kind: Default::default(), paused: false,
             });
             db::save(&state.db_path, &tf).unwrap();
         }
@@ -1639,7 +1755,7 @@ mod tests {
                 id: 1, title: "Has an agent".to_string(), status: Status::Open, priority: crate::task::Priority::Medium,
                 tags: Vec::new(), created: chrono::Utc::now(), updated: None, description: None, instructions: None,
                 due_date: None, project: None, recurrence: None, notes: Vec::new(),
-                agent: Some("bot".to_string()), effort: None, work_status: None,
+                agent: Some("bot".to_string()), effort: None, work_status: None, kind: Default::default(), paused: false,
             });
             db::save(&state.db_path, &tf).unwrap();
         }
@@ -1671,7 +1787,7 @@ mod tests {
                 id: 1, title: "Track me".to_string(), status: Status::Open, priority: crate::task::Priority::Medium,
                 tags: Vec::new(), created: chrono::Utc::now(), updated: None, description: None, instructions: None,
                 due_date: None, project: None, recurrence: None, notes: Vec::new(), agent: None, effort: None,
-                work_status: None,
+                work_status: None, kind: Default::default(), paused: false,
             });
             db::save(&state.db_path, &tf).unwrap();
         }
@@ -1708,7 +1824,7 @@ mod tests {
                 tags: Vec::new(), created: chrono::Utc::now(), updated: None, description: None, instructions: None,
                 due_date: Some(days_from_today(10)), project: None, recurrence: None,
                 notes: Vec::new(), agent: Some("bot".to_string()), effort: None,
-                work_status: Some(crate::task::WorkStatus::WaitingForReview),
+                work_status: Some(crate::task::WorkStatus::WaitingForReview), kind: Default::default(), paused: false,
             });
             db::save(&state.db_path, &tf).unwrap();
         }
@@ -1773,7 +1889,7 @@ mod tests {
                 id: 1, title: "T".to_string(), status: Status::Open, priority: crate::task::Priority::Medium,
                 tags: Vec::new(), created: chrono::Utc::now(), updated: None, description: None, instructions: None,
                 due_date: None, project: None, recurrence: None,
-                notes: Vec::new(), agent: None, effort: None, work_status: None,
+                notes: Vec::new(), agent: None, effort: None, work_status: None, kind: Default::default(), paused: false,
             });
             db::save(&state.db_path, &tf).unwrap();
         }
@@ -1817,7 +1933,7 @@ mod tests {
                 id: 1, title: "Ship it".to_string(), status: Status::Open, priority: crate::task::Priority::Medium,
                 tags: Vec::new(), created: chrono::Utc::now(), updated: None, description: None, instructions: None,
                 due_date: None, project: Some(repo.path().to_string_lossy().to_string()), recurrence: None,
-                notes: Vec::new(), agent: None, effort: None, work_status: None,
+                notes: Vec::new(), agent: None, effort: None, work_status: None, kind: Default::default(), paused: false,
             });
             db::save(&state.db_path, &tf).unwrap();
         }
@@ -1858,7 +1974,7 @@ mod tests {
                 id: 1, title: "No project here".to_string(), status: Status::Open, priority: crate::task::Priority::Medium,
                 tags: Vec::new(), created: chrono::Utc::now(), updated: None, description: None, instructions: None,
                 due_date: None, project: None, recurrence: None, notes: Vec::new(), agent: None, effort: None,
-                work_status: None,
+                work_status: None, kind: Default::default(), paused: false,
             });
             db::save(&state.db_path, &tf).unwrap();
         }
@@ -1891,7 +2007,7 @@ mod tests {
                 id: 1, title: "Track me".to_string(), status: Status::Open, priority: crate::task::Priority::Medium,
                 tags: Vec::new(), created: chrono::Utc::now(), updated: None, description: None, instructions: None,
                 due_date: None, project: None, recurrence: None, notes: Vec::new(), agent: None, effort: None,
-                work_status: None,
+                work_status: None, kind: Default::default(), paused: false,
             });
             db::save(&state.db_path, &tf).unwrap();
         }
@@ -1921,7 +2037,7 @@ mod tests {
                 id: 1, title: "Track me".to_string(), status: Status::Open, priority: crate::task::Priority::Medium,
                 tags: Vec::new(), created: chrono::Utc::now(), updated: None, description: None, instructions: None,
                 due_date: None, project: None, recurrence: None, notes: Vec::new(), agent: None, effort: None,
-                work_status: Some(crate::task::WorkStatus::Complete),
+                work_status: Some(crate::task::WorkStatus::Complete), kind: Default::default(), paused: false,
             });
             db::save(&state.db_path, &tf).unwrap();
         }
@@ -1953,7 +2069,7 @@ mod tests {
                 id: 1, title: "Recur me".to_string(), status: Status::Open, priority: crate::task::Priority::Medium,
                 tags: Vec::new(), created: chrono::Utc::now(), updated: None, description: None, instructions: None,
                 due_date: None, project: None, recurrence: None, notes: Vec::new(), agent: None, effort: None,
-                work_status: None,
+                work_status: None, kind: Default::default(), paused: false,
             });
             db::save(&state.db_path, &tf).unwrap();
         }
@@ -1985,7 +2101,7 @@ mod tests {
                 id: 1, title: "Recur me".to_string(), status: Status::Open, priority: crate::task::Priority::Medium,
                 tags: Vec::new(), created: chrono::Utc::now(), updated: None, description: None, instructions: None,
                 due_date: None, project: None, recurrence: None, notes: Vec::new(), agent: None, effort: None,
-                work_status: None,
+                work_status: None, kind: Default::default(), paused: false,
             });
             db::save(&state.db_path, &tf).unwrap();
         }
@@ -2016,7 +2132,7 @@ mod tests {
                 tags: Vec::new(), created: chrono::Utc::now(), updated: None, description: None, instructions: None,
                 due_date: None, project: None,
                 recurrence: Some(crate::task::Recurrence::from_str("weekly").unwrap()),
-                notes: Vec::new(), agent: None, effort: None, work_status: None,
+                notes: Vec::new(), agent: None, effort: None, work_status: None, kind: Default::default(), paused: false,
             });
             db::save(&state.db_path, &tf).unwrap();
         }
@@ -2067,7 +2183,7 @@ mod tests {
             tf.tasks.push(crate::task::Task {
                 id: 1, title: "Finish me".to_string(), status: Status::Open, priority: crate::task::Priority::Medium,
                 tags: Vec::new(), created: chrono::Utc::now(), updated: None, description: None, instructions: None,
-                due_date: None, project: None, recurrence: None, notes: Vec::new(), agent: None, effort: None, work_status: None,
+                due_date: None, project: None, recurrence: None, notes: Vec::new(), agent: None, effort: None, work_status: None, kind: Default::default(), paused: false,
             });
             db::save(&state.db_path, &tf).unwrap();
         }
@@ -2099,7 +2215,7 @@ mod tests {
                 tags: Vec::new(), created: chrono::Utc::now(), updated: None, description: None, instructions: None,
                 due_date: chrono::NaiveDate::from_ymd_opt(2026, 1, 5), project: None,
                 recurrence: Some(crate::task::Recurrence::from_str("weekly").unwrap()),
-                notes: Vec::new(), agent: None, effort: None, work_status: None,
+                notes: Vec::new(), agent: None, effort: None, work_status: None, kind: Default::default(), paused: false,
             });
             db::save(&state.db_path, &tf).unwrap();
         }
@@ -2132,7 +2248,7 @@ mod tests {
                 tags: Vec::new(), created: chrono::Utc::now(), updated: None, description: None, instructions: None,
                 due_date: chrono::NaiveDate::from_ymd_opt(2026, 1, 5), project: None,
                 recurrence: Some(crate::task::Recurrence::from_str("weekly").unwrap()),
-                notes: Vec::new(), agent: Some("bot".to_string()), effort: None, work_status: None,
+                notes: Vec::new(), agent: Some("bot".to_string()), effort: None, work_status: None, kind: Default::default(), paused: false,
             });
             db::save(&state.db_path, &tf).unwrap();
         }
@@ -2163,7 +2279,7 @@ mod tests {
                 tags: Vec::new(), created: chrono::Utc::now(), updated: None, description: None, instructions: None,
                 due_date: chrono::NaiveDate::from_ymd_opt(2026, 1, 5), project: None,
                 recurrence: Some(crate::task::Recurrence::from_str("weekly").unwrap()),
-                notes: Vec::new(), agent: None, effort: None, work_status: None,
+                notes: Vec::new(), agent: None, effort: None, work_status: None, kind: Default::default(), paused: false,
             });
             db::save(&state.db_path, &tf).unwrap();
         }
@@ -2211,7 +2327,7 @@ mod tests {
             tf.tasks.push(crate::task::Task {
                 id: 1, title: "Reopen me".to_string(), status: Status::Done, priority: crate::task::Priority::Medium,
                 tags: Vec::new(), created: chrono::Utc::now(), updated: None, description: None, instructions: None,
-                due_date: None, project: None, recurrence: None, notes: Vec::new(), agent: None, effort: None, work_status: None,
+                due_date: None, project: None, recurrence: None, notes: Vec::new(), agent: None, effort: None, work_status: None, kind: Default::default(), paused: false,
             });
             db::save(&state.db_path, &tf).unwrap();
         }
@@ -2240,7 +2356,7 @@ mod tests {
             tf.tasks.push(crate::task::Task {
                 id: 1, title: "Doomed".to_string(), status: Status::Open, priority: crate::task::Priority::Medium,
                 tags: Vec::new(), created: chrono::Utc::now(), updated: None, description: None, instructions: None,
-                due_date: None, project: None, recurrence: None, notes: Vec::new(), agent: None, effort: None, work_status: None,
+                due_date: None, project: None, recurrence: None, notes: Vec::new(), agent: None, effort: None, work_status: None, kind: Default::default(), paused: false,
             });
             db::save(&state.db_path, &tf).unwrap();
         }
@@ -2310,7 +2426,7 @@ mod tests {
                 tags: Vec::new(), created: chrono::Utc::now(), updated: None, description: None, instructions: None,
                 due_date: None, project: None, recurrence: None,
                 notes: vec!["oldest".to_string(), "newest".to_string(), "middle".to_string()],
-                agent: None, effort: None, work_status: None,
+                agent: None, effort: None, work_status: None, kind: Default::default(), paused: false,
             });
             db::save(&state.db_path, &tf).unwrap();
         }
@@ -2355,7 +2471,7 @@ mod tests {
             tags: Vec::new(), created: chrono::Utc::now(), updated: None, description: None, instructions: None,
             due_date: None, project: None, recurrence: None,
             notes: vec!["linked".to_string()],
-            agent: None, effort: None, work_status: None,
+            agent: None, effort: None, work_status: None, kind: Default::default(), paused: false,
         });
         db::save(&state.db_path, &tf).unwrap();
 
@@ -2467,7 +2583,7 @@ mod tests {
             tf.tasks.push(crate::task::Task {
                 id: 1, title: "Has notes".to_string(), status: Status::Open, priority: crate::task::Priority::Medium,
                 tags: Vec::new(), created: chrono::Utc::now(), updated: None, description: None, instructions: None,
-                due_date: None, project: None, recurrence: None, notes: vec!["real-note".to_string()], agent: None, effort: None, work_status: None,
+                due_date: None, project: None, recurrence: None, notes: vec!["real-note".to_string()], agent: None, effort: None, work_status: None, kind: Default::default(), paused: false,
             });
             db::save(&state.db_path, &tf).unwrap();
         }
@@ -2494,7 +2610,7 @@ mod tests {
             tf.tasks.push(crate::task::Task {
                 id: 1, title: "Has no thread yet".to_string(), status: Status::Open, priority: crate::task::Priority::Medium,
                 tags: Vec::new(), created: chrono::Utc::now(), updated: None, description: None, instructions: None,
-                due_date: None, project: None, recurrence: None, notes: Vec::new(), agent: None, effort: None, work_status: None,
+                due_date: None, project: None, recurrence: None, notes: Vec::new(), agent: None, effort: None, work_status: None, kind: Default::default(), paused: false,
             });
             db::save(&state.db_path, &tf).unwrap();
         }
@@ -2522,7 +2638,7 @@ mod tests {
             tf.tasks.push(crate::task::Task {
                 id: 1, title: "No question yet".to_string(), status: Status::Open, priority: crate::task::Priority::Medium,
                 tags: Vec::new(), created: chrono::Utc::now(), updated: None, description: None, instructions: None,
-                due_date: None, project: None, recurrence: None, notes: Vec::new(), agent: None, effort: None, work_status: None,
+                due_date: None, project: None, recurrence: None, notes: Vec::new(), agent: None, effort: None, work_status: None, kind: Default::default(), paused: false,
             });
             db::save(&state.db_path, &tf).unwrap();
         }
@@ -2568,7 +2684,7 @@ mod tests {
                 id: 1, title: "Needs input".to_string(), status: Status::Open, priority: crate::task::Priority::Medium,
                 tags: Vec::new(), created: chrono::Utc::now(), updated: None, description: None, instructions: None,
                 due_date: None, project: None, recurrence: None, notes: vec!["task-1-question".to_string()],
-                agent: Some("bot".to_string()), effort: None, work_status: Some(crate::task::WorkStatus::NeedsInput),
+                agent: Some("bot".to_string()), effort: None, work_status: Some(crate::task::WorkStatus::NeedsInput), kind: Default::default(), paused: false,
             });
             db::save(&state.db_path, &tf).unwrap();
         }
@@ -2604,7 +2720,7 @@ mod tests {
             id: 1, title: "Blocked".to_string(), status: Status::Open, priority: crate::task::Priority::Medium,
             tags: Vec::new(), created: chrono::Utc::now(), updated: None, description: None, instructions: None,
             due_date: None, project: None, recurrence: None, notes: vec!["task-1-question".to_string()],
-            agent: Some("bot".to_string()), effort: None, work_status: Some(crate::task::WorkStatus::NeedsInput),
+            agent: Some("bot".to_string()), effort: None, work_status: Some(crate::task::WorkStatus::NeedsInput), kind: Default::default(), paused: false,
         }
     }
 
@@ -2676,7 +2792,7 @@ mod tests {
                 id: 1, title: "Waiting on review".to_string(), status: Status::Open, priority: crate::task::Priority::Medium,
                 tags: Vec::new(), created: chrono::Utc::now(), updated: None, description: None, instructions: None,
                 due_date: None, project: None, recurrence: None, notes: Vec::new(), agent: Some("bot".to_string()),
-                effort: None, work_status: Some(crate::task::WorkStatus::WaitingForReview),
+                effort: None, work_status: Some(crate::task::WorkStatus::WaitingForReview), kind: Default::default(), paused: false,
             });
             db::save(&state.db_path, &tf).unwrap();
         }
@@ -2713,7 +2829,7 @@ mod tests {
             tf.tasks.push(crate::task::Task {
                 id: 1, title: "Multi-round".to_string(), status: Status::Open, priority: crate::task::Priority::Medium,
                 tags: Vec::new(), created: chrono::Utc::now(), updated: None, description: None, instructions: None,
-                due_date: None, project: None, recurrence: None, notes: Vec::new(), agent: None, effort: None, work_status: None,
+                due_date: None, project: None, recurrence: None, notes: Vec::new(), agent: None, effort: None, work_status: None, kind: Default::default(), paused: false,
             });
             db::save(&state.db_path, &tf).unwrap();
         }
@@ -2763,7 +2879,7 @@ mod tests {
             tf.tasks.push(crate::task::Task {
                 id: 1, title: "T".to_string(), status: Status::Open, priority: crate::task::Priority::Medium,
                 tags: Vec::new(), created: chrono::Utc::now(), updated: None, description: None, instructions: None,
-                due_date: None, project: None, recurrence: None, notes: Vec::new(), agent: None, effort: None, work_status: None,
+                due_date: None, project: None, recurrence: None, notes: Vec::new(), agent: None, effort: None, work_status: None, kind: Default::default(), paused: false,
             });
             db::save(&state.db_path, &tf).unwrap();
         }
@@ -2792,7 +2908,7 @@ mod tests {
             tf.tasks.push(crate::task::Task {
                 id: 1, title: "T".to_string(), status: Status::Open, priority: crate::task::Priority::Medium,
                 tags: Vec::new(), created: chrono::Utc::now(), updated: None, description: None, instructions: None,
-                due_date: None, project: None, recurrence: None, notes: Vec::new(), agent: None, effort: None, work_status: None,
+                due_date: None, project: None, recurrence: None, notes: Vec::new(), agent: None, effort: None, work_status: None, kind: Default::default(), paused: false,
             });
             db::save(&state.db_path, &tf).unwrap();
         }

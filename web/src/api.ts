@@ -1,4 +1,4 @@
-import type { Task, AgentProfile, Note, VersionInfo, UpdateStatus } from './types';
+import type { Task, AgentProfile, Note, VersionInfo, UpdateStatus, Service, ServiceRun } from './types';
 
 async function jsonOrThrow<T>(response: Response): Promise<T> {
   if (!response.ok) {
@@ -30,6 +30,31 @@ function normalizeTask(task: Task): Task {
 export async function fetchTasks(): Promise<Task[]> {
   const tasks = await jsonOrThrow<Task[]>(await apiFetch('/api/tasks'));
   return tasks.map(normalizeTask);
+}
+
+export async function fetchServices(): Promise<Service[]> {
+  const services = await jsonOrThrow<Service[]>(await apiFetch('/api/services'));
+  return services.map((s) => ({ ...s, notes: s.notes ?? [] }));
+}
+
+export async function addService(service: {
+  title: string; recurrence: string; due?: string; agent?: string; instructions?: string;
+}): Promise<{ message: string }> {
+  return jsonOrThrow(
+    await apiFetch('/api/services', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(service),
+    }),
+  );
+}
+
+export async function setServicePaused(id: number, paused: boolean): Promise<{ message: string }> {
+  return jsonOrThrow(await apiFetch(`/api/services/${id}/${paused ? 'pause' : 'resume'}`, { method: 'POST' }));
+}
+
+export async function fetchServiceRuns(id: number, limit = 50): Promise<ServiceRun[]> {
+  return jsonOrThrow(await apiFetch(`/api/services/${id}/runs?limit=${limit}`));
 }
 
 export async function fetchAgents(): Promise<AgentProfile[]> {

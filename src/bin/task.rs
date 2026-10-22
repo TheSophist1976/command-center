@@ -246,10 +246,10 @@ fn run(cli: Cli) -> Result<(), (i32, String)> {
             Ok(())
         }
 
-        Some(Command::List { status, agent, project, tag, due_before }) => {
+        Some(Command::List { status, agent, project, tag, due_before, services }) => {
             let agent = agent.or_else(task::agent::env_agent);
             let msg = task::commands::list(&path, task::commands::ListArgs {
-                status, agent, project, tag, due_before,
+                status, agent, project, tag, due_before, services,
             })?;
             println!("{}", msg);
             Ok(())
@@ -305,11 +305,21 @@ fn run(cli: Cli) -> Result<(), (i32, String)> {
             Ok(())
         }
 
-        Some(Command::Edit { id, title, priority, due, project, tags, agent, description, instructions, effort, work_status, recur }) => {
+        Some(Command::Edit { id, title, priority, due, project, tags, agent, description, instructions, effort, work_status, recur, service, no_service }) => {
+            let service = if service { Some(true) } else if no_service { Some(false) } else { None };
             let msg = task::commands::edit(&path, id, task::commands::EditArgs {
-                title, priority, due, project, tags, agent, description, instructions, effort, work_status, recur,
+                title, priority, due, project, tags, agent, description, instructions, effort, work_status, recur, service,
             })?;
             println!("{}", msg);
+            Ok(())
+        }
+
+        Some(Command::Service { subcommand }) => {
+            let cwd = std::env::current_dir().map_err(|e| (1, e.to_string()))?;
+            let caller = task::agent::env_agent().or_else(|| {
+                task::config::config_path().and_then(|c| task::config::find_agent_for_cwd_from(&c, &cwd))
+            });
+            println!("{}", task::commands::service(&path, subcommand, caller.as_deref())?);
             Ok(())
         }
 
