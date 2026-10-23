@@ -1,0 +1,48 @@
+/* Rendered markdown (components/Markdown.tsx). Font size and colour come from
+   the container so the same component fits notes, chat bubbles and fields. */
+.md { line-height: 1.55; overflow-wrap: anywhere; }
+.md > :first-child { margin-top: 0; }
+.md > :last-child { margin-bottom: 0; }
+.md h1, .md h2, .md h3, .md h4, .md h5, .md h6 { font-family: var(--font-display); color: var(--fg-1); margin: 1.1em 0 0.4em; line-height: 1.25; }
+.md h1 { font-size: 1.25em; }
+.md h2 { font-size: 1.15em; }
+.md h3, .md h4, .md h5, .md h6 { font-size: 1.04em; }
+.md p, .md ul, .md ol, .md blockquote, .md pre, .md table { margin: 0.6em 0; }
+.md ul, .md ol { padding-left: 1.4em; }
+.md li + li { margin-top: 0.15em; }
+.md li > input[type='checkbox'] { margin-right: 6px; }
+.md ul:has(> li > input[type='checkbox']) { list-style: none; padding-left: 0.2em; }
+.md a { color: var(--accent); text-decoration: underline; }
+.md blockquote { border-left: 3px solid var(--hairline); padding-left: 12px; color: var(--fg-3); }
+.md code { font-family: var(--font-mono); font-size: 0.92em; background: var(--ink-3); border-radius: 3px; padding: 1px 4px; }
+.md pre { background: var(--ink-3); border: 1px solid var(--hairline); border-radius: 6px; padding: 10px 12px; overflow-x: auto; white-space: pre-wrap; }
+.md pre code { background: transparent; padding: 0; }
+.md table { border-collapse: collapse; display: block; overflow-x: auto; }
+.md th, .md td { border: 1px solid var(--hairline); padding: 4px 8px; text-align: left; }
+.md hr { border: none; border-top: 1px solid var(--hairline); margin: 1em 0; }
+.md img { max-width: 100%; }
+
+.md-inline { line-height: inherit; }
+.md-inline code { padding: 0 3px; }
+
+/* On an accent-coloured background (the human's chat bubbles) links take the text colour. */
+.md-on-accent a { color: inherit; }
+.md-on-accent code, .md-on-accent pre { background: rgba(0, 0, 0, 0.15); border-color: transparent; }
+
+.md-copy {
+  display: inline-flex; align-items: center; gap: 4px; padding: 3px 5px;
+  background: transparent; border: none; border-radius: 4px; cursor: pointer;
+  font-size: 10.5px; color: var(--fg-5);
+}
+.md-copy:hover { color: var(--fg-2); background: var(--ink-3); }
+
+.md-copyable { position: relative; padding-right: 26px; }
+.md-body-copy { position: absolute; top: 0; right: 0; opacity: 0.55; }
+.md-copyable:hover .md-body-copy, .md-body-copy:focus-visible { opacity: 1; }
+
+.md-code { position: relative; }
+.md-code-copy { position: absolute; top: 6px; right: 6px; opacity: 0; }
+.md-code:hover .md-code-copy, .md-code-copy:focus-visible { opacity: 1; }
+@media (hover: none) {
+  .md-body-copy, .md-code-copy { opacity: 1; }
+}

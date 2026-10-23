@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
-import ReactMarkdown from 'react-markdown';
 import type { Note, Task } from '../types';
 import { Button } from './Button';
+import { CopyButton, Markdown } from './Markdown';
 
 interface ReviewPanelProps {
   review: Note | null;
@@ -71,43 +71,13 @@ function Avatar({ sender, color }: { sender: 'agent' | 'human'; color: string })
   );
 }
 
-const markdownComponents = {
-  pre: ({ children }: { children?: React.ReactNode }) => (
-    <pre
-      style={{
-        overflowX: 'auto',
-        maxWidth: '100%',
-        whiteSpace: 'pre-wrap',
-        wordBreak: 'break-word',
-        overflowWrap: 'anywhere',
-      }}
-    >
-      {children}
-    </pre>
-  ),
-  code: ({ children }: { children?: React.ReactNode }) => (
-    <code style={{ overflowWrap: 'anywhere', wordBreak: 'break-word' }}>{children}</code>
-  ),
-};
-
 export function ReviewPanel({ review, workStatus, accentColor, onSendFeedback }: ReviewPanelProps) {
   const [text, setText] = useState('');
   const [sendState, setSendState] = useState<'idle' | 'sending' | 'sent'>('idle');
-  const [copiedIndex, setCopiedIndex] = useState<number | null>(null);
   const color = accentColor ?? 'var(--fg-5)';
   const trimmed = text.trim();
   const messages = review ? parseMessages(review.body) : [];
   const scrollRef = useRef<HTMLDivElement>(null);
-
-  async function copyMessage(i: number, body: string) {
-    try {
-      await navigator.clipboard.writeText(body);
-      setCopiedIndex(i);
-      setTimeout(() => setCopiedIndex((cur) => (cur === i ? null : cur)), 1500);
-    } catch {
-      // clipboard unavailable — no-op
-    }
-  }
 
   useEffect(() => {
     const el = scrollRef.current;
@@ -181,7 +151,7 @@ export function ReviewPanel({ review, workStatus, accentColor, onSendFeedback }:
                   alignSelf: 'center',
                 }}
               >
-                📌 {m.body}
+                📌 <Markdown text={m.body} inline />
                 {m.dateLabel && <span style={{ marginLeft: 6, color: 'var(--fg-5)' }}>· {m.dateLabel}</span>}
               </div>
             ) : (
@@ -216,21 +186,7 @@ export function ReviewPanel({ review, workStatus, accentColor, onSendFeedback }:
                   {m.dateLabel && (
                     <span style={{ fontSize: 10, color: 'var(--fg-5)' }}>{m.dateLabel}</span>
                   )}
-                  <button
-                    type="button"
-                    onClick={() => copyMessage(i, m.body)}
-                    title="Copy message text"
-                    style={{
-                      background: 'none',
-                      border: 'none',
-                      cursor: 'pointer',
-                      fontSize: 10,
-                      color: 'var(--fg-5)',
-                      padding: 0,
-                    }}
-                  >
-                    {copiedIndex === i ? 'Copied' : 'Copy'}
-                  </button>
+                  <CopyButton text={m.body} title="Copy message text" label style={{ padding: 0 }} />
                 </div>
                 <div
                   style={{
@@ -248,7 +204,7 @@ export function ReviewPanel({ review, workStatus, accentColor, onSendFeedback }:
                     overflowX: 'hidden',
                   }}
                 >
-                  <ReactMarkdown components={markdownComponents}>{m.body}</ReactMarkdown>
+                  <Markdown text={m.body} className={m.sender === 'human' ? 'md-on-accent' : undefined} />
                 </div>
               </div>
             </div>

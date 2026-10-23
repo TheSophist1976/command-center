@@ -121,6 +121,18 @@ task rm <id>
 
 **Recurrence:** set via `--recur <pattern>`. Valid patterns: `daily`, `weekly`, `monthly`, `yearly` (every occurrence); `daily:N`, `weekly:N`, `monthly:N`, `yearly:N` (every N); `weekly:DAY` (e.g. `weekly:fri`); `weekly:N:DAY` (every N weeks on DAY); `monthly:N:DAY` (the Nth DAY of the month, e.g. `monthly:2:mon` for the 2nd Monday). `DAY` is a 3-letter abbreviation (`mon`, `tue`, `wed`, `thu`, `fri`, `sat`, `sun`).
 
+## Writing Text for the Web UI
+
+The web UI renders every free-text field as GitHub-flavoured markdown: task titles (inline only: bold, italics, `code`, links), descriptions, instructions, note bodies, question notes, review-thread messages and service run summaries. Write all of them in markdown:
+
+- Keep it short and scannable: a one-line summary first, then short paragraphs or bullet lists.
+- Use **bold** labels or `###` headings for sections. In review threads and question notes, never start a line with `## ` except the required `## Agent response — <date>` heading; the UI splits review threads into chat messages on `## ` lines.
+- Put commands, paths, ids, branch names and slugs in `inline code`, and multi-line commands or output in fenced code blocks with a language (```` ```sh ````). The UI adds a copy button to every code block and to every description, instructions field and note.
+- Write links as `[PR #42](https://github.com/...)` or paste the bare URL; both are clickable. Never wrap a URL in backticks, which makes it unclickable.
+- Use `- [ ]` / `- [x]` task lists for checklists and tables only for real tabular data.
+
+See `docs/markdown-style-guide.md` in the command-center repo for the full guide with examples.
+
 ## Notes
 
 Notes are markdown files stored in the same directory as `tasks.db`. Each note has a slug (derived from its title) and is stored as `<slug>.md`. Notes are unaffected by the SQLite migration — they remain plain `.md` files, managed with the `task note` CLI subcommands below.
