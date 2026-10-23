@@ -1773,6 +1773,38 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_edit_service_schedule_and_agent() {
+        let (_dir, state) = make_state();
+        {
+            let mut tf = crate::task::TaskFile::new();
+            tf.tasks.push(crate::task::Task {
+                id: 1, title: "Nightly sync".to_string(), status: Status::Open, priority: crate::task::Priority::Medium,
+                tags: Vec::new(), created: chrono::Utc::now(), updated: None, description: None, instructions: None,
+                due_date: chrono::NaiveDate::from_ymd_opt(2030, 1, 1), project: None,
+                recurrence: Some(crate::task::Recurrence::from_str("daily").unwrap()), notes: Vec::new(),
+                agent: Some("bot".to_string()), effort: None, work_status: None,
+                kind: crate::task::TaskKind::Service, paused: false,
+            });
+            db::save(&state.db_path, &tf).unwrap();
+        }
+
+        // What the Services screen sends when its schedule row is saved.
+        let body = serde_json::json!({ "recurrence": "weekly:fri", "due": "2030-01-04", "agent": "other" });
+        let response = patch_task_1(state.clone(), body).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let t = db::load(&state.db_path).unwrap().find_task(1).unwrap().clone();
+        assert!(t.is_service());
+        assert_eq!(t.recurrence.unwrap().to_string(), "weekly:fri");
+        assert_eq!(t.due_date, chrono::NaiveDate::from_ymd_opt(2030, 1, 4));
+        assert_eq!(t.agent.as_deref(), Some("other"));
+
+        // An empty agent unassigns the service.
+        let response = patch_task_1(state.clone(), serde_json::json!({ "agent": "" })).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(db::load(&state.db_path).unwrap().find_task(1).unwrap().agent, None);
+    }
+
+    #[tokio::test]
     async fn test_edit_task_kind_converts_to_service_and_back() {
         let (_dir, state) = make_state();
         {

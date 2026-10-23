@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { X } from 'lucide-react';
 import type { AgentProfile, Service, ServiceRun } from '../types';
 import { Button } from './Button';
@@ -62,6 +62,8 @@ export function ServicesView({ agents, onClose }: { agents: AgentProfile[]; onCl
             No services yet. A service is a recurring agent job that records its own runs.
           </div>
         ) : (
+          <>
+          <div style={{ fontSize: 12, color: 'var(--fg-5)', marginBottom: 6 }}>Click a service to change its schedule, agent or instructions.</div>
           <table style={{ width: '100%', borderCollapse: 'collapse', marginBottom: 16 }}>
             <thead>
               <tr style={{ color: 'var(--fg-4)' }}>
@@ -90,9 +92,10 @@ export function ServicesView({ agents, onClose }: { agents: AgentProfile[]; onCl
               })}
             </tbody>
           </table>
+          </>
         )}
 
-        {selected && <ServiceDetail key={selected.id} service={selected} onError={setError} />}
+        {selected && <ServiceDetail key={selected.id} service={selected} agents={agents} onError={setError} />}
       </div>
     </div>
   );
@@ -128,29 +131,55 @@ function NewServiceForm({ agents, onDone, onError }: { agents: AgentProfile[]; o
   );
 }
 
-function ServiceDetail({ service, onError }: { service: Service; onError: (e: string) => void }) {
+// Agent names match ignoring case, so show the profile's own spelling in the picker.
+function profileName(agents: AgentProfile[], name: string | null | undefined): string {
+  if (!name) return '';
+  return agents.find((a) => a.name.toLowerCase() === name.toLowerCase())?.name ?? name;
+}
+
+function ServiceDetail({ service, agents, onError }: { service: Service; agents: AgentProfile[]; onError: (e: string) => void }) {
   const [runs, setRuns] = useState<ServiceRun[]>([]);
   const [recurrence, setRecurrence] = useState(service.recurrence ?? '');
   const [due, setDue] = useState(service.due_date ?? '');
+  const [agent, setAgent] = useState(profileName(agents, service.agent));
   const [instructions, setInstructions] = useState(service.instructions ?? '');
+  const panelRef = useRef<HTMLDivElement>(null);
+
+  // The detail sits below the table, so bring it into view when a row is picked.
+  useEffect(() => {
+    panelRef.current?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+  }, []);
 
   // Reload the history whenever the service changes (a new run bumps run_count).
   useEffect(() => {
     fetchServiceRuns(service.id).then(setRuns).catch((e) => onError(String(e)));
   }, [service.id, service.run_count, onError]);
 
+  // Follow server-side changes (a run advances the due date, a CLI edit changes the
+  // agent) so the form doesn't show stale values as unsaved edits.
+  const [seen, setSeen] = useState({ recurrence: service.recurrence, due: service.due_date, agent: service.agent });
+  if (seen.recurrence !== service.recurrence || seen.due !== service.due_date || seen.agent !== service.agent) {
+    setSeen({ recurrence: service.recurrence, due: service.due_date, agent: service.agent });
+    if (seen.recurrence !== service.recurrence) setRecurrence(service.recurrence ?? '');
+    if (seen.due !== service.due_date) setDue(service.due_date ?? '');
+    if (seen.agent !== service.agent) setAgent(profileName(agents, service.agent));
+  }
+
   function saveSchedule() {
-    editTask(service.id, { recurrence, due }).catch((e) => onError(String(e)));
+    editTask(service.id, { recurrence, due, agent }).catch((e) => onError(String(e)));
   }
   function saveInstructions() {
     editTask(service.id, { instructions }).catch((e) => onError(String(e)));
   }
 
-  const scheduleDirty = recurrence !== (service.recurrence ?? '') || due !== (service.due_date ?? '');
+  const scheduleDirty =
+    recurrence !== (service.recurrence ?? '') || due !== (service.due_date ?? '') || agent.toLowerCase() !== (service.agent ?? '').toLowerCase();
   const instructionsDirty = instructions !== (service.instructions ?? '');
+  // Keep an agent that has no profile (e.g. set from the CLI) selectable instead of dropping it.
+  const agentMissing = agent !== '' && !agents.some((a) => a.name === agent);
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 12, borderTop: '1px solid var(--hairline)', paddingTop: 16 }}>
+    <div ref={panelRef} style={{ display: 'flex', flexDirection: 'column', gap: 12, borderTop: '1px solid var(--hairline)', paddingTop: 16 }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
         <span style={{ flex: 1, fontWeight: 600 }}>{service.title}</span>
         <Button variant="secondary" onClick={() => setServicePaused(service.id, !service.paused).catch((e) => onError(String(e)))}>
@@ -162,7 +191,12 @@ function ServiceDetail({ service, onError }: { service: Service; onError: (e: st
         <span style={{ fontSize: 13, color: 'var(--fg-4)', width: 90 }}>Schedule</span>
         <input style={{ ...input, flex: 1 }} value={recurrence} onChange={(e) => setRecurrence(e.target.value)} />
         <input style={input} type="date" value={due} onChange={(e) => setDue(e.target.value)} title="Next run" />
-        <Button onClick={saveSchedule} disabled={!scheduleDirty}>Save</Button>
+        <select style={input} value={agent} onChange={(e) => setAgent(e.target.value)} title="Agent">
+          <option value="">No agent</option>
+          {agentMissing && <option value={agent}>{agent}</option>}
+          {agents.map((a) => <option key={a.name} value={a.name}>{a.name}</option>)}
+        </select>
+        <Button onClick={saveSchedule} disabled={!scheduleDirty || !recurrence.trim() || !due}>Save</Button>
       </div>
 
       <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
