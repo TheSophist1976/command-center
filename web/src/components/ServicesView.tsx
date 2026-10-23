@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { X } from 'lucide-react';
 import type { AgentProfile, Service, ServiceRun } from '../types';
 import { Button } from './Button';
+import { Markdown } from './Markdown';
 import { addService, editTask, fetchServiceRuns, fetchServices, setServicePaused } from '../api';
 
 // The Services screen: recurring agent jobs that advance their own schedule with
@@ -180,7 +181,7 @@ function ServiceDetail({ service, onError }: { service: Service; onError: (e: st
               <div key={r.id} style={{ fontSize: 13, display: 'flex', gap: 10 }}>
                 <span style={{ fontFamily: 'var(--font-mono)', color: 'var(--fg-4)', whiteSpace: 'nowrap' }}>{new Date(r.ran_at).toLocaleString()}</span>
                 <span style={{ fontWeight: 600, color: r.result === 'ok' ? 'var(--accent)' : 'var(--danger, #e5484d)' }}>{r.result}</span>
-                <span style={{ color: 'var(--fg-3)' }}>{r.summary ?? ''}</span>
+                <span style={{ color: 'var(--fg-3)' }}>{r.summary && <Markdown text={r.summary} inline />}</span>
               </div>
             ))}
           </div>

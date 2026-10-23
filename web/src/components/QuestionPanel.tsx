@@ -1,7 +1,7 @@
 import { useState } from 'react';
-import ReactMarkdown from 'react-markdown';
 import type { Note } from '../types';
 import { Button } from './Button';
+import { Markdown } from './Markdown';
 
 interface QuestionPanelProps {
   question: Note | null;
@@ -67,7 +67,7 @@ export function QuestionPanel({ question, awaitingAnswer, accentColor, onSendAns
             overflowY: 'auto',
           }}
         >
-          <ReactMarkdown>{question.body}</ReactMarkdown>
+          <Markdown text={question.body} copyable />
         </div>
       ) : (
         <div style={{ fontSize: 13, color: 'var(--fg-5)', fontStyle: 'italic' }}>

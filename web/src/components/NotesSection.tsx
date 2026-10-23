@@ -1,10 +1,8 @@
 import { useState } from 'react';
-import ReactMarkdown from 'react-markdown';
-import remarkGfm from 'remark-gfm';
 import { ChevronDown, ChevronRight, ExternalLink, X } from 'lucide-react';
 import type { Note } from '../types';
 import { Button } from './Button';
-import '../noteMarkdown.css';
+import { Markdown } from './Markdown';
 
 interface NotesSectionProps {
   notes: Note[];
@@ -195,8 +193,8 @@ export function NotesSection({ notes, onCreate, onOpen, onSave, onUnlink, touch 
                 ) : (
                   <>
                     {n.body.trim() ? (
-                      <div className="note-md">
-                        <ReactMarkdown remarkPlugins={[remarkGfm]}>{n.body}</ReactMarkdown>
+                      <div style={{ fontSize: 13.5, color: 'var(--fg-2)' }}>
+                        <Markdown text={n.body} copyable />
                       </div>
                     ) : (
                       <div style={{ fontSize: 13, color: 'var(--fg-5)', fontStyle: 'italic' }}>Empty note.</div>

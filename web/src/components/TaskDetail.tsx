@@ -5,7 +5,7 @@ import type { editTask } from '../api';
 import { EditableField } from './EditableField';
 import { DatePicker } from './DatePicker';
 import { AgentPicker } from './AgentPicker';
-import { Linkify } from './Linkify';
+import { Markdown } from './Markdown';
 import { ReviewPanel } from './ReviewPanel';
 import { QuestionPanel } from './QuestionPanel';
 import { NotesSection } from './NotesSection';
@@ -161,7 +161,7 @@ export function TaskDetail({
               id="field-title"
               value={task.title}
               onSave={(v) => v.trim() && onEdit({ title: v.trim() })}
-              display={task.title ? <Linkify text={task.title} /> : undefined}
+              display={task.title ? <Markdown text={task.title} inline /> : undefined}
             />
           </div>
           {onClose && (
@@ -241,7 +241,7 @@ export function TaskDetail({
                   type="textarea"
                   onSave={(v) => onEdit({ [f.key]: v })}
                   display={value
-                    ? <span style={{ whiteSpace: 'pre-wrap' }}><Linkify text={value} /></span>
+                    ? <Markdown text={value} copyable />
                     : <span style={{ color: 'var(--fg-5)', fontStyle: 'italic' }}>{f.empty}</span>}
                 />
               </div>
