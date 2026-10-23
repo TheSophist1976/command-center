@@ -303,14 +303,8 @@ pub fn edit(path: &Path, id: u32, args: EditArgs) -> Result<String, (i32, String
         t.recurrence = Some(r);
     }
     match args.service {
-        Some(true) => t.kind = crate::task::TaskKind::Service,
-        Some(false) => {
-            t.kind = crate::task::TaskKind::Task;
-            t.paused = false;
-            if t.work_status == Some(crate::task::WorkStatus::Failing) {
-                t.work_status = None;
-            }
-        }
+        Some(true) => t.set_kind(crate::task::TaskKind::Service),
+        Some(false) => t.set_kind(crate::task::TaskKind::Task),
         None => {}
     }
     t.validate_kind().map_err(|e| (1, e))?;

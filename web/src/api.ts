@@ -110,7 +110,7 @@ export async function addTask(input: {
 }
 
 export async function editTask(id: number, changes: Partial<{
-  title: string; priority: string; due: string; project: string; tags: string; agent: string; description: string; instructions: string; effort: string; work_status: string; recurrence: string;
+  title: string; priority: string; due: string; project: string; tags: string; agent: string; description: string; instructions: string; effort: string; work_status: string; recurrence: string; kind: 'task' | 'service';
 }>): Promise<Task> {
   const task = await jsonOrThrow<Task>(
     await apiFetch(`/api/tasks/${id}`, {

@@ -305,6 +305,8 @@ pub struct EditTaskRequest {
     pub effort: Option<String>,
     pub work_status: Option<String>,
     pub recurrence: Option<String>,
+    /// "service" converts the task to a service, "task" turns it back.
+    pub kind: Option<String>,
 }
 
 async fn edit_task(
@@ -362,6 +364,12 @@ async fn edit_task(
                 crate::task::Recurrence::from_str(s).map(Some)
             }
         })
+        .transpose()
+        .map_err(|e| app_error(StatusCode::BAD_REQUEST, e))?;
+    let kind = req
+        .kind
+        .as_deref()
+        .map(crate::task::TaskKind::from_str)
         .transpose()
         .map_err(|e| app_error(StatusCode::BAD_REQUEST, e))?;
     let tags = req.tags.as_deref().map(|s| parse_csv(Some(s)));
@@ -428,6 +436,9 @@ async fn edit_task(
                 t.work_status = Some(crate::task::WorkStatus::Todo);
             }
             None => {}
+        }
+        if let Some(k) = kind {
+            t.set_kind(k);
         }
         t.validate_kind().map_err(|e| app_error(StatusCode::BAD_REQUEST, e))?;
         t.updated = Some(chrono::Utc::now());
@@ -1744,6 +1755,68 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
         let json = body_json(response).await;
         assert!(json["due_date"].is_null());
+    }
+
+    async fn patch_task_1(state: AppState, body: serde_json::Value) -> axum::response::Response {
+        router(state)
+            .oneshot(
+                Request::builder()
+                    .method("PATCH")
+                    .uri("/api/tasks/1")
+                    .header("host", "127.0.0.1")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn test_edit_task_kind_converts_to_service_and_back() {
+        let (_dir, state) = make_state();
+        {
+            let mut tf = crate::task::TaskFile::new();
+            tf.tasks.push(crate::task::Task {
+                id: 1, title: "Nightly sync".to_string(), status: Status::Open, priority: crate::task::Priority::Medium,
+                tags: Vec::new(), created: chrono::Utc::now(), updated: None, description: None, instructions: None,
+                due_date: None, project: None, recurrence: None, notes: Vec::new(), agent: Some("bot".to_string()),
+                effort: None, work_status: Some(crate::task::WorkStatus::WaitingForReview), kind: Default::default(), paused: false,
+            });
+            db::save(&state.db_path, &tf).unwrap();
+        }
+
+        // Without a schedule the conversion is refused and nothing changes.
+        let response = patch_task_1(state.clone(), serde_json::json!({ "kind": "service" })).await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert!(!db::load(&state.db_path).unwrap().find_task(1).unwrap().is_service());
+
+        let body = serde_json::json!({ "kind": "service", "recurrence": "daily", "due": "2030-01-02", "work_status": "todo" });
+        let response = patch_task_1(state.clone(), body).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let json = body_json(response).await;
+        assert_eq!(json["kind"], "service");
+        assert_eq!(json["recurrence"], "daily");
+        assert_eq!(json["due_date"], "2030-01-02");
+        assert_eq!(json["work_status"], "todo");
+
+        // Turning it back into a task clears paused and failing.
+        {
+            let mut tf = db::load(&state.db_path).unwrap();
+            let t = tf.find_task_mut(1).unwrap();
+            t.paused = true;
+            t.work_status = Some(crate::task::WorkStatus::Failing);
+            db::save(&state.db_path, &tf).unwrap();
+        }
+        let response = patch_task_1(state.clone(), serde_json::json!({ "kind": "task" })).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let json = body_json(response).await;
+        assert_eq!(json["kind"], "task");
+        assert_eq!(json["paused"], false);
+        assert!(json["work_status"].is_null());
+
+        let response = patch_task_1(state, serde_json::json!({ "kind": "bogus" })).await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]

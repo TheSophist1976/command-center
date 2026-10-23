@@ -182,7 +182,7 @@ Valid values: `todo`, `in-progress`, `waiting-for-review`, `changes-requested`, 
 
 ## Services
 
-A service is a task with `kind: service`: a recurring agent job that needs no review. Every service must have a recurrence and a due date, and the due date always means "next run". A service can also be `paused`. Services are hidden from `task list`, the TUI and the web task views. They appear only in `task list --services`, `task service list` and the web Services screen.
+A service is a task with `kind: service`: a recurring agent job that needs no review. Every service must have a recurrence and a due date, and the due date always means "next run". A service can also be `paused`. Services are hidden from `task list`, the TUI and the web task views. They appear only in `task list --services`, `task service list` and the web Services screen. An existing task becomes a service with `task edit <id> --service` (give it `--recur` and `--due` if it lacks them), or with the Convert to service action in the web task inspector, which sends `kind: "service"` to `PATCH /api/tasks/:id` and resets the work status to `todo`.
 
 ```bash
 task service add "<title>" --recur <pattern> [--due <date>] [--agent <name>] [--instructions "<text>"]
