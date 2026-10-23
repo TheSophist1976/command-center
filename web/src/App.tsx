@@ -285,6 +285,19 @@ export default function App() {
     }
   }
 
+  // A service leaves the task lists, so drop it here and show it on the Services screen.
+  // The work status is reset to todo: a service in review or needs-input would never run.
+  async function handleConvertToService(id: number, schedule: { recurrence: string; due: string }) {
+    try {
+      await editTask(id, { kind: 'service', ...schedule, work_status: 'todo' });
+      setTasks((prev) => prev.filter((t) => t.id !== id));
+      setSelected(null);
+      if (!isMobile) setServicesOpen(true);
+    } catch (e) {
+      setError(String(e));
+    }
+  }
+
   function setQuickDue(task: Task, date: Date | null) {
     handleEditField(task.id, { due: date ? formatLocalDate(date) : '' });
   }
@@ -609,6 +622,7 @@ export default function App() {
     onOpenNote: handleOpenNote,
     onSaveNote: handleSaveNote,
     onUnlinkNote: handleUnlinkNote,
+    onConvertToService: (schedule: { recurrence: string; due: string }) => handleConvertToService(selected.id, schedule),
   };
 
   function groupDot(name: string) {

@@ -9,6 +9,7 @@ import { Linkify } from './Linkify';
 import { ReviewPanel } from './ReviewPanel';
 import { QuestionPanel } from './QuestionPanel';
 import { NotesSection } from './NotesSection';
+import { ConvertToService } from './ConvertToService';
 import { PriorityBadge, StatusPill } from './Badges';
 import { sectionLabelStyle } from '../styles';
 import { statusFor } from '../mockAgentStatus';
@@ -58,6 +59,8 @@ interface TaskDetailProps {
   onOpenNote: (slug: string) => void;
   onSaveNote: (slug: string, body: string) => Promise<void>;
   onUnlinkNote: (slug: string) => void;
+  /** Turn the task into a service; the button is hidden when not given. */
+  onConvertToService?: (schedule: { recurrence: string; due: string }) => Promise<void>;
 }
 
 /**
@@ -68,7 +71,7 @@ interface TaskDetailProps {
  */
 export function TaskDetail({
   task, today, mobile, showId = true, actions, onClose, agentOptions, review, question, notes,
-  onEdit, onSendFeedback, onSendAnswer, onCreateNote, onOpenNote, onSaveNote, onUnlinkNote,
+  onEdit, onSendFeedback, onSendAnswer, onCreateNote, onOpenNote, onSaveNote, onUnlinkNote, onConvertToService,
 }: TaskDetailProps) {
   const done = task.status === 'done';
   const agentStatus = task.agent ? statusFor(task.agent) : null;
@@ -264,6 +267,10 @@ export function TaskDetail({
       </div>
 
       <NotesSection notes={notes} onCreate={onCreateNote} onOpen={onOpenNote} onSave={onSaveNote} onUnlink={onUnlinkNote} touch={mobile} />
+
+      {onConvertToService && !done && task.kind !== 'service' && (
+        <ConvertToService key={task.id} task={task} today={today} onConvert={onConvertToService} />
+      )}
     </div>
   );
 }

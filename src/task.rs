@@ -406,6 +406,18 @@ impl Task {
         self.kind == TaskKind::Service
     }
 
+    /// Make the task a service or a normal task. Turning a service back into a
+    /// task also clears `paused` and a `failing` work status, which only services use.
+    pub fn set_kind(&mut self, kind: TaskKind) {
+        self.kind = kind;
+        if kind == TaskKind::Task {
+            self.paused = false;
+            if self.work_status == Some(WorkStatus::Failing) {
+                self.work_status = None;
+            }
+        }
+    }
+
     /// Check the service rules: a service must recur and have a due date,
     /// and only services may be `failing`.
     pub fn validate_kind(&self) -> Result<(), String> {
