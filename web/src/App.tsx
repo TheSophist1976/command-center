@@ -292,7 +292,7 @@ export default function App() {
       await editTask(id, { kind: 'service', ...schedule, work_status: 'todo' });
       setTasks((prev) => prev.filter((t) => t.id !== id));
       setSelected(null);
-      if (!isMobile) setServicesOpen(true);
+      setServicesOpen(true);
     } catch (e) {
       setError(String(e));
     }
@@ -778,8 +778,12 @@ export default function App() {
             onGroupBy={setGroupBy}
             onClose={() => setDrawerOpen(false)}
             onOpenSettings={() => { setDrawerOpen(false); setSettingsOpen(true); }}
+            failingServices={failingServices}
+            onOpenServices={() => { setDrawerOpen(false); setServicesOpen(true); }}
           />
         )}
+
+        {servicesOpen && <ServicesView mobile agents={agents} onClose={() => setServicesOpen(false)} />}
 
         {settingsOpen && (
           <SettingsDialog
