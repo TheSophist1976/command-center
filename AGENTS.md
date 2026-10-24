@@ -28,7 +28,7 @@ task next              # tasks you should work now, in order, one line each
 task next --json       # the full queue: your instructions, your memory, and every task with its notes
 ```
 
-`task next` uses `TASK_AGENT` (or the working directory) unless you pass `--agent <name>`, and `--limit N` caps the list. It applies the selection rules for you: only open tasks assigned to you; it **skips** tasks at `waiting-for-review` or `complete` (already handed back), tasks at `needs-input` (blocked on the human), and recurring tasks that are not due yet; it orders by due date (earliest first, undated last) and then priority.
+`task next` uses `TASK_AGENT` (or the working directory) unless you pass `--agent <name>`, and `--limit N` caps the list. It applies the selection rules for you: only open tasks assigned to you; it **skips** tasks at `waiting-for-review` (already handed back), tasks at `needs-input` (blocked on the human), and recurring tasks that are not due yet; it orders by due date (earliest first, undated last) and then priority.
 
 Each task in the JSON has a `pickup` value telling you why it is there:
 
@@ -178,7 +178,9 @@ Tasks have a `work_status` field, separate from open/done, so the human can trac
 task edit <id> --work-status in-progress
 ```
 
-Valid values: `todo`, `in-progress`, `waiting-for-review`, `changes-requested`, `needs-input`, `complete`, and `failing` for services only (aliases `to-do`, `in_progress`/`inprogress`, `review`, `changes`, `needs_input`, `done`, and `fail`/`failed` are also accepted).
+Valid values: `todo`, `in-progress`, `waiting-for-review`, `changes-requested`, `needs-input`, and `failing` for services only (aliases `to-do`, `in_progress`/`inprogress`, `review`, `changes`, `needs_input`, and `fail`/`failed` are also accepted; `complete` and `done` are retired aliases for `waiting-for-review`).
+
+Every state change goes through the lifecycle rules in `src/lifecycle.rs`, and an invalid move is refused with an error. With `TASK_AGENT` set you are the agent: you may set `in-progress`, `needs-input` and `waiting-for-review` (submit needs a linked note), and you may not run `task done`, `task reopen`, reset to `todo`, convert services, pause or resume services, or reassign a task to `human`. `changes-requested` is set only by the human's feedback or answer, and `failing` only by `task service run <id> --result failed`. A human may pass `--force` to `task edit` or `task reopen` to skip transition rules; it never sets an agent-only state.
 
 ## Services
 
@@ -226,7 +228,7 @@ The human can also answer from the web UI. That appends an `## Answer — <YYYY-
 
 **Update this as you work**, not just at the end — set `in-progress` when you start, `waiting-for-review` when you've finished and want the human to check your work before it's truly done.
 
-**`work_status: complete` does NOT mark the task done.** It's purely informational — the human still explicitly runs `task done <id>` to close the task out (see below). Don't skip `task done` because you set `work_status` to `complete`.
+**`work_status: waiting-for-review` does NOT mark the task done.** Only the human runs `task done <id>`; the CLI refuses it when `TASK_AGENT` is set.
 
 ### Completing a task
 
@@ -260,4 +262,4 @@ This prints the task's metadata, its description, and — if it has any — a `#
 
 - **Never guess or hand-construct a task id** — always use the id the CLI reports back to you (from `add`, `list`, or `show`).
 - **Never edit `tasks.db` with a text editor or by hand** — it's a SQLite database, not a text file; use the CLI for every read and write.
-- **Never treat `--work-status complete` as equivalent to `task done`** — they're independent fields. Set `work_status` to keep the human informed; still run `task done <id>` yourself when appropriate, or leave that to the human if that's their preferred workflow.
+- **Never treat a work status as equivalent to `task done`** — they're independent fields. Set `work_status` to keep the human informed; marking a task done is the human's move.

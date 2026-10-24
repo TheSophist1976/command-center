@@ -157,7 +157,7 @@ pub fn eligible<'a>(tasks: &'a [Task], agent: &str, today: NaiveDate) -> Vec<&'a
         .filter(|t| t.status == Status::Open)
         .filter(|t| !(t.is_service() && t.paused))
         .filter(|t| t.agent.as_deref().is_some_and(|a| a.eq_ignore_ascii_case(agent)))
-        .filter(|t| !matches!(t.work_status, Some(WorkStatus::WaitingForReview | WorkStatus::Complete | WorkStatus::NeedsInput)))
+        .filter(|t| !matches!(t.work_status, Some(WorkStatus::WaitingForReview | WorkStatus::NeedsInput)))
         .filter(|t| t.recurrence.is_none() || t.due_date.is_none_or(|d| d <= today))
         .collect();
     crate::commands::sort_by_due_then_priority(ready)
@@ -288,7 +288,7 @@ mod tests {
         let mut waiting = task(1, "Bot");
         waiting.work_status = Some(WorkStatus::WaitingForReview);
         let mut complete = task(2, "Bot");
-        complete.work_status = Some(WorkStatus::Complete);
+        complete.work_status = "complete".parse().ok();
         let mut blocked = task(3, "Bot");
         blocked.work_status = Some(WorkStatus::NeedsInput);
         let mut future_recurring = task(4, "Bot");

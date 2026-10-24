@@ -1264,43 +1264,20 @@ fn event_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut A
 
 /// Returns true if we should quit.
 fn toggle_task_status(app: &mut App, task_idx: usize) -> Result<(), String> {
-    let was_open = app.task_file.tasks[task_idx].status == Status::Open;
-    {
-        let task = &mut app.task_file.tasks[task_idx];
-        task.status = match task.status {
-            Status::Open => Status::Done,
-            Status::Done => Status::Open,
-        };
-        task.updated = Some(Utc::now());
-    }
-    // If we just completed a recurring task, spawn the next occurrence
-    if was_open {
-        let task = &app.task_file.tasks[task_idx];
-        if let Some(recur) = task.recurrence {
-            let next_due = crate::task::next_due_date(&recur, task.due_date);
-            let new_id = app.task_file.next_id;
-            app.task_file.next_id += 1;
-            let new_task = Task {
-                id: new_id,
-                title: task.title.clone(),
-                status: Status::Open,
-                priority: task.priority,
-                tags: task.tags.clone(),
-                created: Utc::now(),
-                updated: None,
-                description: task.description.clone(),
-                due_date: Some(next_due),
-                project: task.project.clone(),
-                recurrence: Some(recur),
-                notes: task.notes.clone(),
-                agent: task.agent.clone(),
-                effort: task.effort,
-                work_status: None,
-                instructions: task.instructions.clone(),
-            };
-            app.task_file.tasks.push(new_task);
-            app.status_message = Some(format!("Next occurrence: task {}, due {}", new_id, next_due));
+    use crate::lifecycle::{self, Actor, Event};
+    let today = chrono::Local::now().date_naive();
+    let id = app.task_file.tasks[task_idx].id;
+    if app.task_file.tasks[task_idx].status == Status::Open {
+        let c = lifecycle::complete(&mut app.task_file, id, Actor::Human, today)?;
+        if let Some(next) = c.spawned {
+            app.status_message = Some(format!(
+                "Next occurrence: task {}, due {}",
+                next.id,
+                next.due_date.map(|d| d.to_string()).unwrap_or_default()
+            ));
         }
+    } else {
+        lifecycle::apply(&mut app.task_file.tasks[task_idx], Event::Reopen, Actor::Human, false, today)?;
     }
     app.save()?;
     Ok(())
@@ -1989,6 +1966,8 @@ fn handle_input(app: &mut App, key: KeyCode, action: InputAction) -> Result<(), 
                                 agent: None,
                                 effort: None,
                                 work_status: None,
+                                kind: Default::default(),
+                                paused: false,
                             });
                             app.save()?;
                             app.clamp_selection();
