@@ -4,6 +4,7 @@ use std::str::FromStr;
 use chrono::Utc;
 
 use crate::db;
+use crate::lifecycle::{self, Actor, Event};
 use crate::parser;
 use crate::task::{Effort, Priority, Status, Task};
 
@@ -255,6 +256,20 @@ pub fn show(path: &Path, id: u32) -> Result<String, (i32, String)> {
 }
 
 pub fn edit(path: &Path, id: u32, args: EditArgs) -> Result<String, (i32, String)> {
+    edit_as(path, id, args, Actor::Human, false)
+}
+
+/// The actor running the CLI: an agent when TASK_AGENT is set.
+pub fn cli_actor() -> Actor {
+    if crate::agent::env_agent().is_some() { Actor::Agent } else { Actor::Human }
+}
+
+/// Edit a task. State changes (`work_status`, `service`) go through the
+/// lifecycle rules for `actor`; `force` (human only) skips transition rules.
+pub fn edit_as(path: &Path, id: u32, args: EditArgs, actor: Actor, force: bool) -> Result<String, (i32, String)> {
+    if actor == Actor::Agent && args.agent.as_deref().is_some_and(|a| a.eq_ignore_ascii_case("human")) {
+        return Err((1, format!("only a human can reassign task {} to human (TASK_AGENT is set)", id)));
+    }
     let mut task_file = db::begin(path).map_err(|e| (1, e))?;
     let today = chrono::Local::now().date_naive();
     let priority = args.priority.as_deref().map(Priority::from_str).transpose().map_err(|e| (1, e))?;
@@ -296,16 +311,17 @@ pub fn edit(path: &Path, id: u32, args: EditArgs) -> Result<String, (i32, String
     if let Some(e) = effort {
         t.effort = Some(e);
     }
-    if let Some(w) = work_status {
-        t.work_status = Some(w);
-    }
     if let Some(r) = recur {
         t.recurrence = Some(r);
     }
     match args.service {
-        Some(true) => t.set_kind(crate::task::TaskKind::Service),
-        Some(false) => t.set_kind(crate::task::TaskKind::Task),
+        Some(true) => lifecycle::apply(t, Event::ToService, actor, force, today).map_err(|e| (1, e))?,
+        Some(false) => lifecycle::apply(t, Event::ToTask, actor, force, today).map_err(|e| (1, e))?,
         None => {}
+    }
+    if let Some(w) = work_status {
+        let event = lifecycle::event_for_work_status(t, Some(w)).map_err(|e| (1, e))?;
+        lifecycle::apply(t, event, actor, force, today).map_err(|e| (1, e))?;
     }
     t.validate_kind().map_err(|e| (1, e))?;
     t.updated = Some(Utc::now());
@@ -316,68 +332,37 @@ pub fn edit(path: &Path, id: u32, args: EditArgs) -> Result<String, (i32, String
 }
 
 pub fn done(path: &Path, id: u32) -> Result<String, (i32, String)> {
-    let mut task_file = db::begin(path).map_err(|e| (1, e))?;
-    let idx = task_file
-        .tasks
-        .iter()
-        .position(|t| t.id == id)
-        .ok_or_else(|| (1, format!("Task {} not found", id)))?;
+    done_as(path, id, Actor::Human)
+}
 
-    if task_file.tasks[idx].is_service() {
-        return Err((1, format!(
-            "Task {} is a service and is never done: record runs with `task service run`, or use `task service pause` or `task rm`",
-            id
-        )));
-    }
-    if task_file.tasks[idx].status == Status::Done {
+pub fn done_as(path: &Path, id: u32, actor: Actor) -> Result<String, (i32, String)> {
+    let mut task_file = db::begin(path).map_err(|e| (1, e))?;
+    let today = chrono::Local::now().date_naive();
+    let c = lifecycle::complete(&mut task_file, id, actor, today).map_err(|e| (1, e))?;
+    if c.already_done {
         return Ok(format!("Task {} already done", id));
     }
-
-    task_file.tasks[idx].status = Status::Done;
-    task_file.tasks[idx].updated = Some(Utc::now());
-
-    let mut spawned = None;
-    if let Some(recur) = task_file.tasks[idx].recurrence {
-        let parent = task_file.tasks[idx].clone();
-        let next_due = crate::task::next_due_date(&recur, parent.due_date);
-        let new_id = task_file.next_id;
-        task_file.next_id += 1;
-        task_file.tasks.push(Task {
-            id: new_id,
-            title: parent.title.clone(),
-            status: Status::Open,
-            priority: parent.priority,
-            tags: parent.tags.clone(),
-            created: Utc::now(),
-            updated: None,
-            description: parent.description.clone(),
-            instructions: parent.instructions.clone(),
-            due_date: Some(next_due),
-            project: parent.project.clone(),
-            recurrence: Some(recur),
-            notes: parent.notes.clone(),
-            agent: parent.agent.clone(),
-            effort: parent.effort,
-            work_status: None, kind: Default::default(), paused: false,
-        });
-        spawned = Some((new_id, next_due));
-    }
-
     task_file.commit().map_err(|e| (1, e))?;
-    match spawned {
-        Some((new_id, next_due)) => Ok(format!(
+    match c.spawned {
+        Some(next) => Ok(format!(
             "Completed task {}. Next occurrence: task {}, due {}",
-            id, new_id, next_due
+            id,
+            next.id,
+            next.due_date.map(|d| d.to_string()).unwrap_or_default()
         )),
         None => Ok(format!("Completed task {}", id)),
     }
 }
 
 pub fn reopen(path: &Path, id: u32) -> Result<String, (i32, String)> {
+    reopen_as(path, id, Actor::Human, false)
+}
+
+pub fn reopen_as(path: &Path, id: u32, actor: Actor, force: bool) -> Result<String, (i32, String)> {
     let mut task_file = db::begin(path).map_err(|e| (1, e))?;
+    let today = chrono::Local::now().date_naive();
     let t = task_file.find_task_mut(id).ok_or_else(|| (1, format!("Task {} not found", id)))?;
-    t.status = Status::Open;
-    t.updated = Some(Utc::now());
+    lifecycle::apply(t, Event::Reopen, actor, force, today).map_err(|e| (1, e))?;
     task_file.commit().map_err(|e| (1, e))?;
     Ok(format!("Reopened task {}", id))
 }
@@ -416,8 +401,8 @@ pub fn service(path: &Path, cmd: crate::cli::ServiceCommand, caller: Option<&str
             };
             service_run(path, id, ok, summary, caller, today, json)
         }
-        S::Pause { id } => set_paused(path, id, true, today),
-        S::Resume { id } => set_paused(path, id, false, today),
+        S::Pause { id } => set_paused_as(path, id, true, today, cli_actor()),
+        S::Resume { id } => set_paused_as(path, id, false, today, cli_actor()),
         S::Runs { id, limit } => {
             load_service(path, id)?;
             let runs = db::list_runs(path, id, limit, None).map_err(|e| (1, e))?;
@@ -500,16 +485,15 @@ pub fn service_run(
             return Err((1, format!("Service {} belongs to {}, not {}", id, a, c)));
         }
     }
-    let (Some(recur), Some(due)) = (t.recurrence, t.due_date) else {
+    let Some(due) = t.due_date else {
         return Err((1, format!("Service {} has no recurrence or due date", id)));
     };
     if due > today {
         return Err((1, format!("Service {} is not due until {}", id, due)));
     }
-    let next = crate::task::next_due_after(&recur, due, today, false);
-    t.due_date = Some(next);
-    t.work_status = if ok { None } else { Some(crate::task::WorkStatus::Failing) };
-    t.updated = Some(Utc::now());
+    let actor = if caller.is_some() { Actor::Agent } else { Actor::Human };
+    lifecycle::apply(t, if ok { Event::RunOk } else { Event::RunFailed }, actor, false, today).map_err(|e| (1, e))?;
+    let next = t.due_date.unwrap_or(due);
     let mut run = db::ServiceRun {
         id: 0,
         task_id: id,
@@ -531,18 +515,14 @@ pub fn service_run(
 /// Pause or resume a service. Resuming a service whose date has passed moves
 /// it to its first scheduled date on or after today.
 pub fn set_paused(path: &Path, id: u32, paused: bool, today: chrono::NaiveDate) -> Result<String, (i32, String)> {
+    set_paused_as(path, id, paused, today, Actor::Human)
+}
+
+pub fn set_paused_as(path: &Path, id: u32, paused: bool, today: chrono::NaiveDate, actor: Actor) -> Result<String, (i32, String)> {
     let mut task_file = db::begin(path).map_err(|e| (1, e))?;
     let t = task_file.find_task_mut(id).ok_or_else(|| (1, format!("Task {} not found", id)))?;
-    if !t.is_service() {
-        return Err((1, format!("Task {} is not a service", id)));
-    }
-    t.paused = paused;
-    if !paused {
-        if let (Some(recur), Some(due)) = (t.recurrence, t.due_date) {
-            t.due_date = Some(crate::task::next_due_after(&recur, due, today, true));
-        }
-    }
-    t.updated = Some(Utc::now());
+    let event = if paused { Event::Pause } else { Event::Resume };
+    lifecycle::apply(t, event, actor, false, today).map_err(|e| (1, e))?;
     let msg = if paused {
         format!("Paused service {}", id)
     } else {

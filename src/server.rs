@@ -12,6 +12,7 @@ use std::str::FromStr;
 
 use crate::commands::filter_and_sort_tasks;
 use crate::db;
+use crate::lifecycle::{self, Actor, Event};
 use crate::task::{Status, Task};
 
 #[derive(Clone)]
@@ -69,7 +70,7 @@ async fn validate_host(request: axum::extract::Request, next: Next) -> Response 
 async fn list_tasks(
     State(state): State<Arc<AppState>>,
     Query(query): Query<ListQuery>,
-) -> Result<Json<Vec<Task>>, (StatusCode, Json<serde_json::Value>)> {
+) -> Result<Json<Vec<TaskView>>, (StatusCode, Json<serde_json::Value>)> {
     let task_file = db::load(&state.db_path)
         .map_err(|e| app_error(StatusCode::INTERNAL_SERVER_ERROR, e))?;
 
@@ -91,7 +92,7 @@ async fn list_tasks(
 
     // Services live on the Services screen (/api/services), never in task lists.
     let rows: Vec<Task> = task_file.tasks.into_iter().filter(|t| !t.is_service()).collect();
-    let tasks: Vec<Task> = filter_and_sort_tasks(
+    let tasks: Vec<TaskView> = filter_and_sort_tasks(
         &rows,
         status,
         query.agent.as_deref(),
@@ -100,16 +101,32 @@ async fn list_tasks(
         due_before,
     )
     .into_iter()
-    .cloned()
+    .map(|t| t.clone().into())
     .collect();
 
     Ok(Json(tasks))
 }
 
+/// A task plus its lifecycle state and the moves the human may make now. The
+/// web UI shows controls from `allowed_actions` and never decides them itself.
+#[derive(Serialize)]
+pub struct TaskView {
+    #[serde(flatten)]
+    pub task: Task,
+    pub state: lifecycle::State,
+    pub allowed_actions: Vec<Event>,
+}
+
+impl From<Task> for TaskView {
+    fn from(task: Task) -> Self {
+        TaskView { state: lifecycle::state(&task), allowed_actions: lifecycle::allowed_events(&task, Actor::Human), task }
+    }
+}
+
 #[derive(Serialize)]
 pub struct ServiceView {
     #[serde(flatten)]
-    pub task: Task,
+    pub task: TaskView,
     pub last_run: Option<db::ServiceRun>,
     pub run_count: i64,
 }
@@ -129,7 +146,7 @@ async fn list_services(
                 Some((r, n)) => (Some(r), n),
                 None => (None, 0),
             };
-            ServiceView { task: t.clone(), last_run, run_count }
+            ServiceView { task: t.clone().into(), last_run, run_count }
         })
         .collect();
     Ok(Json(out))
@@ -212,13 +229,13 @@ async fn list_service_runs(
 async fn get_task(
     State(state): State<Arc<AppState>>,
     AxumPath(id): AxumPath<u32>,
-) -> Result<Json<Task>, (StatusCode, Json<serde_json::Value>)> {
+) -> Result<Json<TaskView>, (StatusCode, Json<serde_json::Value>)> {
     let task_file = db::load(&state.db_path)
         .map_err(|e| app_error(StatusCode::INTERNAL_SERVER_ERROR, e))?;
     task_file
         .find_task(id)
         .cloned()
-        .map(Json)
+        .map(|t| Json(t.into()))
         .ok_or_else(|| app_error(StatusCode::NOT_FOUND, format!("Task {} not found", id)))
 }
 
@@ -373,17 +390,12 @@ async fn edit_task(
         .transpose()
         .map_err(|e| app_error(StatusCode::BAD_REQUEST, e))?;
     let tags = req.tags.as_deref().map(|s| parse_csv(Some(s)));
-    // Freeze-before-review (task 710): a handoff into waiting-for-review pins the
-    // exact commit being reviewed into the review-thread note, so feedback can cite
-    // "commit <sha>" instead of "the current state of X", which goes stale if the
-    // artifact changes again before it's read.
-    let entering_review = matches!(work_status, Some(Some(crate::task::WorkStatus::WaitingForReview)));
 
     let _guard = state.write_lock.lock().await;
     let mut task_file = db::begin(&state.db_path)
         .map_err(|e| app_error(StatusCode::INTERNAL_SERVER_ERROR, e))?;
 
-    let (updated_task, snapshot_project) = {
+    let updated_task = {
         let t = task_file
             .find_task_mut(id)
             .ok_or_else(|| app_error(StatusCode::NOT_FOUND, format!("Task {} not found", id)))?;
@@ -421,36 +433,35 @@ async fn edit_task(
         if let Some(e) = effort {
             t.effort = Some(e);
         }
-        if let Some(w) = work_status {
-            t.work_status = w;
-        }
         if let Some(r) = recurrence {
             t.recurrence = r;
         }
+        // State moves go through the lifecycle, in order: review handoff,
+        // kind conversion, then an explicit work status.
+        let mut events = Vec::new();
         match review_transition {
-            Some(ReviewHandoff::Defer) => {
-                t.agent = Some("human".to_string());
-                t.work_status = None;
-            }
-            Some(ReviewHandoff::Reassign) => {
-                t.work_status = Some(crate::task::WorkStatus::Todo);
-            }
+            Some(ReviewHandoff::Defer) => events.push(Event::Defer),
+            Some(ReviewHandoff::Reassign) => events.push(Event::Reset),
             None => {}
         }
-        if let Some(k) = kind {
-            t.set_kind(k);
+        match kind {
+            Some(k) if k != t.kind => {
+                events.push(if k == crate::task::TaskKind::Service { Event::ToService } else { Event::ToTask })
+            }
+            _ => {}
+        }
+        // Resending the current status (a full edit form) is not a move.
+        if let Some(w) = work_status.filter(|w| *w != t.work_status) {
+            events.push(lifecycle::event_for_work_status(t, w).map_err(|e| app_error(StatusCode::BAD_REQUEST, e))?);
+        }
+        for event in events {
+            lifecycle::apply(t, event, Actor::Human, false, today).map_err(|e| app_error(StatusCode::BAD_REQUEST, e))?;
         }
         t.validate_kind().map_err(|e| app_error(StatusCode::BAD_REQUEST, e))?;
         t.updated = Some(chrono::Utc::now());
-        (t.clone(), t.project.clone())
+        t.clone()
     };
 
-    if entering_review {
-        record_review_snapshot(&mut task_file, &state, id, snapshot_project.as_deref())
-            .map_err(|e| app_error(StatusCode::INTERNAL_SERVER_ERROR, e))?;
-    }
-
-    let updated_task = task_file.find_task(id).cloned().unwrap_or(updated_task);
     task_file.commit().map_err(|e| app_error(StatusCode::INTERNAL_SERVER_ERROR, e))?;
     Ok(Json(updated_task))
 }
@@ -487,56 +498,6 @@ fn review_handoff(
     }
 }
 
-/// Captures the project's current git commit (best-effort — silently does nothing if
-/// `project` isn't set, isn't a git repo, or `git` isn't available) and records it in
-/// the task's review-thread note, creating that note if it doesn't exist yet. Links
-/// the note to the task the same way `add_task_review_feedback` does.
-fn record_review_snapshot(
-    task_file: &mut crate::task::TaskFile,
-    state: &AppState,
-    id: u32,
-    project: Option<&str>,
-) -> Result<(), String> {
-    let Some(project) = project else { return Ok(()) };
-    let Some(sha) = git_head_sha(project) else { return Ok(()) };
-
-    let dir = notes_dir(state);
-    let slug = review_thread_slug(id);
-    let note_path = dir.join(format!("{}.md", slug));
-
-    if !note_path.exists() {
-        let task_title = task_file.find_task(id).map(|t| t.title.clone()).unwrap_or_default();
-        crate::note::write_note(
-            &dir,
-            &crate::note::Note { slug: slug.clone(), title: format!("Review — {}", task_title), body: String::new() },
-        )?;
-    }
-
-    let today = chrono::Local::now().date_naive().format("%Y-%m-%d");
-    let section = format!("## Snapshot — {}\n\nPinned for review at commit `{}` in `{}`.", today, sha, project);
-    crate::note::append_to_note(&dir, &slug, &section)?;
-
-    if let Some(t) = task_file.find_task_mut(id) {
-        if !t.notes.contains(&slug) {
-            t.notes.push(slug);
-        }
-    }
-    Ok(())
-}
-
-fn git_head_sha(project: &str) -> Option<String> {
-    let dir = crate::config::expand_tilde(project);
-    let output = std::process::Command::new("git")
-        .args(["-C", &dir.to_string_lossy(), "rev-parse", "--short", "HEAD"])
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let sha = String::from_utf8(output.stdout).ok()?.trim().to_string();
-    if sha.is_empty() { None } else { Some(sha) }
-}
-
 #[derive(Serialize)]
 pub struct DoneResponse {
     pub completed: Task,
@@ -550,53 +511,16 @@ async fn done_task(
     let _guard = state.write_lock.lock().await;
     let mut task_file = db::begin(&state.db_path)
         .map_err(|e| app_error(StatusCode::INTERNAL_SERVER_ERROR, e))?;
-    let idx = task_file
-        .tasks
-        .iter()
-        .position(|t| t.id == id)
-        .ok_or_else(|| app_error(StatusCode::NOT_FOUND, format!("Task {} not found", id)))?;
-
-    if task_file.tasks[idx].is_service() {
-        return Err(app_error(StatusCode::BAD_REQUEST, format!("Task {} is a service and is never done; pause or delete it instead", id)));
+    if task_file.find_task(id).is_none() {
+        return Err(app_error(StatusCode::NOT_FOUND, format!("Task {} not found", id)));
     }
-    if task_file.tasks[idx].status == Status::Done {
-        return Ok(Json(DoneResponse { completed: task_file.tasks[idx].clone(), spawned: None }));
+    let c = lifecycle::complete(&mut task_file, id, Actor::Human, chrono::Local::now().date_naive())
+        .map_err(|e| app_error(StatusCode::BAD_REQUEST, e))?;
+    let completed = task_file.find_task(id).cloned().expect("checked above");
+    if !c.already_done {
+        task_file.commit().map_err(|e| app_error(StatusCode::INTERNAL_SERVER_ERROR, e))?;
     }
-
-    task_file.tasks[idx].status = Status::Done;
-    task_file.tasks[idx].updated = Some(chrono::Utc::now());
-
-    let mut spawned = None;
-    if let Some(recur) = task_file.tasks[idx].recurrence {
-        let parent = task_file.tasks[idx].clone();
-        let next_due = crate::task::next_due_date(&recur, parent.due_date);
-        let new_id = task_file.next_id;
-        task_file.next_id += 1;
-        let new_task = Task {
-            id: new_id,
-            title: parent.title.clone(),
-            status: Status::Open,
-            priority: parent.priority,
-            tags: parent.tags.clone(),
-            created: chrono::Utc::now(),
-            updated: None,
-            description: parent.description.clone(),
-            instructions: parent.instructions.clone(),
-            due_date: Some(next_due),
-            project: parent.project.clone(),
-            recurrence: Some(recur),
-            notes: parent.notes.clone(),
-            agent: parent.agent.clone(),
-            effort: parent.effort,
-            work_status: None, kind: Default::default(), paused: false,
-        };
-        task_file.tasks.push(new_task.clone());
-        spawned = Some(new_task);
-    }
-
-    let completed = task_file.tasks[idx].clone();
-    task_file.commit().map_err(|e| app_error(StatusCode::INTERNAL_SERVER_ERROR, e))?;
-    Ok(Json(DoneResponse { completed, spawned }))
+    Ok(Json(DoneResponse { completed, spawned: c.spawned }))
 }
 
 async fn reopen_task(
@@ -610,8 +534,8 @@ async fn reopen_task(
         let t = task_file
             .find_task_mut(id)
             .ok_or_else(|| app_error(StatusCode::NOT_FOUND, format!("Task {} not found", id)))?;
-        t.status = Status::Open;
-        t.updated = Some(chrono::Utc::now());
+        lifecycle::apply(t, Event::Reopen, Actor::Human, false, chrono::Local::now().date_naive())
+            .map_err(|e| app_error(StatusCode::CONFLICT, e))?;
         t.clone()
     };
     task_file.commit().map_err(|e| app_error(StatusCode::INTERNAL_SERVER_ERROR, e))?;
@@ -916,6 +840,31 @@ pub struct EditNoteRequest {
     pub body: Option<String>,
 }
 
+/// Check a human event against the lifecycle on a copy of the task, so a
+/// refused move is reported before any note is written.
+fn apply_event_to_copy(
+    task_file: &crate::task::TaskFile,
+    id: u32,
+    event: Event,
+) -> Result<Task, (StatusCode, Json<serde_json::Value>)> {
+    let mut t = task_file
+        .find_task(id)
+        .cloned()
+        .ok_or_else(|| app_error(StatusCode::NOT_FOUND, format!("Task {} not found", id)))?;
+    lifecycle::apply(&mut t, event, Actor::Human, false, chrono::Local::now().date_naive())
+        .map_err(|e| app_error(StatusCode::CONFLICT, e))?;
+    Ok(t)
+}
+
+fn store_with_note(task_file: &mut crate::task::TaskFile, mut updated: Task, slug: &str) {
+    if !updated.notes.iter().any(|s| s == slug) {
+        updated.notes.push(slug.to_string());
+    }
+    if let Some(t) = task_file.find_task_mut(updated.id) {
+        *t = updated;
+    }
+}
+
 async fn add_task_review_feedback(
     State(state): State<Arc<AppState>>,
     AxumPath(id): AxumPath<u32>,
@@ -934,16 +883,12 @@ async fn add_task_review_feedback(
     let slug = review_thread_slug(id);
     let note_path = dir.join(format!("{}.md", slug));
 
-    let task_title = task_file
-        .find_task(id)
-        .ok_or_else(|| app_error(StatusCode::NOT_FOUND, format!("Task {} not found", id)))?
-        .title
-        .clone();
+    let updated = apply_event_to_copy(&task_file, id, Event::Feedback)?;
 
     if !note_path.exists() {
         crate::note::write_note(
             &dir,
-            &crate::note::Note { slug: slug.clone(), title: format!("Review — {}", task_title), body: String::new() },
+            &crate::note::Note { slug: slug.clone(), title: format!("Review — {}", updated.title), body: String::new() },
         )
         .map_err(|e| app_error(StatusCode::INTERNAL_SERVER_ERROR, e))?;
     }
@@ -953,14 +898,7 @@ async fn add_task_review_feedback(
     crate::note::append_to_note(&dir, &slug, &section)
         .map_err(|e| app_error(StatusCode::INTERNAL_SERVER_ERROR, e))?;
 
-    {
-        let t = task_file.find_task_mut(id).expect("checked above");
-        if !t.notes.contains(&slug) {
-            t.notes.push(slug.clone());
-        }
-        t.work_status = Some(crate::task::WorkStatus::ChangesRequested);
-        t.updated = Some(chrono::Utc::now());
-    }
+    store_with_note(&mut task_file, updated, &slug);
     task_file.commit()
         .map_err(|e| app_error(StatusCode::INTERNAL_SERVER_ERROR, e))?;
 
@@ -988,16 +926,12 @@ async fn answer_task_question(
     let slug = question_slug(id);
     let note_path = dir.join(format!("{}.md", slug));
 
-    let task_title = task_file
-        .find_task(id)
-        .ok_or_else(|| app_error(StatusCode::NOT_FOUND, format!("Task {} not found", id)))?
-        .title
-        .clone();
+    let updated = apply_event_to_copy(&task_file, id, Event::Answer)?;
 
     if !note_path.exists() {
         crate::note::write_note(
             &dir,
-            &crate::note::Note { slug: slug.clone(), title: format!("Question — {}", task_title), body: String::new() },
+            &crate::note::Note { slug: slug.clone(), title: format!("Question — {}", updated.title), body: String::new() },
         )
         .map_err(|e| app_error(StatusCode::INTERNAL_SERVER_ERROR, e))?;
     }
@@ -1007,14 +941,7 @@ async fn answer_task_question(
     crate::note::append_to_note(&dir, &slug, &section)
         .map_err(|e| app_error(StatusCode::INTERNAL_SERVER_ERROR, e))?;
 
-    {
-        let t = task_file.find_task_mut(id).expect("checked above");
-        if !t.notes.contains(&slug) {
-            t.notes.push(slug.clone());
-        }
-        t.work_status = Some(crate::task::WorkStatus::ChangesRequested);
-        t.updated = Some(chrono::Utc::now());
-    }
+    store_with_note(&mut task_file, updated, &slug);
     task_file.commit()
         .map_err(|e| app_error(StatusCode::INTERNAL_SERVER_ERROR, e))?;
 
@@ -1830,7 +1757,8 @@ mod tests {
         assert_eq!(json["kind"], "service");
         assert_eq!(json["recurrence"], "daily");
         assert_eq!(json["due_date"], "2030-01-02");
-        assert_eq!(json["work_status"], "todo");
+        // A new service always starts scheduled; services never use todo.
+        assert!(json["work_status"].is_null());
 
         // Turning it back into a task clears paused and failing.
         {
@@ -1845,7 +1773,7 @@ mod tests {
         let json = body_json(response).await;
         assert_eq!(json["kind"], "task");
         assert_eq!(json["paused"], false);
-        assert!(json["work_status"].is_null());
+        assert_eq!(json["work_status"], "todo");
 
         let response = patch_task_1(state, serde_json::json!({ "kind": "bogus" })).await;
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
@@ -1964,8 +1892,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_explicit_work_status_wins_over_review_handoff() {
-        let json = patch_review_task(serde_json::json!({ "agent": "other-bot", "work_status": "in-progress" })).await;
-        assert_eq!(json["work_status"], "in-progress");
+        let due = days_from_today(20).format("%Y-%m-%d").to_string();
+        let json = patch_review_task(serde_json::json!({ "due": due, "work_status": "todo" })).await;
+        assert_eq!(json["work_status"], "todo");
+        assert_eq!(json["agent"], "bot");
     }
 
     #[tokio::test]
@@ -2016,62 +1946,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_edit_task_entering_review_pins_commit_snapshot() {
-        let (_dir, state) = make_state();
-        let repo = tempdir().unwrap();
-        std::process::Command::new("git").args(["init", "-q"]).current_dir(repo.path()).status().unwrap();
-        std::process::Command::new("git").args(["config", "user.email", "a@b.c"]).current_dir(repo.path()).status().unwrap();
-        std::process::Command::new("git").args(["config", "user.name", "Test"]).current_dir(repo.path()).status().unwrap();
-        std::fs::write(repo.path().join("f.txt"), "hi").unwrap();
-        std::process::Command::new("git").args(["add", "."]).current_dir(repo.path()).status().unwrap();
-        std::process::Command::new("git").args(["commit", "-q", "-m", "init"]).current_dir(repo.path()).status().unwrap();
-        let expected_sha = String::from_utf8(
-            std::process::Command::new("git").args(["rev-parse", "--short", "HEAD"]).current_dir(repo.path()).output().unwrap().stdout,
-        )
-        .unwrap()
-        .trim()
-        .to_string();
-
-        {
-            let mut tf = crate::task::TaskFile::new();
-            tf.tasks.push(crate::task::Task {
-                id: 1, title: "Ship it".to_string(), status: Status::Open, priority: crate::task::Priority::Medium,
-                tags: Vec::new(), created: chrono::Utc::now(), updated: None, description: None, instructions: None,
-                due_date: None, project: Some(repo.path().to_string_lossy().to_string()), recurrence: None,
-                notes: Vec::new(), agent: None, effort: None, work_status: None, kind: Default::default(), paused: false,
-            });
-            db::save(&state.db_path, &tf).unwrap();
-        }
-        let app = router(state.clone());
-        let body = serde_json::json!({ "work_status": "waiting-for-review" });
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .method("PATCH")
-                    .uri("/api/tasks/1")
-                    .header("host", "127.0.0.1")
-                    .header("content-type", "application/json")
-                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-        let json = body_json(response).await;
-        assert!(json["notes"].as_array().unwrap().iter().any(|n| n == "task-1-review-thread"));
-
-        let tf = db::load(&state.db_path).unwrap();
-        let task = tf.find_task(1).unwrap();
-        assert!(task.notes.contains(&"task-1-review-thread".to_string()));
-
-        let note_path = state.db_path.parent().unwrap().join("Notes").join("task-1-review-thread.md");
-        let note = crate::note::read_note(&note_path).unwrap();
-        assert!(note.body.contains("## Snapshot —"));
-        assert!(note.body.contains(&format!("commit `{}`", expected_sha)));
-    }
-
-    #[tokio::test]
-    async fn test_edit_task_entering_review_without_project_is_a_noop_snapshot() {
+    async fn test_api_refuses_a_human_setting_waiting_for_review() {
         let (_dir, state) = make_state();
         {
             let mut tf = crate::task::TaskFile::new();
@@ -2097,10 +1972,10 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
         let json = body_json(response).await;
-        assert_eq!(json["work_status"], "waiting-for-review");
-        assert!(json["notes"].as_array().map(|a| a.is_empty()).unwrap_or(true));
+        assert!(json["error"].as_str().unwrap().contains("set by the agent"));
+        assert_eq!(db::load(&state.db_path).unwrap().tasks[0].work_status, None);
     }
 
     #[tokio::test]
@@ -2142,7 +2017,7 @@ mod tests {
                 id: 1, title: "Track me".to_string(), status: Status::Open, priority: crate::task::Priority::Medium,
                 tags: Vec::new(), created: chrono::Utc::now(), updated: None, description: None, instructions: None,
                 due_date: None, project: None, recurrence: None, notes: Vec::new(), agent: None, effort: None,
-                work_status: Some(crate::task::WorkStatus::Complete), kind: Default::default(), paused: false,
+                work_status: Some(crate::task::WorkStatus::WaitingForReview), kind: Default::default(), paused: false,
             });
             db::save(&state.db_path, &tf).unwrap();
         }
@@ -2162,7 +2037,8 @@ mod tests {
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
         let json = body_json(response).await;
-        assert!(json["work_status"].is_null());
+        // An explicit clear is a reset, which leaves the task todo.
+        assert_eq!(json["work_status"], "todo");
     }
 
     #[tokio::test]
@@ -2934,7 +2810,7 @@ mod tests {
             tf.tasks.push(crate::task::Task {
                 id: 1, title: "Multi-round".to_string(), status: Status::Open, priority: crate::task::Priority::Medium,
                 tags: Vec::new(), created: chrono::Utc::now(), updated: None, description: None, instructions: None,
-                due_date: None, project: None, recurrence: None, notes: Vec::new(), agent: None, effort: None, work_status: None, kind: Default::default(), paused: false,
+                due_date: None, project: None, recurrence: None, notes: Vec::new(), agent: None, effort: None, work_status: Some(crate::task::WorkStatus::WaitingForReview), kind: Default::default(), paused: false,
             });
             db::save(&state.db_path, &tf).unwrap();
         }
@@ -3006,6 +2882,59 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_post_task_review_refused_on_a_todo_task_without_writing_a_note() {
+        let (_dir, state) = make_state();
+        {
+            let mut tf = crate::task::TaskFile::new();
+            let mut t = sample_task_with_note();
+            t.work_status = None;
+            tf.tasks.push(t);
+            db::save(&state.db_path, &tf).unwrap();
+        }
+        let response = router(state.clone())
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/tasks/1/review")
+                    .header("host", "127.0.0.1")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&serde_json::json!({ "text": "hi" })).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        assert!(!state.db_path.parent().unwrap().join("Notes").join("task-1-review-thread.md").exists());
+        assert_eq!(db::load(&state.db_path).unwrap().tasks[0].work_status, None);
+    }
+
+    fn sample_task_with_note() -> crate::task::Task {
+        crate::task::Task {
+            id: 1, title: "T".to_string(), status: Status::Open, priority: crate::task::Priority::Medium,
+            tags: Vec::new(), created: chrono::Utc::now(), updated: None, description: None, instructions: None,
+            due_date: None, project: None, recurrence: None, notes: vec!["result".to_string()], agent: Some("bot".to_string()),
+            effort: None, work_status: Some(crate::task::WorkStatus::WaitingForReview), kind: Default::default(), paused: false,
+        }
+    }
+
+    #[tokio::test]
+    async fn test_task_api_reports_state_and_allowed_actions() {
+        let (_dir, state) = make_state();
+        {
+            let mut tf = crate::task::TaskFile::new();
+            tf.tasks.push(sample_task_with_note());
+            db::save(&state.db_path, &tf).unwrap();
+        }
+        let response = router(state)
+            .oneshot(Request::builder().uri("/api/tasks/1").header("host", "127.0.0.1").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let json = body_json(response).await;
+        assert_eq!(json["state"], "waiting-for-review");
+        assert_eq!(json["allowed_actions"], serde_json::json!(["feedback", "done", "reset", "defer", "to-service"]));
+    }
+
+    #[tokio::test]
     async fn test_post_task_review_links_note_to_task_without_duplicating() {
         let (_dir, state) = make_state();
         {
@@ -3013,7 +2942,7 @@ mod tests {
             tf.tasks.push(crate::task::Task {
                 id: 1, title: "T".to_string(), status: Status::Open, priority: crate::task::Priority::Medium,
                 tags: Vec::new(), created: chrono::Utc::now(), updated: None, description: None, instructions: None,
-                due_date: None, project: None, recurrence: None, notes: Vec::new(), agent: None, effort: None, work_status: None, kind: Default::default(), paused: false,
+                due_date: None, project: None, recurrence: None, notes: Vec::new(), agent: None, effort: None, work_status: Some(crate::task::WorkStatus::WaitingForReview), kind: Default::default(), paused: false,
             });
             db::save(&state.db_path, &tf).unwrap();
         }
