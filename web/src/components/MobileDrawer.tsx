@@ -1,4 +1,4 @@
-import { Terminal } from 'lucide-react';
+import { Repeat, Terminal } from 'lucide-react';
 import type { AgentProfile, Task } from '../types';
 import { ALL_FILTER_ITEMS, GROUP_BY_OPTIONS, countForFilter, type DueFilter, type GroupBy } from '../filters';
 import { statusColor, statusFor } from '../mockAgentStatus';
@@ -15,9 +15,12 @@ interface MobileDrawerProps {
   onGroupBy: (g: GroupBy) => void;
   onClose: () => void;
   onOpenSettings: () => void;
+  /** Number of failing, unpaused services, shown next to the Services entry. */
+  failingServices: number;
+  onOpenServices: () => void;
 }
 
-export function MobileDrawer({ tasks, today, agents, filter, groupBy, onFilter, onGroupBy, onClose, onOpenSettings }: MobileDrawerProps) {
+export function MobileDrawer({ tasks, today, agents, filter, groupBy, onFilter, onGroupBy, onClose, onOpenSettings, failingServices, onOpenServices }: MobileDrawerProps) {
   return (
     <>
       <div onClick={onClose} style={{ position: 'fixed', inset: 0, zIndex: 30, background: 'rgba(0, 0, 0, 0.5)' }} />
@@ -58,6 +61,20 @@ export function MobileDrawer({ tasks, today, agents, filter, groupBy, onFilter, 
             );
           })}
         </nav>
+        <div style={{ padding: '0 10px', marginBottom: 16 }}>
+          <div
+            onClick={onOpenServices}
+            style={{ display: 'flex', alignItems: 'center', gap: 12, height: 44, padding: '0 12px', borderRadius: 5, cursor: 'pointer' }}
+          >
+            <Repeat size={18} color="var(--fg-4)" />
+            <span style={{ flex: 1, fontSize: 15, color: 'var(--fg-3)' }}>Services</span>
+            {failingServices > 0 && (
+              <span title="Failing services" style={{ fontFamily: 'var(--font-mono)', fontSize: 12.5, color: 'var(--danger, #e5484d)', fontWeight: 600 }}>
+                {failingServices}
+              </span>
+            )}
+          </div>
+        </div>
         <div style={{ ...sectionLabelStyle, padding: '0 22px 8px' }}>Group by</div>
         <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, padding: '0 20px 18px' }}>
           {GROUP_BY_OPTIONS.map((o) => {
