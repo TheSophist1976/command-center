@@ -39,7 +39,6 @@ pub enum WorkStatus {
     WaitingForReview,
     ChangesRequested,
     NeedsInput,
-    Complete,
     Failing,
 }
 
@@ -51,7 +50,6 @@ impl std::fmt::Display for WorkStatus {
             WorkStatus::WaitingForReview => write!(f, "waiting-for-review"),
             WorkStatus::ChangesRequested => write!(f, "changes-requested"),
             WorkStatus::NeedsInput => write!(f, "needs-input"),
-            WorkStatus::Complete => write!(f, "complete"),
             WorkStatus::Failing => write!(f, "failing"),
         }
     }
@@ -63,13 +61,13 @@ impl std::str::FromStr for WorkStatus {
         match s.to_lowercase().as_str() {
             "todo" | "to-do" => Ok(WorkStatus::Todo),
             "in-progress" | "in_progress" | "inprogress" => Ok(WorkStatus::InProgress),
-            "waiting-for-review" | "review" => Ok(WorkStatus::WaitingForReview),
+            // `complete` is a retired alias: it always meant "handed back for review".
+            "waiting-for-review" | "review" | "complete" | "done" => Ok(WorkStatus::WaitingForReview),
             "changes-requested" | "changes_requested" | "changesrequested" | "changes" => Ok(WorkStatus::ChangesRequested),
             "needs-input" | "needs_input" | "needsinput" | "needs input" => Ok(WorkStatus::NeedsInput),
-            "complete" | "done" => Ok(WorkStatus::Complete),
             "failing" | "fail" | "failed" => Ok(WorkStatus::Failing),
             _ => Err(format!(
-                "Invalid work status: '{}'. Valid values: todo, in-progress, waiting-for-review, changes-requested, needs-input, complete, failing",
+                "Invalid work status: '{}'. Valid values: todo, in-progress, waiting-for-review (alias complete), changes-requested, needs-input, failing",
                 s
             )),
         }
@@ -404,18 +402,6 @@ pub struct Task {
 impl Task {
     pub fn is_service(&self) -> bool {
         self.kind == TaskKind::Service
-    }
-
-    /// Make the task a service or a normal task. Turning a service back into a
-    /// task also clears `paused` and a `failing` work status, which only services use.
-    pub fn set_kind(&mut self, kind: TaskKind) {
-        self.kind = kind;
-        if kind == TaskKind::Task {
-            self.paused = false;
-            if self.work_status == Some(WorkStatus::Failing) {
-                self.work_status = None;
-            }
-        }
     }
 
     /// Check the service rules: a service must recur and have a due date,
@@ -1162,7 +1148,7 @@ mod tests {
         assert_eq!(WorkStatus::from_str("todo").unwrap(), WorkStatus::Todo);
         assert_eq!(WorkStatus::from_str("in-progress").unwrap(), WorkStatus::InProgress);
         assert_eq!(WorkStatus::from_str("waiting-for-review").unwrap(), WorkStatus::WaitingForReview);
-        assert_eq!(WorkStatus::from_str("complete").unwrap(), WorkStatus::Complete);
+        assert_eq!(WorkStatus::from_str("complete").unwrap(), WorkStatus::WaitingForReview);
         assert_eq!(WorkStatus::from_str("review").unwrap(), WorkStatus::WaitingForReview);
         assert!(WorkStatus::from_str("bogus").is_err());
         assert_eq!(WorkStatus::InProgress.to_string(), "in-progress");

@@ -115,6 +115,9 @@ fn open_conn(path: &Path) -> Result<Connection, String> {
         .ok();
     conn.execute("ALTER TABLE tasks ADD COLUMN paused INTEGER", [])
         .ok();
+    // `complete` is retired as a stored work status; it meant waiting-for-review.
+    conn.execute("UPDATE tasks SET work_status = 'waiting-for-review' WHERE work_status = 'complete'", [])
+        .map_err(|e| format!("Failed to migrate work status: {}", e))?;
     Ok(conn)
 }
 

@@ -324,11 +324,11 @@ fn run(cli: Cli) -> Result<(), (i32, String)> {
             Ok(())
         }
 
-        Some(Command::Edit { id, title, priority, due, project, tags, agent, description, instructions, effort, work_status, recur, service, no_service }) => {
+        Some(Command::Edit { id, title, priority, due, project, tags, agent, description, instructions, effort, work_status, recur, service, no_service, force }) => {
             let service = if service { Some(true) } else if no_service { Some(false) } else { None };
-            let msg = task::commands::edit(&path, id, task::commands::EditArgs {
+            let msg = task::commands::edit_as(&path, id, task::commands::EditArgs {
                 title, priority, due, project, tags, agent, description, instructions, effort, work_status, recur, service,
-            })?;
+            }, task::commands::cli_actor(), force)?;
             println!("{}", msg);
             Ok(())
         }
@@ -339,12 +339,12 @@ fn run(cli: Cli) -> Result<(), (i32, String)> {
         }
 
         Some(Command::Done { id }) => {
-            println!("{}", task::commands::done(&path, id)?);
+            println!("{}", task::commands::done_as(&path, id, task::commands::cli_actor())?);
             Ok(())
         }
 
-        Some(Command::Reopen { id }) => {
-            println!("{}", task::commands::reopen(&path, id)?);
+        Some(Command::Reopen { id, force }) => {
+            println!("{}", task::commands::reopen_as(&path, id, task::commands::cli_actor(), force)?);
             Ok(())
         }
 

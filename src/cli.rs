@@ -191,6 +191,10 @@ pub enum Command {
         /// Turn a service back into a normal task
         #[arg(long)]
         no_service: bool,
+
+        /// Skip the state transition rules (human only; never sets agent-only states)
+        #[arg(long)]
+        force: bool,
     },
 
     /// Manage services: recurring agent jobs that advance their own schedule
@@ -209,6 +213,10 @@ pub enum Command {
     Reopen {
         /// Task id
         id: u32,
+
+        /// Reset the task to todo even if it is not done (human only)
+        #[arg(long)]
+        force: bool,
     },
 
     /// Delete a task

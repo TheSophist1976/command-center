@@ -5,6 +5,7 @@ pub mod cli;
 pub mod commands;
 pub mod config;
 pub mod db;
+pub mod lifecycle;
 pub mod managed;
 pub mod note;
 pub mod parser;
