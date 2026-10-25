@@ -1,6 +1,6 @@
 import type { CSSProperties, ReactNode } from 'react';
 import { X } from 'lucide-react';
-import type { Note, Task } from '../types';
+import type { LifecycleAction, Note, Task } from '../types';
 import type { editTask } from '../api';
 import { EditableField } from './EditableField';
 import { DatePicker } from './DatePicker';
@@ -13,7 +13,7 @@ import { ConvertToService } from './ConvertToService';
 import { PriorityBadge, StatusPill } from './Badges';
 import { sectionLabelStyle } from '../styles';
 import { statusFor } from '../mockAgentStatus';
-import { WORK_STATUS_COLOR, dueLabelLong } from '../taskFormat';
+import { WORK_STATUS_COLOR, WORK_STATUS_LABEL, dueLabelLong } from '../taskFormat';
 
 const PRIORITY_OPTIONS = [
   { value: 'critical', label: 'Critical' },
@@ -28,15 +28,32 @@ const EFFORT_OPTIONS = [
   { value: 'low', label: 'Low' },
 ];
 
-const WORK_STATUS_OPTIONS = [
-  { value: '', label: 'None' },
-  { value: 'todo', label: 'To Do' },
-  { value: 'in-progress', label: 'In Progress' },
-  { value: 'waiting-for-review', label: 'Waiting for Review' },
-  { value: 'changes-requested', label: 'Changes Requested' },
-  { value: 'needs-input', label: 'Needs Input' },
-  { value: 'complete', label: 'Complete' },
+// Each work status the dropdown can set, and the lifecycle move that sets it.
+// Agent-only states (needs-input, waiting-for-review) and the ones only a
+// reply sets (changes-requested) never appear for the human.
+const WORK_STATUS_MOVES: { value: NonNullable<Task['work_status']>; label: string; action: LifecycleAction }[] = [
+  { value: 'todo', label: 'To Do', action: 'reset' },
+  { value: 'in-progress', label: 'In Progress', action: 'start' },
+  { value: 'needs-input', label: 'Needs Input', action: 'ask' },
+  { value: 'waiting-for-review', label: 'Waiting for Review', action: 'submit' },
 ];
+
+/** Feedback is allowed on an agent's task (e.g. one already marked done). */
+function canReview(task: Task) {
+  const agent = task.agent?.toLowerCase();
+  return !!agent && agent !== 'human' && (task.allowed_actions ?? []).includes('feedback');
+}
+
+/** The current work status plus every status the server says the human may move to. */
+function workStatusOptions(task: Task) {
+  const current = task.work_status ?? '';
+  const allowed = task.allowed_actions ?? [];
+  const options = [{ value: current, label: current ? WORK_STATUS_LABEL[current] : 'None' }];
+  for (const m of WORK_STATUS_MOVES) {
+    if (m.value !== current && allowed.includes(m.action)) options.push({ value: m.value, label: m.label });
+  }
+  return options;
+}
 
 interface TaskDetailProps {
   task: Task;
@@ -185,9 +202,10 @@ export function TaskDetail({
             display={<PriorityBadge priority={task.priority} />}
           />
           <EditableField
+            id="field-work-status"
             value={task.work_status ?? ''}
             type="select"
-            options={WORK_STATUS_OPTIONS}
+            options={workStatusOptions(task)}
             onSave={(v) => onEdit({ work_status: v })}
             display={task.work_status
               ? <StatusPill status={task.work_status} />
@@ -214,8 +232,14 @@ export function TaskDetail({
         </div>
       )}
 
-      {(review || task.work_status === 'waiting-for-review' || task.work_status === 'changes-requested') && (
-        <ReviewPanel review={review} workStatus={task.work_status} accentColor={accent} onSendFeedback={onSendFeedback} />
+      {(review || task.work_status === 'waiting-for-review' || task.work_status === 'changes-requested' || canReview(task)) && (
+        <ReviewPanel
+          review={review}
+          workStatus={task.work_status}
+          accentColor={accent}
+          canSend={task.allowed_actions?.includes('feedback') ?? true}
+          onSendFeedback={onSendFeedback}
+        />
       )}
 
       {/* An answered question stays hidden until the agent asks again (needs-input). */}

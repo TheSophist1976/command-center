@@ -131,6 +131,9 @@ fn check_actor(t: &Task, event: Event, actor: Actor, force: bool) -> Result<(), 
             "in-progress on a task assigned to {} is set by that agent",
             t.agent.as_deref().unwrap_or_default()
         )),
+        (Event::Start | Event::Ask | Event::Submit, Actor::Agent) if is_human_owned(t) && !t.is_service() => {
+            Err(format!("task {} is assigned to the human, not an agent", t.id))
+        }
         (Event::Start, Actor::Human) if t.is_service() => {
             Err("a service is marked running by its agent".to_string())
         }
@@ -159,8 +162,12 @@ fn check_transition(t: &Task, event: Event) -> Result<(), String> {
 
     if t.is_service() {
         return match event {
+            Event::Start | Event::RunOk | Event::RunFailed if t.paused => {
+                Err(format!("Service {} is paused; resume it first", t.id))
+            }
             Event::Start => if matches!(s, S::Scheduled | S::Failing | S::Running) { Ok(()) } else { refuse() },
-            Event::RunOk | Event::RunFailed if t.paused => Err(format!("Service {} is paused; resume it first", t.id)),
+            Event::Pause if t.paused => Err(format!("Service {} is already paused", t.id)),
+            Event::Resume if !t.paused => Err(format!("Service {} is not paused", t.id)),
             Event::RunOk | Event::RunFailed | Event::Pause | Event::Resume | Event::Reset | Event::ToTask => Ok(()),
             Event::Ask => Err(format!("Service {} cannot ask a question; record a failed run instead", t.id)),
             Event::Done => Err(format!(
@@ -194,7 +201,12 @@ fn check_transition(t: &Task, event: Event) -> Result<(), String> {
         Event::Done | Event::Reset => if s != S::Done { Ok(()) } else { refuse() },
         Event::Reopen => if s == S::Done { Ok(()) } else { refuse() },
         Event::Defer => if s == S::WaitingForReview { Ok(()) } else { refuse() },
-        Event::ToService => if s != S::Done { Ok(()) } else { Err(format!("Task {} is done; reopen it before making it a service", t.id)) },
+        Event::ToService if s == S::Done => Err(format!("Task {} is done; reopen it before making it a service", t.id)),
+        Event::ToService if t.recurrence.is_none() || t.due_date.is_none() => Err(format!(
+            "Task {} needs a recurrence and a due date to become a service",
+            t.id
+        )),
+        Event::ToService => Ok(()),
         Event::ToTask => Err(format!("Task {} is already a task", t.id)),
         Event::RunOk | Event::RunFailed | Event::Pause | Event::Resume => Err(format!("Task {} is not a service", t.id)),
     }
@@ -532,6 +544,193 @@ mod tests {
     #[test]
     fn allowed_events_for_the_human_on_a_review_task() {
         let t = task(Some("Bot"), O, Some(W::WaitingForReview));
-        assert_eq!(allowed_events(&t, Human), vec![E::Feedback, E::Done, E::Reset, E::Defer, E::ToService]);
+        assert_eq!(allowed_events(&t, Human), vec![E::Feedback, E::Done, E::Reset, E::Defer]);
+    }
+
+    // -- The full transition matrix --
+    //
+    // Every fixture below is run through every event, by both actors. `SPEC`
+    // lists, by hand, each move that must succeed and the state it must land
+    // in; every combination not listed must be refused and leave the task
+    // untouched. A rule change that is not reflected here fails the test.
+
+    /// The result of an allowed move: (state, paused).
+    type Outcome = (State, bool);
+
+    fn fixtures() -> Vec<(&'static str, Task)> {
+        let weekly = || Some("weekly".parse::<Recurrence>().unwrap());
+        let bot = |status, ws| {
+            let mut t = task(Some("Bot"), status, ws);
+            t.recurrence = weekly();
+            t
+        };
+        let human = |agent: Option<&str>, status, ws| {
+            let mut t = task(agent, status, ws);
+            t.recurrence = weekly();
+            t
+        };
+        vec![
+            ("bot-todo", bot(O, None)),
+            ("bot-todo-explicit", bot(O, Some(W::Todo))),
+            ("bot-in-progress", bot(O, Some(W::InProgress))),
+            ("bot-needs-input", bot(O, Some(W::NeedsInput))),
+            ("bot-review", bot(O, Some(W::WaitingForReview))),
+            ("bot-changes", bot(O, Some(W::ChangesRequested))),
+            ("bot-done", bot(D, None)),
+            ("human-todo", human(Some("human"), O, None)),
+            ("human-in-progress", human(Some("Human"), O, Some(W::InProgress))),
+            ("human-done", human(Some("human"), D, None)),
+            ("unassigned-todo", human(None, O, None)),
+            ("svc-scheduled", service(None, false)),
+            ("svc-running", service(Some(W::InProgress), false)),
+            ("svc-failing", service(Some(W::Failing), false)),
+            ("svc-paused", service(None, true)),
+            ("svc-paused-failing", service(Some(W::Failing), true)),
+        ]
+    }
+
+    /// Every allowed (fixture, actor, event) and where it lands.
+    fn spec() -> Vec<(&'static str, Actor, Event, Outcome)> {
+        use State as S;
+        let mut v = Vec::new();
+        let mut allow = |fixtures: &[&'static str], actor, event, to: Outcome| {
+            for f in fixtures {
+                v.push((*f, actor, event, to));
+            }
+        };
+        let todo = ["bot-todo", "bot-todo-explicit"];
+        let open_bot = ["bot-todo", "bot-todo-explicit", "bot-in-progress", "bot-needs-input", "bot-review", "bot-changes"];
+        let open_human = ["human-todo", "human-in-progress", "unassigned-todo"];
+
+        // The agent's moves on its own tasks.
+        allow(&[&todo[..], &["bot-in-progress", "bot-changes"]].concat(), Agent, E::Start, (S::InProgress, false));
+        allow(&[&todo[..], &["bot-in-progress", "bot-changes", "bot-needs-input"]].concat(), Agent, E::Ask, (S::NeedsInput, false));
+        allow(&[&todo[..], &["bot-in-progress", "bot-changes", "bot-review"]].concat(), Agent, E::Submit, (S::WaitingForReview, false));
+
+        // The human's moves on agent tasks.
+        allow(&["bot-needs-input", "bot-changes"], Human, E::Answer, (S::ChangesRequested, false));
+        allow(&["bot-review", "bot-changes", "bot-done", "human-done"], Human, E::Feedback, (S::ChangesRequested, false));
+        allow(&[&open_bot[..], &open_human[..]].concat(), Human, E::Done, (S::Done, false));
+        allow(&[&open_bot[..], &open_human[..]].concat(), Human, E::Reset, (S::Todo, false));
+        allow(&["bot-done", "human-done"], Human, E::Reopen, (S::Todo, false));
+        allow(&["bot-review"], Human, E::Defer, (S::Todo, false));
+        allow(&[&open_bot[..], &open_human[..]].concat(), Human, E::ToService, (S::Scheduled, false));
+
+        // The human works their own tasks.
+        allow(&open_human, Human, E::Start, (S::InProgress, false));
+
+        // Services.
+        let active = ["svc-scheduled", "svc-running", "svc-failing"];
+        let paused = ["svc-paused", "svc-paused-failing"];
+        allow(&active, Agent, E::Start, (S::Running, false));
+        for actor in [Agent, Human] {
+            allow(&active, actor, E::RunOk, (S::Scheduled, false));
+            allow(&active, actor, E::RunFailed, (S::Failing, false));
+        }
+        allow(&["svc-scheduled"], Human, E::Pause, (S::Scheduled, true));
+        allow(&["svc-running"], Human, E::Pause, (S::Running, true));
+        allow(&["svc-failing"], Human, E::Pause, (S::Failing, true));
+        allow(&["svc-paused"], Human, E::Resume, (S::Scheduled, false));
+        allow(&["svc-paused-failing"], Human, E::Resume, (S::Failing, false));
+        allow(&active, Human, E::Reset, (S::Scheduled, false));
+        allow(&paused, Human, E::Reset, (S::Scheduled, true));
+        allow(&[&active[..], &paused[..]].concat(), Human, E::ToTask, (S::Todo, false));
+        v
+    }
+
+    #[test]
+    fn every_move_matches_the_spec() {
+        let spec = spec();
+        let mut checked = 0;
+        for (name, fixture) in fixtures() {
+            for actor in [Human, Agent] {
+                let allowed = allowed_events(&fixture, actor);
+                for event in ALL_EVENTS {
+                    let want = spec.iter().find(|(f, a, e, _)| *f == name && *a == actor && *e == event).map(|s| s.3);
+                    let mut t = fixture.clone();
+                    let got = apply(&mut t, event, actor, false, today());
+                    match (want, got) {
+                        (Some(to), Ok(())) => assert_eq!((state(&t), t.paused), to, "{name}: {event:?} by {actor:?}"),
+                        (Some(_), Err(e)) => panic!("{name}: {event:?} by {actor:?} should be allowed, got: {e}"),
+                        (None, Ok(())) => panic!("{name}: {event:?} by {actor:?} should be refused"),
+                        (None, Err(e)) => {
+                            assert!(!e.is_empty());
+                            assert_eq!(t, fixture, "{name}: a refused {event:?} must not change the task");
+                        }
+                    }
+                    // The web UI shows controls from allowed_events, so it must
+                    // list exactly the moves that apply would accept.
+                    assert_eq!(allowed.contains(&event), want.is_some(), "{name}: allowed_events vs {event:?} by {actor:?}");
+                    checked += 1;
+                }
+            }
+        }
+        assert_eq!(checked, fixtures().len() * 2 * ALL_EVENTS.len());
+        // Every spec row names a real fixture, so a typo can not hide a move.
+        let names: Vec<_> = fixtures().into_iter().map(|(n, _)| n).collect();
+        for (f, ..) in &spec {
+            assert!(names.contains(f), "spec names unknown fixture {f}");
+        }
+    }
+
+    #[test]
+    fn moves_set_the_side_fields() {
+        let today = today();
+        // Defer hands the task back to the human.
+        let mut t = task(Some("Bot"), O, Some(W::WaitingForReview));
+        apply(&mut t, E::Defer, Human, false, today).unwrap();
+        assert_eq!((t.agent.as_deref(), t.work_status), (Some("human"), None));
+        // Reopen and Done clear the work status; Reset on a task sets todo.
+        let mut t = task(Some("Bot"), D, None);
+        apply(&mut t, E::Reopen, Human, false, today).unwrap();
+        assert_eq!((t.status, t.work_status), (O, None));
+        // Every applied move stamps `updated`.
+        assert!(t.updated.is_some());
+        // A run moves the due date to the next scheduled date after today.
+        let mut s = service(None, false);
+        s.due_date = today.pred_opt();
+        apply(&mut s, E::RunOk, Agent, false, today).unwrap();
+        assert!(s.due_date.unwrap() > today);
+        // Resume moves a passed due date to on or after today.
+        let mut s = service(None, true);
+        s.due_date = Some(today - chrono::Days::new(10));
+        apply(&mut s, E::Resume, Human, false, today).unwrap();
+        assert!(s.due_date.unwrap() >= today);
+        // Converting a service back to a task clears failing and paused.
+        let mut s = service(Some(W::Failing), true);
+        apply(&mut s, E::ToTask, Human, false, today).unwrap();
+        assert_eq!((s.kind, s.work_status, s.paused), (TaskKind::Task, Some(W::Todo), false));
+    }
+
+    #[test]
+    fn force_never_lets_anyone_past_the_actor_rules() {
+        for (name, fixture) in fixtures() {
+            for event in ALL_EVENTS {
+                // An agent with --force is always refused.
+                assert!(apply(&mut fixture.clone(), event, Agent, true, today()).is_err(), "{name}: forced {event:?} by agent");
+                // A forced human move never writes an agent-only state.
+                let mut t = fixture.clone();
+                if apply(&mut t, event, Human, true, today()).is_ok() {
+                    let agent_only = matches!(event, E::Ask | E::Submit)
+                        || (event == E::Start && (fixture.is_service() || !is_human_owned(&fixture)));
+                    assert!(!agent_only, "{name}: forced {event:?} by human should be refused");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn every_work_status_edit_maps_to_an_event_or_a_reason() {
+        let t = task(Some("Bot"), O, None);
+        let s = service(None, false);
+        let all = [None, Some(W::Todo), Some(W::InProgress), Some(W::NeedsInput), Some(W::WaitingForReview), Some(W::ChangesRequested), Some(W::Failing)];
+        let want_task = [Ok(E::Reset), Ok(E::Reset), Ok(E::Start), Ok(E::Ask), Ok(E::Submit), Err(()), Err(())];
+        for (ws, want) in all.iter().zip(want_task) {
+            assert_eq!(event_for_work_status(&t, *ws).map_err(|_| ()), want, "{ws:?} on a task");
+        }
+        for ws in all {
+            let got = event_for_work_status(&s, ws);
+            assert_eq!(got.is_err(), matches!(ws, Some(W::ChangesRequested | W::Failing)), "{ws:?} on a service");
+        }
     }
 }

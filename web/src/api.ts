@@ -32,6 +32,10 @@ export async function fetchTasks(): Promise<Task[]> {
   return tasks.map(normalizeTask);
 }
 
+export async function fetchTask(id: number): Promise<Task> {
+  return normalizeTask(await jsonOrThrow<Task>(await apiFetch(`/api/tasks/${id}`)));
+}
+
 export async function fetchServices(): Promise<Service[]> {
   const services = await jsonOrThrow<Service[]>(await apiFetch('/api/services'));
   return services.map((s) => ({ ...s, notes: s.notes ?? [] }));

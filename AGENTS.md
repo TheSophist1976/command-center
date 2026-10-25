@@ -180,7 +180,7 @@ task edit <id> --work-status in-progress
 
 Valid values: `todo`, `in-progress`, `waiting-for-review`, `changes-requested`, `needs-input`, and `failing` for services only (aliases `to-do`, `in_progress`/`inprogress`, `review`, `changes`, `needs_input`, and `fail`/`failed` are also accepted; `complete` and `done` are retired aliases for `waiting-for-review`).
 
-Every state change goes through the lifecycle rules in `src/lifecycle.rs`, and an invalid move is refused with an error. With `TASK_AGENT` set you are the agent: you may set `in-progress`, `needs-input` and `waiting-for-review` (submit needs a linked note), and you may not run `task done`, `task reopen`, reset to `todo`, convert services, pause or resume services, or reassign a task to `human`. `changes-requested` is set only by the human's feedback or answer, and `failing` only by `task service run <id> --result failed`. A human may pass `--force` to `task edit` or `task reopen` to skip transition rules; it never sets an agent-only state.
+Every state change goes through the lifecycle rules in `src/lifecycle.rs`, and an invalid move is refused with an error. With `TASK_AGENT` set you are the agent: you may set `in-progress`, `needs-input` and `waiting-for-review` (submit needs a linked note) on tasks assigned to an agent, never on a task assigned to `human` or to nobody, and you may not run `task done`, `task reopen`, reset to `todo`, convert services, pause or resume services, or reassign a task to `human`. `changes-requested` is set only by the human's feedback or answer, and `failing` only by `task service run <id> --result failed`. A human may pass `--force` to `task edit` or `task reopen` to skip transition rules; it never sets an agent-only state.
 
 ## Services
 
