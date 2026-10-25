@@ -41,21 +41,40 @@ This produces `target/release/task` (CLI, notes and `task serve`). The terminal 
 
 Releases are cut by GitHub Actions (`.github/workflows/release.yml`); there is no local deploy step. (`deploy.sh` is deprecated and only prints a pointer here.)
 
-1. Merge your change to `main` through a PR.
-2. Bump `version` in `Cargo.toml`, merge that, and update `main`.
-3. Tag the merge commit and push the tag:
+1. Merge your change to `main` through a PR. The `ci` workflow must pass on it.
+2. Merge a `chore: release X.Y.Z` commit that bumps `version` in `Cargo.toml`. When `ci` passes on that commit on `main`, `tag-release.yml` pushes the `vX.Y.Z` tag, which starts the release. If `ci` fails, nothing is tagged.
 
-   ```sh
-   git tag v4.5.0 && git push origin v4.5.0
-   ```
+   You can also push a tag by hand (`git tag v4.5.0 && git push origin v4.5.0`); the release still runs the full gate first. A tag containing `-` (e.g. `v4.5.0-rc.1`) is published as a pre-release, which `install.sh` and `task update` skip.
 
-   Tags matching `v*` trigger the workflow. A tag containing `-` (e.g. `v4.5.0-rc.1`) is published as a pre-release, which `install.sh` and `task update` skip.
+### The gate (`.github/workflows/ci.yml`)
 
-The workflow runs these jobs in order, and any failure stops the release:
+Runs on every pull request, every push to `main`, daily on `main`, and again inside every release:
 
 | Job | What it does |
 |-----|--------------|
-| `verify` | Fails unless the tag equals the `Cargo.toml` version; builds the web UI; runs `cargo test` and the `install.sh` shellcheck and tests |
+| `test` | Builds the web UI; runs `cargo test --features tui` (unit tests, including the full lifecycle transition matrix in `src/lifecycle.rs`, and the CLI/HTTP integration tests in `tests/`); shellchecks and tests `install.sh` |
+| `e2e` | Builds `task` and runs the Playwright suite in `e2e/` against `task serve`, with the CLI playing the agent |
+| `security` | `cargo audit --deny unsound`, `npm audit` (any severity) for `web/` and `e2e/`, and no open Dependabot, code scanning or secret scanning alerts on the repo |
+| `ci passed` | Succeeds only if all three did; make it the required status check for `main` |
+
+The repo-alerts check needs a `SECURITY_ALERTS_TOKEN` secret: a fine-grained token on this repo with read access to Dependabot alerts, code scanning alerts and secret scanning alerts. Without it the step only warns; the lockfile audits still run.
+
+Run the gate locally:
+
+```sh
+(cd web && npm ci && npm run build) && cargo test --features tui
+cargo build && (cd e2e && npm ci && npx playwright install chromium && npx playwright test)
+cargo audit --deny unsound && (cd web && npm audit) && (cd e2e && npm audit)
+```
+
+### The release workflow
+
+It runs these jobs in order, and any failure stops the release:
+
+| Job | What it does |
+|-----|--------------|
+| `ci` | The full gate above, on the tagged commit |
+| `verify` | Fails unless the tag equals the `Cargo.toml` version |
 | `build` | Builds the web UI and `task` (release) for macOS arm64/x64 and Linux x64/arm64, and packages each as a `.tar.gz` |
 | `checksums` | Generates `SHA256SUMS` for the archives |
 | `smoke` | Installs the just-built artifact with `install.sh` on clean macOS and Linux runners and checks `task --version` |

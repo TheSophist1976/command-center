@@ -57,6 +57,7 @@ export function EditableField({ value, display, onSave, type = 'text', options, 
   if (type === 'select' && options) {
     return (
       <select
+        id={id}
         autoFocus
         value={draft}
         onChange={(e) => {

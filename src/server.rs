@@ -330,7 +330,7 @@ async fn edit_task(
     State(state): State<Arc<AppState>>,
     AxumPath(id): AxumPath<u32>,
     Json(req): Json<EditTaskRequest>,
-) -> Result<Json<Task>, (StatusCode, Json<serde_json::Value>)> {
+) -> Result<Json<TaskView>, (StatusCode, Json<serde_json::Value>)> {
     let today = chrono::Local::now().date_naive();
     let priority = req
         .priority
@@ -463,7 +463,7 @@ async fn edit_task(
     };
 
     task_file.commit().map_err(|e| app_error(StatusCode::INTERNAL_SERVER_ERROR, e))?;
-    Ok(Json(updated_task))
+    Ok(Json(updated_task.into()))
 }
 
 enum ReviewHandoff {
@@ -500,8 +500,8 @@ fn review_handoff(
 
 #[derive(Serialize)]
 pub struct DoneResponse {
-    pub completed: Task,
-    pub spawned: Option<Task>,
+    pub completed: TaskView,
+    pub spawned: Option<TaskView>,
 }
 
 async fn done_task(
@@ -520,13 +520,13 @@ async fn done_task(
     if !c.already_done {
         task_file.commit().map_err(|e| app_error(StatusCode::INTERNAL_SERVER_ERROR, e))?;
     }
-    Ok(Json(DoneResponse { completed, spawned: c.spawned }))
+    Ok(Json(DoneResponse { completed: completed.into(), spawned: c.spawned.map(Into::into) }))
 }
 
 async fn reopen_task(
     State(state): State<Arc<AppState>>,
     AxumPath(id): AxumPath<u32>,
-) -> Result<Json<Task>, (StatusCode, Json<serde_json::Value>)> {
+) -> Result<Json<TaskView>, (StatusCode, Json<serde_json::Value>)> {
     let _guard = state.write_lock.lock().await;
     let mut task_file = db::begin(&state.db_path)
         .map_err(|e| app_error(StatusCode::INTERNAL_SERVER_ERROR, e))?;
@@ -539,7 +539,7 @@ async fn reopen_task(
         t.clone()
     };
     task_file.commit().map_err(|e| app_error(StatusCode::INTERNAL_SERVER_ERROR, e))?;
-    Ok(Json(updated_task))
+    Ok(Json(updated_task.into()))
 }
 
 async fn delete_task(
@@ -2931,7 +2931,7 @@ mod tests {
             .unwrap();
         let json = body_json(response).await;
         assert_eq!(json["state"], "waiting-for-review");
-        assert_eq!(json["allowed_actions"], serde_json::json!(["feedback", "done", "reset", "defer", "to-service"]));
+        assert_eq!(json["allowed_actions"], serde_json::json!(["feedback", "done", "reset", "defer"]));
     }
 
     #[tokio::test]

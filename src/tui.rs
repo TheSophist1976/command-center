@@ -3789,6 +3789,8 @@ mod tests {
             agent: None,
             effort: None,
             work_status: None,
+            kind: Default::default(),
+            paused: false,
         }
     }
 
@@ -4046,6 +4048,40 @@ mod tests {
     }
 
     // -- Status message tests --
+
+    #[test]
+    fn toggle_done_goes_through_the_lifecycle() {
+        use crate::task::{TaskKind, WorkStatus};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("tasks.db");
+        let today = chrono::Local::now().date_naive();
+        let mut review = make_task(None);
+        review.agent = Some("Bot".to_string());
+        review.work_status = Some(WorkStatus::WaitingForReview);
+        let mut service = make_task(Some(today));
+        service.id = 2;
+        service.kind = TaskKind::Service;
+        service.recurrence = Some("daily".parse().unwrap());
+        let mut tf = TaskFile::new();
+        tf.tasks = vec![review.clone(), service.clone()];
+        tf.next_id = 3;
+        crate::db::save(&path, &tf).unwrap();
+        let mut app = make_app_with_tasks(vec![review, service]);
+        app.task_file.next_id = 3;
+        app.file_path = path.clone();
+
+        // Done clears the work status; reopen leaves it clear.
+        toggle_task_status(&mut app, 0).unwrap();
+        let t = crate::db::load(&path).unwrap().find_task(1).cloned().unwrap();
+        assert_eq!((t.status, t.work_status), (Status::Done, None));
+        toggle_task_status(&mut app, 0).unwrap();
+        let t = crate::db::load(&path).unwrap().find_task(1).cloned().unwrap();
+        assert_eq!((t.status, t.work_status), (Status::Open, None));
+
+        // A service is never done, from the TUI either.
+        assert!(toggle_task_status(&mut app, 1).unwrap_err().contains("never done"));
+        assert_eq!(crate::db::load(&path).unwrap().find_task(2).unwrap().status, Status::Open);
+    }
 
     fn make_app_with_tasks(tasks: Vec<Task>) -> App {
         let mut task_file = TaskFile::new();
@@ -4623,6 +4659,8 @@ mod tests {
             agent: Some("test".to_string()),
             effort: None,
             work_status: None,
+            kind: Default::default(),
+            paused: false,
         };
         make_app_with_tmpfile(vec![task])
     }
@@ -4648,10 +4686,11 @@ mod tests {
     fn editing_due_confirm_valid_date_saves() {
         let mut app = make_app_with_due(None);
         app.mode = Mode::EditingDue;
-        app.input_buffer = "2026-05-01".to_string();
+        // A fixed date would fall into the past and be refused; use next month.
+        let expected = chrono::Local::now().date_naive() + chrono::Days::new(30);
+        app.input_buffer = expected.format("%Y-%m-%d").to_string();
         let _ = handle_input(&mut app, KeyCode::Enter, InputAction::EditDue);
         assert_eq!(app.mode, Mode::Normal);
-        let expected = chrono::NaiveDate::from_ymd_opt(2026, 5, 1).unwrap();
         assert_eq!(app.task_file.tasks[0].due_date, Some(expected));
     }
 
@@ -4673,7 +4712,7 @@ mod tests {
         app.input_buffer = "notadate".to_string();
         let _ = handle_input(&mut app, KeyCode::Enter, InputAction::EditDue);
         assert_eq!(app.mode, Mode::EditingDue);
-        assert!(app.status_message.as_deref() == Some("Invalid date (use YYYY-MM-DD or a weekday name)"));
+        assert_eq!(app.status_message.as_deref(), Some("Invalid due date: 'notadate'. Use YYYY-MM-DD or a weekday name."));
     }
 
     #[test]
@@ -4819,6 +4858,8 @@ mod tests {
             agent: Some("a".to_string()),
             effort: None,
             work_status: None,
+            kind: Default::default(),
+            paused: false,
         };
         let mut app = make_app_with_tasks(vec![task]);
         // Due view starts with None

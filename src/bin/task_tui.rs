@@ -354,6 +354,51 @@ fn run(cli: Cli) -> Result<(), (i32, String)> {
         }
 
         // These subcommands are only handled by the `task` binary.
+        Some(Command::Whoami { json }) => {
+            let cwd = std::env::current_dir().map_err(|e| (1, e.to_string()))?;
+            let config = task::config::config_path();
+            let identity = config
+                .as_deref()
+                .and_then(|c| task::agent::identity(task::agent::env_agent().as_deref(), c, &cwd))
+                .or_else(|| {
+                    task::agent::env_agent().map(|name| task::agent::Identity {
+                        name,
+                        source: task::agent::Source::Env,
+                        dir: None,
+                    })
+                })
+                .ok_or_else(|| {
+                    (1, "No agent identity: set TASK_AGENT, or run from a directory under an agent-<name> profile".to_string())
+                })?;
+            if json {
+                println!(
+                    "{}",
+                    serde_json::json!({"agent": identity.name, "source": identity.source.label(), "dir": identity.dir})
+                );
+            } else {
+                println!("agent: {}\nsource: {}", identity.name, identity.source.label());
+                if let Some(dir) = &identity.dir {
+                    println!("dir: {}", dir);
+                }
+            }
+            Ok(())
+        }
+
+        Some(Command::Next { agent, limit, json }) => {
+            let agent = match agent.or_else(task::agent::env_agent) {
+                Some(a) => a,
+                None => {
+                    let cwd = std::env::current_dir().map_err(|e| (1, e.to_string()))?;
+                    task::config::config_path()
+                        .and_then(|c| task::config::find_agent_for_cwd_from(&c, &cwd))
+                        .ok_or_else(|| (1, "No agent given: pass --agent, set TASK_AGENT, or run from a directory under an agent-<name> profile".to_string()))?
+                }
+            };
+            let notes_dir = task::db::resolve_notes_dir(&path);
+            println!("{}", task::commands::next(&path, &notes_dir, task::commands::NextArgs { agent, limit, json })?);
+            Ok(())
+        }
+
         Some(Command::Serve | Command::Setup | Command::RefreshFiles { .. } | Command::Update { .. }) => {
             Err((2, "this subcommand is only available in the `task` binary".to_string()))
         }

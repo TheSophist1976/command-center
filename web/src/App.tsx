@@ -5,7 +5,7 @@ import './layout.css';
 import { Terminal, Search, PanelLeftClose, PanelLeftOpen, PanelRightClose, PanelRightOpen, Menu, ChevronLeft, Plus, Repeat } from 'lucide-react';
 import { Button } from './components/Button';
 import { NewTaskForm } from './components/NewTaskForm';
-import { fetchTasks, fetchAgents, addTask, editTask, markDone, reopenTask, deleteTask, fetchTaskNotes, createTaskNote, openNote, saveNote, unlinkTaskNote, fetchTaskReview, postTaskFeedback, fetchTaskQuestion, postTaskAnswer } from './api';
+import { fetchTask, fetchTasks, fetchAgents, addTask, editTask, markDone, reopenTask, deleteTask, fetchTaskNotes, createTaskNote, openNote, saveNote, unlinkTaskNote, fetchTaskReview, postTaskFeedback, fetchTaskQuestion, postTaskAnswer } from './api';
 import { AgentEditor } from './components/AgentEditor';
 import { ServicesView } from './components/ServicesView';
 import { fetchServices } from './api';
@@ -350,7 +350,8 @@ export default function App() {
     try {
       const note = await postTaskFeedback(selected.id, text);
       setReview(note);
-      const updated = { ...selected, work_status: 'changes-requested' as const };
+      // Refetch: feedback can also reopen a done task, and the allowed moves change.
+      const updated = await fetchTask(selected.id);
       setSelected(updated);
       setTasks((prev) => prev.map((t) => (t.id === updated.id ? updated : t)));
     } catch (e) {
@@ -364,7 +365,7 @@ export default function App() {
     try {
       const note = await postTaskAnswer(selected.id, text);
       setQuestion(note);
-      const updated = { ...selected, work_status: 'changes-requested' as const };
+      const updated = await fetchTask(selected.id);
       setSelected(updated);
       setTasks((prev) => prev.map((t) => (t.id === updated.id ? updated : t)));
     } catch (e) {

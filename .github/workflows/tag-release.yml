@@ -1,13 +1,16 @@
 name: tag-release
 
-# When a "chore: release X.Y.Z" commit lands on main, push the vX.Y.Z tag, which starts release.yml.
+# When a "chore: release X.Y.Z" commit lands on main and the ci workflow has
+# passed on it, push the vX.Y.Z tag, which starts release.yml. A release commit
+# whose tests or security audit fail is never tagged, so it is never deployed.
 # The tag is pushed with RELEASE_TAG_TOKEN (a PAT with Contents: write on this repo) because tags pushed
 # with the default GITHUB_TOKEN do not trigger other workflows.
 
 on:
-  push:
+  workflow_run:
+    workflows: [ci]
+    types: [completed]
     branches: [main]
-    paths: [Cargo.toml]
 
 permissions:
   contents: read
@@ -18,15 +21,19 @@ concurrency:
 
 jobs:
   tag:
+    # Only a ci run triggered by a push to main that passed; not PRs or the daily audit.
+    if: github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
+          ref: ${{ github.event.workflow_run.head_sha }}
           fetch-depth: 0
           token: ${{ secrets.RELEASE_TAG_TOKEN }}
       - name: Tag the release commit
         env:
-          SUBJECT: ${{ github.event.head_commit.message }}
+          SUBJECT: ${{ github.event.workflow_run.head_commit.message }}
+          SHA: ${{ github.event.workflow_run.head_sha }}
         run: |
           subject=$(printf '%s\n' "$SUBJECT" | head -n 1)
           case "$subject" in
@@ -41,5 +48,5 @@ jobs:
           fi
           git config user.name "release-bot"
           git config user.email "release-bot@users.noreply.github.com"
-          git tag -a "v$version" -m "v$version" "$GITHUB_SHA"
+          git tag -a "v$version" -m "v$version" "$SHA"
           git push origin "v$version"

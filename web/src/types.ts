@@ -21,7 +21,19 @@ export interface Task {
   work_status?: 'todo' | 'in-progress' | 'waiting-for-review' | 'changes-requested' | 'needs-input' | 'complete' | 'failing';
   kind?: 'task' | 'service';
   paused?: boolean;
+  /** Lifecycle state derived by the server (src/lifecycle.rs). */
+  state?: LifecycleState;
+  /** The moves the human may make now; controls are shown from this list. */
+  allowed_actions?: LifecycleAction[];
 }
+
+export type LifecycleState =
+  | 'todo' | 'in-progress' | 'needs-input' | 'waiting-for-review' | 'changes-requested' | 'done'
+  | 'scheduled' | 'running' | 'failing';
+
+export type LifecycleAction =
+  | 'start' | 'ask' | 'answer' | 'submit' | 'feedback' | 'done' | 'reopen' | 'reset' | 'defer'
+  | 'run-ok' | 'run-failed' | 'pause' | 'resume' | 'to-service' | 'to-task';
 
 export interface ServiceRun {
   id: number;

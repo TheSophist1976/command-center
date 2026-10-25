@@ -7,6 +7,8 @@ interface ReviewPanelProps {
   review: Note | null;
   workStatus?: Task['work_status'];
   accentColor?: string;
+  /** False when the lifecycle does not allow feedback now (e.g. the agent is still working). */
+  canSend?: boolean;
   onSendFeedback: (text: string) => Promise<void> | void;
 }
 
@@ -71,7 +73,7 @@ function Avatar({ sender, color }: { sender: 'agent' | 'human'; color: string })
   );
 }
 
-export function ReviewPanel({ review, workStatus, accentColor, onSendFeedback }: ReviewPanelProps) {
+export function ReviewPanel({ review, workStatus, accentColor, canSend = true, onSendFeedback }: ReviewPanelProps) {
   const [text, setText] = useState('');
   const [sendState, setSendState] = useState<'idle' | 'sending' | 'sent'>('idle');
   const color = accentColor ?? 'var(--fg-5)';
@@ -217,7 +219,7 @@ export function ReviewPanel({ review, workStatus, accentColor, onSendFeedback }:
         </div>
       )}
 
-      <div
+      {canSend && <div
         style={{
           display: 'flex',
           alignItems: 'flex-end',
@@ -251,7 +253,7 @@ export function ReviewPanel({ review, workStatus, accentColor, onSendFeedback }:
         <Button size="sm" onClick={submit} disabled={!trimmed || sendState === 'sending'}>
           {sendState === 'sending' ? '…' : sendState === 'sent' ? 'Sent' : 'Send'}
         </Button>
-      </div>
+      </div>}
     </div>
   );
 }
