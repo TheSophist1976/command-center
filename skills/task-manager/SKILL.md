@@ -19,7 +19,7 @@ Tasks can be assigned to specific AI agents via the `agent` field in task metada
    task next            # one line per task, in the order to work them
    task next --json     # full queue: your instructions, memory, tasks, review threads, linked notes
    ```
-   `task next` already skips tasks that were handed back (`waiting-for-review`, `complete`), tasks blocked on the human (`needs-input`), and recurring tasks that are not due yet. Each task in the JSON has a `pickup` of `new`, `continue`, `review_feedback` or `answered_question`, telling you why it is there.
+   `task next` already skips tasks that were handed back (`waiting-for-review`), tasks blocked on the human (`needs-input`), and recurring tasks that are not due yet. Each task in the JSON has a `pickup` of `new`, `continue`, `review_feedback` or `answered_question`, telling you why it is there.
 
 Only work on tasks assigned to your agent profile. Tasks with `agent:human` are for the human. Tasks with no `agent` field are unassigned — do not work on these unless explicitly told to.
 
@@ -79,9 +79,17 @@ Tasks have a `work_status` field, independent of open/done, so the human can see
 task edit <id> --work-status in-progress
 ```
 
-Valid values: `todo`, `in-progress`, `waiting-for-review`, `changes-requested`, `needs-input`, `complete` (aliases `to-do`, `in_progress`/`inprogress`, `review`, `changes`, `needs_input`, and `done` are also accepted).
+Valid values: `todo`, `in-progress`, `waiting-for-review`, `changes-requested`, `needs-input` (aliases `to-do`, `in_progress`/`inprogress`, `review`, `changes`, and `needs_input` are also accepted; `complete` and `done` are retired aliases for `waiting-for-review`).
 
-**Setting `work_status` to `complete` does NOT mark the task done.** It's purely informational. Never substitute it for `task done <id>` — see the `work-agent-tasks` skill for when to set each value while working assigned tasks.
+**Every state change goes through the lifecycle rules, and an invalid move is refused with an error.** With `TASK_AGENT` set you are the agent:
+
+- You may set `in-progress`, `needs-input` and `waiting-for-review` on tasks assigned to an agent. A task assigned to `human`, or to nobody, is the human's: you may not start, ask on or submit it.
+- Submitting (`waiting-for-review`) needs a linked note.
+- You may not run `task done` or `task reopen`, reset a task to `todo`, convert a task to or from a service, pause or resume a service, or reassign a task to `human`. `--force` is for humans only.
+- `changes-requested` is set only by the human's feedback or answer, and `failing` only by `task service run <id> --result failed`.
+- A service cannot be put in `needs-input` or `waiting-for-review`. If a service run cannot be done, record it with `task service run <id> --result failed --summary "<why>"`.
+
+A work status is never the same as `task done`: only the human closes a task.
 
 **`changes-requested`** means a human left feedback on the task's review thread (see "Review Threads" below) and it needs another round of work — this value is set automatically by the web UI when feedback is posted, not something you normally set by hand. It is also set when the human answers one of your questions (see "Asking a Question" below).
 
@@ -117,7 +125,7 @@ task rm <id>
 
 **Due date:** `YYYY-MM-DD`, or a weekday name/abbreviation (resolves to the next future occurrence) — e.g. `--due 2026-03-25` or `--due friday`
 
-**Work status:** `todo`, `in-progress`, `waiting-for-review`, `changes-requested`, `needs-input`, `complete`, and `failing` (services only) — set via `--work-status` (see "Reporting Progress" above). Independent of open/done.
+**Work status:** `todo`, `in-progress`, `waiting-for-review`, `changes-requested`, `needs-input`, and `failing` (services only) — set via `--work-status` (see "Reporting Progress" above). Independent of open/done.
 
 **Recurrence:** set via `--recur <pattern>`. Valid patterns: `daily`, `weekly`, `monthly`, `yearly` (every occurrence); `daily:N`, `weekly:N`, `monthly:N`, `yearly:N` (every N); `weekly:DAY` (e.g. `weekly:fri`); `weekly:N:DAY` (every N weeks on DAY); `monthly:N:DAY` (the Nth DAY of the month, e.g. `monthly:2:mon` for the 2nd Monday). `DAY` is a 3-letter abbreviation (`mon`, `tue`, `wed`, `thu`, `fri`, `sat`, `sun`).
 
@@ -228,4 +236,4 @@ task agent memory <agent-name> edit --body "<updated content>"
 
 - **Never guess or hand-construct a task id** — always use the id the CLI reports back to you (from `add`, `list`, or `show`).
 - **Never edit `tasks.db` with a text editor or by hand** — it's a SQLite database, not a text file; use the CLI for every read and write.
-- **Never treat `--work-status complete` as equivalent to `task done`** — they're independent fields. Setting `work_status` to `complete` does not close the task.
+- **Never treat a work status as equivalent to `task done`** — they're independent fields. Marking a task done is the human's move, and the CLI refuses it when `TASK_AGENT` is set.

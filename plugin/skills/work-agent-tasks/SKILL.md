@@ -23,7 +23,7 @@ For each agent name, run:
 task next --agent <name> --json
 ```
 
-Agent names are matched ignoring case. The result is that agent's work queue, already filtered and ordered: it leaves out tasks that were handed back (`waiting-for-review`, `complete`), tasks blocked on the human (`needs-input`), and recurring tasks that are not due yet. A `changes-requested` task is included, with `pickup` set to `review_feedback` (the human left feedback on the review thread) or `answered_question` (the human answered a question from the web UI). A task with an empty `tasks` list needs no worker.
+Agent names are matched ignoring case. The result is that agent's work queue, already filtered and ordered: it leaves out tasks that were handed back (`waiting-for-review`), tasks blocked on the human (`needs-input`), and recurring tasks that are not due yet. A `changes-requested` task is included, with `pickup` set to `review_feedback` (the human left feedback on the review thread) or `answered_question` (the human answered a question from the web UI). A task with an empty `tasks` list needs no worker.
 
 (Tasks with `agent:human` or no `agent` field never appear in an agent's queue.)
 
@@ -107,7 +107,10 @@ A failed run sets the service to `failing`, which shows on the web Services scre
 - Never run `task done <id>` yourself — `--work-status waiting-for-review` signals readiness; the human reviews and closes the task.
 - Never edit `--due` on a recurring task.
 - Never reassign a task's `agent` field to `human`. The task stays owned by your agent profile; `work_status` alone signals handback.
-- Never set `--work-status complete` as a substitute for handback or for `task done`.
+- Never use a work status as a substitute for handback or for `task done`. `complete` is a retired alias for `waiting-for-review`; write `waiting-for-review`.
+- Only work tasks assigned to your agent profile. The CLI refuses `in-progress`, `needs-input` and `waiting-for-review` on tasks assigned to `human` or to nobody.
+- Submitting for review needs a linked result note; add one with `task note add "<title>" --task <id>` first.
+- A service cannot ask a question or go to review. If a service run cannot be done, record a failed run with `task service run <id> --result failed --summary "<why>"`.
 - If a task cannot be completed even after asking, write a note explaining why and set `--work-status waiting-for-review` so it surfaces for review.
 - Do not fabricate results.
 
