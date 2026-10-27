@@ -80,6 +80,13 @@ export function dueLabelLong(t: Task, today: Date): string {
   return `${dueLabel(t, today)} · ${monthDay(parseLocalDate(t.due_date), today)}`;
 }
 
+/** Inspector form for a timestamp: "Oct 27 · 10:41 AM", in local time. */
+export function timestampLabel(iso: string, today: Date): string {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return iso;
+  return `${monthDay(d, today)} · ${d.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' })}`;
+}
+
 export function dueColor(t: Task, today: Date): string {
   if (isOverdue(t, today)) return 'var(--danger)';
   return t.due_date ? 'var(--fg-3)' : 'var(--fg-5)';
