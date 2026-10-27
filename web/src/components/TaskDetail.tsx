@@ -13,7 +13,7 @@ import { ConvertToService } from './ConvertToService';
 import { PriorityBadge, StatusPill } from './Badges';
 import { sectionLabelStyle } from '../styles';
 import { statusFor } from '../mockAgentStatus';
-import { WORK_STATUS_COLOR, WORK_STATUS_LABEL, dueLabelLong } from '../taskFormat';
+import { WORK_STATUS_COLOR, WORK_STATUS_LABEL, dueLabelLong, timestampLabel } from '../taskFormat';
 
 const PRIORITY_OPTIONS = [
   { value: 'critical', label: 'Critical' },
@@ -161,6 +161,10 @@ export function TaskDetail({
           display={<span style={ellipsis}>{task.recurrence || placeholder('None')}</span>}
         />
       ),
+    },
+    {
+      label: 'Created',
+      node: <span style={ellipsis} title={task.created}>{timestampLabel(task.created, today)}</span>,
     },
   ];
 
