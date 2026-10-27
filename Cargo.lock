@@ -2789,7 +2789,7 @@ dependencies = [
 
 [[package]]
 name = "task"
-version = "5.0.0"
+version = "5.0.1"
 dependencies = [
  "axum",
  "chrono",
