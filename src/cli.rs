@@ -339,8 +339,8 @@ pub enum AgentMemoryCommand {
         title: Option<String>,
 
         /// New body (replaces entire body)
-        #[arg(long)]
-        body: Option<String>,
+        #[arg(long, allow_hyphen_values = true)]
+        body:Option<String>,
     },
 }
 
@@ -356,8 +356,8 @@ pub enum AgentInstructionsCommand {
         title: Option<String>,
 
         /// New body (replaces entire body)
-        #[arg(long)]
-        body: Option<String>,
+        #[arg(long, allow_hyphen_values = true)]
+        body:Option<String>,
     },
 }
 
@@ -426,8 +426,8 @@ pub enum NoteCommand {
         title: Option<String>,
 
         /// New body (replaces entire body)
-        #[arg(long)]
-        body: Option<String>,
+        #[arg(long, allow_hyphen_values = true)]
+        body:Option<String>,
     },
 
     /// Delete a note
@@ -442,8 +442,8 @@ pub enum NoteCommand {
         slug: String,
 
         /// Markdown text to append (including its own header, if any)
-        #[arg(long)]
-        body: String,
+        #[arg(long, allow_hyphen_values = true)]
+        body:String,
     },
 
     /// Link a note to a task

@@ -64,6 +64,26 @@ pub fn read_note(path: &Path) -> Result<Note, String> {
         .unwrap_or("unknown")
         .to_string();
 
+    // Frontmatter-first notes (OKF/Obsidian): the YAML block stays at the top of
+    // the body, and the title is the `# ` heading that follows it.
+    if let Some((frontmatter, after)) = split_frontmatter(&content) {
+        let after = after.trim_start_matches(['\n', '\r']);
+        let (title, rest) = match after.lines().next() {
+            Some(line) if line.starts_with("# ") => {
+                let rest = after[line.len()..].trim_start_matches(['\n', '\r']);
+                (line[2..].trim_end().to_string(), rest)
+            }
+            _ => (frontmatter_title(frontmatter).unwrap_or_else(|| slug.clone()), after),
+        };
+        let rest = rest.trim_end_matches(['\n', '\r']);
+        let body = if rest.is_empty() {
+            frontmatter.to_string()
+        } else {
+            format!("{}\n{}", frontmatter, rest)
+        };
+        return Ok(Note { slug, title, body });
+    }
+
     let mut lines = content.lines();
     let title = match lines.next() {
         Some(line) => line.strip_prefix("# ").unwrap_or(line).to_string(),
@@ -79,17 +99,57 @@ pub fn read_note(path: &Path) -> Result<Note, String> {
     Ok(Note { slug, title, body })
 }
 
+/// Splits a leading YAML frontmatter block off `text`. Returns the block
+/// (from the opening `---` through the closing `---` line, newline included)
+/// and the text after it, or None when `text` does not start with frontmatter.
+fn split_frontmatter(text: &str) -> Option<(&str, &str)> {
+    let first = text.lines().next()?;
+    if first.trim_end() != "---" {
+        return None;
+    }
+    let mut pos = text.find('\n')? + 1;
+    while pos < text.len() {
+        let end = text[pos..].find('\n').map(|i| pos + i + 1).unwrap_or(text.len());
+        if text[pos..end].trim_end() == "---" {
+            return Some((&text[..end], &text[end..]));
+        }
+        pos = end;
+    }
+    None
+}
+
+fn frontmatter_title(frontmatter: &str) -> Option<String> {
+    frontmatter.lines().find_map(|line| {
+        let value = line.strip_prefix("title:")?.trim();
+        let value = value.trim_matches(|c| c == '"' || c == '\'');
+        (!value.is_empty()).then(|| value.to_string())
+    })
+}
+
 pub fn write_note(dir: &Path, note: &Note) -> Result<PathBuf, String> {
     fs::create_dir_all(dir)
         .map_err(|e| format!("Failed to create notes directory: {}", e))?;
     let file_path = dir.join(format!("{}.md", note.slug));
     let tmp_path = dir.join(format!(".note-tmp-{}", std::process::id()));
 
-    let mut content = format!("# {}\n", note.title);
-    if !note.body.is_empty() {
+    // A body that opens with frontmatter keeps it first in the file, so Obsidian
+    // still reads it as properties; the title heading goes right after it.
+    let (frontmatter, body) = match split_frontmatter(&note.body) {
+        Some((fm, rest)) => (fm, rest.trim_start_matches(['\n', '\r'])),
+        None => ("", note.body.as_str()),
+    };
+    let mut content = String::from(frontmatter);
+    if !frontmatter.is_empty() {
+        if !frontmatter.ends_with('\n') {
+            content.push('\n');
+        }
         content.push('\n');
-        content.push_str(&note.body);
-        if !note.body.ends_with('\n') {
+    }
+    content.push_str(&format!("# {}\n", note.title));
+    if !body.is_empty() {
+        content.push('\n');
+        content.push_str(body);
+        if !body.ends_with('\n') {
             content.push('\n');
         }
     }
@@ -296,6 +356,72 @@ mod tests {
 
         let read = read_note(&dir.path().join("multi.md")).unwrap();
         assert_eq!(read.body, "Line 1\nLine 2\nLine 3");
+    }
+
+    // -- frontmatter tests --
+
+    #[test]
+    fn test_frontmatter_body_is_written_first_and_round_trips() {
+        let dir = tempdir().unwrap();
+        let note = Note {
+            slug: "digest".to_string(),
+            title: "Email Digest".to_string(),
+            body: "---\ntype: digest\ntags: [email]\n---\n\nSummary here.".to_string(),
+        };
+        write_note(dir.path(), &note).unwrap();
+
+        let raw = fs::read_to_string(dir.path().join("digest.md")).unwrap();
+        assert_eq!(raw, "---\ntype: digest\ntags: [email]\n---\n\n# Email Digest\n\nSummary here.\n");
+
+        let read = read_note(&dir.path().join("digest.md")).unwrap();
+        assert_eq!(read.title, "Email Digest");
+        assert_eq!(read.body, "---\ntype: digest\ntags: [email]\n---\n\nSummary here.");
+    }
+
+    #[test]
+    fn test_frontmatter_only_body_round_trips() {
+        let dir = tempdir().unwrap();
+        let note = Note { slug: "fm".to_string(), title: "FM".to_string(), body: "---\na: 1\n---".to_string() };
+        write_note(dir.path(), &note).unwrap();
+        let read = read_note(&dir.path().join("fm.md")).unwrap();
+        assert_eq!(read.title, "FM");
+        assert_eq!(read.body, "---\na: 1\n---\n");
+    }
+
+    #[test]
+    fn test_read_frontmatter_note_without_heading_uses_title_field() {
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("x.md"), "---\ntitle: \"Meeting Review\"\n---\n\nBody text.\n").unwrap();
+        let read = read_note(&dir.path().join("x.md")).unwrap();
+        assert_eq!(read.title, "Meeting Review");
+        assert_eq!(read.body, "---\ntitle: \"Meeting Review\"\n---\n\nBody text.");
+    }
+
+    #[test]
+    fn test_read_frontmatter_note_without_heading_or_title_uses_slug() {
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("plain-fm.md"), "---\na: 1\n---\nBody.\n").unwrap();
+        let read = read_note(&dir.path().join("plain-fm.md")).unwrap();
+        assert_eq!(read.title, "plain-fm");
+    }
+
+    #[test]
+    fn test_append_keeps_frontmatter_first() {
+        let dir = tempdir().unwrap();
+        let note = Note { slug: "t".to_string(), title: "T".to_string(), body: "---\na: 1\n---\n\nFirst.".to_string() };
+        write_note(dir.path(), &note).unwrap();
+        append_to_note(dir.path(), "t", "Second.").unwrap();
+        let raw = fs::read_to_string(dir.path().join("t.md")).unwrap();
+        assert_eq!(raw, "---\na: 1\n---\n\n# T\n\nFirst.\n\nSecond.\n");
+    }
+
+    #[test]
+    fn test_unclosed_frontmatter_is_treated_as_plain_body() {
+        let dir = tempdir().unwrap();
+        let note = Note { slug: "hr".to_string(), title: "HR".to_string(), body: "---\nno closing".to_string() };
+        write_note(dir.path(), &note).unwrap();
+        let raw = fs::read_to_string(dir.path().join("hr.md")).unwrap();
+        assert_eq!(raw, "# HR\n\n---\nno closing\n");
     }
 
     // -- append_to_note tests --

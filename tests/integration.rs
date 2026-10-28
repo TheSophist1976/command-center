@@ -440,6 +440,32 @@ fn test_agent_instructions_edit_creates_file() {
 }
 
 #[test]
+fn test_note_edit_accepts_frontmatter_body() {
+    let dir = temp_dir();
+    let config_file = dir.path().join("config.md");
+    let tasks_file = dir.path().join("tasks.md");
+
+    let out = run_with_config(dir.path(), &config_file, &[
+        "--file", tasks_file.to_str().unwrap(),
+        "note", "add", "Email Digest"
+    ]);
+    assert!(out.status.success(), "add failed: {}", stderr(&out));
+
+    let out = run_with_config(dir.path(), &config_file, &[
+        "--file", tasks_file.to_str().unwrap(),
+        "note", "edit", "email-digest",
+        "--body", "---\ntype: digest\n---\n\nSummary."
+    ]);
+    assert!(out.status.success(), "edit failed: {}", stderr(&out));
+
+    let out = run_with_config(dir.path(), &config_file, &[
+        "--file", tasks_file.to_str().unwrap(),
+        "note", "list"
+    ]);
+    assert!(stdout(&out).contains("email-digest  Email Digest"), "list: {}", stdout(&out));
+}
+
+#[test]
 fn test_agent_instructions_show_after_edit() {
     let dir = temp_dir();
     let config_file = dir.path().join("config.md");
