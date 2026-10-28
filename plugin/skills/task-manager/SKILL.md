@@ -165,6 +165,7 @@ Notes are markdown files stored in the same directory as `tasks.db`. Each note h
 
 - `task note append` requires the note to already exist — it never creates one (errors if the slug isn't found)
 - `task note edit` requires at least one of `--title` or `--body`; omitting both is an error
+- A `--body` may start with YAML frontmatter (`---` … `---`): it is kept first in the file, with the `# <title>` heading right after it, so the note title and Obsidian properties both still work
 - `task note add --task <id>` creates the note even if the task is not found, but exits with code 1 and prints a warning
 - `task note rm` does not automatically clear the `notes` field on tasks that referenced the deleted note
 - `task note unlink` is idempotent — succeeds even if the task has no note linked
