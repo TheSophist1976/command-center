@@ -15,6 +15,7 @@ pub mod setup;
 pub mod update;
 pub mod update_state;
 pub mod task;
+pub mod thread;
 pub mod watch;
 
 #[cfg(feature = "tui")]

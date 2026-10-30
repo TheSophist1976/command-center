@@ -212,6 +212,11 @@ fn check_transition(t: &Task, event: Event) -> Result<(), String> {
     }
 }
 
+/// The task's state as a word, for messages.
+pub fn state_label(t: &Task) -> &'static str {
+    state_name(state(t))
+}
+
 fn state_name(s: State) -> &'static str {
     match s {
         State::Todo => "todo",

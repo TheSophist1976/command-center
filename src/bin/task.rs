@@ -2,7 +2,7 @@ use std::process;
 
 use clap::Parser;
 
-use task::cli::{AgentCommand, AgentInstructionsCommand, AgentMemoryCommand, AuthCommand, Cli, Command, ConfigCommand, NoteCommand};
+use task::cli::{AgentCommand, AgentInstructionsCommand, AgentMemoryCommand, AuthCommand, Cli, Command, ConfigCommand, NoteCommand, ThreadCommand};
 
 fn main() {
     let cli = Cli::parse();
@@ -112,6 +112,19 @@ fn run(cli: Cli) -> Result<(), (i32, String)> {
             }
         },
 
+        Some(Command::Thread { subcommand }) => {
+            let dir = task::db::resolve_notes_dir(&path);
+            let out = match subcommand {
+                ThreadCommand::Show { id } => task::commands::thread_show(&dir, id)?,
+                ThreadCommand::Post { id, reply, question } => {
+                    task::commands::thread_post(&path, &dir, id, reply, question, task::commands::cli_actor())?
+                }
+                ThreadCommand::Migrate { dry_run } => task::commands::thread_migrate(&path, &dir, dry_run)?,
+            };
+            println!("{}", out);
+            Ok(())
+        }
+
         Some(Command::Note { subcommand }) => {
             let dir = task::db::resolve_notes_dir(&path);
             let task_filename = path
@@ -158,6 +171,13 @@ fn run(cli: Cli) -> Result<(), (i32, String)> {
                 }
 
                 NoteCommand::Show { slug } => {
+                    if let Some(l) = task::thread::legacy_of(&slug) {
+                        let id = match l { task::thread::Legacy::Review(i) | task::thread::Legacy::Question(i) => i };
+                        if let Some(v) = task::thread::view(&dir, id) {
+                            println!("# Conversation\n\n{}", v.body);
+                            return Ok(());
+                        }
+                    }
                     let note_path = dir.join(format!("{}.md", slug));
                     let n = task::note::read_note(&note_path).map_err(|e| (1, e))?;
                     println!("# {}", n.title);
@@ -174,6 +194,12 @@ fn run(cli: Cli) -> Result<(), (i32, String)> {
                 NoteCommand::Edit { slug, title, body } => {
                     if title.is_none() && body.is_none() {
                         return Err((1, "at least one of --title or --body must be provided".to_string()));
+                    }
+                    if let (Some(l), Some(b)) = (task::thread::legacy_of(&slug), body.as_deref()) {
+                        // Old callers replaced the whole note; the thread only ever grows.
+                        let out = task::commands::legacy_note_write(&path, &dir, l, b)?;
+                        println!("{}", out);
+                        return Ok(());
                     }
                     let note_path = dir.join(format!("{}.md", slug));
                     let mut n = task::note::read_note(&note_path).map_err(|e| (1, e))?;
@@ -195,6 +221,11 @@ fn run(cli: Cli) -> Result<(), (i32, String)> {
                 }
 
                 NoteCommand::Append { slug, body } => {
+                    if let Some(l) = task::thread::legacy_of(&slug) {
+                        let out = task::commands::legacy_note_write(&path, &dir, l, &body)?;
+                        println!("{}", out);
+                        return Ok(());
+                    }
                     let file_path = task::note::append_to_note(&dir, &slug, &body).map_err(|e| (1, e))?;
                     println!("{}", file_path.display());
                     Ok(())
