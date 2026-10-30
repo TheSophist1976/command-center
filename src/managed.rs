@@ -229,6 +229,7 @@ mod tests {
         let targets = managed_files(&config, &home);
         assert!(targets.iter().any(|(p, _)| p == &dir.path().join("tasks").join("AGENTS.md")));
         assert!(targets.iter().any(|(p, _)| p == &home.join(".claude/skills/task-manager/SKILL.md")));
+        assert!(targets.iter().any(|(p, _)| p == &home.join(".claude/skills/work-agent-tasks/SKILL.md")));
     }
 
     #[test]

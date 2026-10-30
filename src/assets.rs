@@ -44,13 +44,23 @@ mod tests {
     }
 
     #[test]
-    fn plugin_and_installed_task_manager_skills_do_not_drift() {
-        let installed = include_str!("../skills/task-manager/SKILL.md");
-        let plugin = include_str!("../plugin/skills/task-manager/SKILL.md");
-        assert_eq!(
-            installed, plugin,
-            "skills/task-manager/SKILL.md (installed by `task setup`) and plugin/skills/task-manager/SKILL.md must be identical; edit one and copy it to the other"
-        );
+    fn skill_files_include_work_agent_tasks_skill() {
+        assert!(skill_files().iter().any(|f| f.rel_path == "work-agent-tasks/SKILL.md"));
+    }
+
+    #[test]
+    fn plugin_and_installed_skills_do_not_drift() {
+        let pairs = [
+            ("task-manager", include_str!("../skills/task-manager/SKILL.md"), include_str!("../plugin/skills/task-manager/SKILL.md")),
+            ("work-agent-tasks", include_str!("../skills/work-agent-tasks/SKILL.md"), include_str!("../plugin/skills/work-agent-tasks/SKILL.md")),
+        ];
+        for (name, installed, plugin) in pairs {
+            assert_eq!(
+                installed, plugin,
+                "skills/{0}/SKILL.md (installed by `task setup`) and plugin/skills/{0}/SKILL.md must be identical; edit one and copy it to the other",
+                name
+            );
+        }
     }
 
     #[test]
@@ -66,7 +76,7 @@ mod tests {
     fn shared_skills_name_no_personal_paths_or_harness_specific_tools() {
         let skills = [
             ("task-manager", include_str!("../skills/task-manager/SKILL.md")),
-            ("work-agent-tasks", include_str!("../plugin/skills/work-agent-tasks/SKILL.md")),
+            ("work-agent-tasks", include_str!("../skills/work-agent-tasks/SKILL.md")),
             ("slack-later-capture", include_str!("../plugin/skills/slack-later-capture/SKILL.md")),
         ];
         for (name, text) in skills {
