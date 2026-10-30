@@ -44,19 +44,24 @@ Unknown headings render as a human message. Legacy `## Agent response` and
 
 ## State machine
 
-The server computes `allowed_action` per task from `work_status`; the UI only
-renders it.
+`src/lifecycle.rs` already owns the state machine. The thread adds no states:
+`thread::allowed(task)` reads `lifecycle::check` and `lifecycle::state`, and the
+server returns it as `allowed_action`; the UI only renders it.
 
-| work_status | Composer | Send records | Resulting work_status |
+| State | Composer | Send records | Result |
 |---|---|---|---|
-| `needs-input` | "Answer" (focused, call-to-action) | `Answer` | `changes-requested` |
-| `waiting-for-review` | "Request changes" + **Approve** button | `Feedback` / `Approval` | `changes-requested` / `complete` |
-| `todo`, `in-progress`, `changes-requested` | "Message the agent" | `Message` | unchanged |
-| `complete` or none | none; history collapsed | rejected | — |
+| `needs-input` | "Answer" (focused) | `Answer` | `changes-requested` (Event::Answer) |
+| `waiting-for-review` | "Request changes" + **Approve** | `Feedback` / `Approval` | `changes-requested` (Event::Feedback) / done (`lifecycle::complete`) |
+| `done` | "Request changes" | `Feedback` | `changes-requested` (reopens, as the lifecycle already allows) |
+| `changes-requested` | "Message the agent" | `Message` | unchanged |
+| `todo`, `in-progress`, agent-owned | "Message the agent" | `Message` | unchanged |
+| human-owned or unassigned `todo` / `in-progress`, services | none; history collapsed | rejected | — |
 
-Approve sets `complete` only. It never marks the task done (unchanged rule from
-the work-status spec). `POST` to a state that does not allow the message kind
-returns 409.
+Approve marks the task **done** (`lifecycle::complete`, so a recurring task
+spawns its next occurrence). The earlier draft said `complete`; in 5.x that is a
+retired alias for `waiting-for-review`. A kind the state does not allow returns
+409 with the lifecycle's own wording ("cannot answer a question on task N: it is
+in-progress").
 
 ### Unread messages
 
@@ -67,15 +72,16 @@ without migrations and the UI and agent compute the same answer.
 
 ## API
 
-- `GET /api/tasks/:id/thread` → `{ note, allowed_action, unread }`.
+- `GET /api/tasks/:id/thread` → `{ note, allowed_action: { send, approve }, unread }`.
 - `POST /api/tasks/:id/thread` with `{ kind, text }` where `kind` is one of
   `answer | feedback | message | approve`. The server validates `kind`
   against `allowed_action`, appends the section, links the note, applies the
   transition, and returns the note — all under the existing write lock, as
   `add_task_review_feedback` does today.
-- Removed: `/review` and `/question` routes, `QuestionPanel`, `ReviewPanel`.
-- The freeze-before-review snapshot (`record_review_snapshot`) writes into
-  `task-N-thread` instead.
+- `/review` and `/question` remain as deprecated aliases (GET returns the thread
+  note; POST maps to `feedback`/`answer`, or `message` while `changes-requested`).
+  `QuestionPanel` and `ReviewPanel` are removed in favour of `ConversationPanel`.
+- Any post touches the task's `updated`, so live viewers refetch.
 
 ## Agent side
 
