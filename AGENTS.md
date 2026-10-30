@@ -41,7 +41,7 @@ Each task in the JSON has a `pickup` value telling you why it is there:
 | `answered_question` | The human answered your `needs-input` question; the answer is the last section of `thread`. |
 | `message` | The human wrote to you while you were working; read the end of `thread`. |
 
-Alongside `task` it carries `thread` (the whole conversation with the human as one markdown body, or `null`), `unread` (true when the human wrote last and you have not replied) and `notes` (the other linked notes, each with `slug`, `title`, `body`). Top-level `instructions` and `memory` are your standing instructions and memory, so you do not need to read them separately.
+Alongside `task` it carries `thread` (the whole conversation with the human as one markdown body, or `null`), `unread` (true when the human wrote last and you have not replied) and `notes` (the other linked notes, each with `slug`, `title`, `body`). `review_thread` and `question` are deprecated aliases of `thread`. Top-level `instructions` and `memory` are your standing instructions and memory, so you do not need to read them separately.
 
 **Without `TASK_AGENT`**, identity comes from the config file at `~/Library/Application Support/task-manager/config.md` (macOS) or `~/.config/task-manager/config.md` (Linux). Each `agent-*` entry defines a profile and its working directory:
 ```

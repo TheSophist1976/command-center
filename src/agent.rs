@@ -194,6 +194,9 @@ pub fn entry_json(e: &QueueEntry) -> Value {
         "pickup": e.pickup.as_str(),
         "thread": e.thread,
         "unread": e.unread,
+        // Deprecated aliases of `thread`, so harnesses written against the old shape keep working.
+        "review_thread": e.thread,
+        "question": e.thread,
         "notes": e.notes.iter().map(|n| json!({"slug": n.slug, "title": n.title, "body": n.body})).collect::<Vec<_>>(),
     })
 }
@@ -414,6 +417,7 @@ mod tests {
         assert_eq!(first["task"]["id"], 1);
         assert_eq!(first["pickup"], "new");
         assert!(first["thread"].is_null());
+        assert!(first["review_thread"].is_null() && first["question"].is_null());
         assert_eq!(first["unread"], false);
         assert_eq!(first["notes"], json!([]));
     }
