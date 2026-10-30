@@ -17,9 +17,9 @@ Tasks can be assigned to specific AI agents via the `agent` field in task metada
 2. Ask for your work queue:
    ```
    task next            # one line per task, in the order to work them
-   task next --json     # full queue: your instructions, memory, tasks, review threads, linked notes
+   task next --json     # full queue: your instructions, memory, tasks, the conversation thread, linked notes
    ```
-   `task next` already skips tasks that were handed back (`waiting-for-review`), tasks blocked on the human (`needs-input`), and recurring tasks that are not due yet. Each task in the JSON has a `pickup` of `new`, `continue`, `review_feedback` or `answered_question`, telling you why it is there.
+   `task next` already skips tasks that were handed back (`waiting-for-review`), tasks blocked on the human (`needs-input`), and recurring tasks that are not due yet. Each task in the JSON has a `pickup` of `new`, `continue`, `review_feedback`, `answered_question` or `message`, telling you why it is there, plus `thread` (the conversation with the human) and `unread` (they wrote last).
 
 Only work on tasks assigned to your agent profile. Tasks with `agent:human` are for the human. Tasks with no `agent` field are unassigned — do not work on these unless explicitly told to.
 
@@ -91,9 +91,9 @@ Valid values: `todo`, `in-progress`, `waiting-for-review`, `changes-requested`, 
 
 A work status is never the same as `task done`: only the human closes a task.
 
-**`changes-requested`** means a human left feedback on the task's review thread (see "Review Threads" below) and it needs another round of work — this value is set automatically by the web UI when feedback is posted, not something you normally set by hand. It is also set when the human answers one of your questions (see "Asking a Question" below).
+**`changes-requested`** means a human left feedback on the task's conversation (see "The Conversation" below) and it needs another round of work — this value is set automatically by the web UI when feedback is posted, not something you normally set by hand. It is also set when the human answers one of your questions (see "The Conversation" below).
 
-**`needs-input`** means you are blocked on a question for the human (see "Asking a Question" below).
+**`needs-input`** means you are blocked on a question for the human (see "The Conversation" below).
 
 ## Completing a Task
 
@@ -131,10 +131,10 @@ task rm <id>
 
 ## Writing Text for the Web UI
 
-The web UI renders every free-text field as GitHub-flavoured markdown: task titles (inline only: bold, italics, `code`, links), descriptions, instructions, note bodies, question notes, review-thread messages and service run summaries. Write all of them in markdown:
+The web UI renders every free-text field as GitHub-flavoured markdown: task titles (inline only: bold, italics, `code`, links), descriptions, instructions, note bodies, conversation messages and service run summaries. Write all of them in markdown:
 
 - Keep it short and scannable: a one-line summary first, then short paragraphs or bullet lists.
-- Use **bold** labels or `###` headings for sections. In review threads and question notes, never start a line with `## ` except the required `## Agent response — <date>` heading; the UI splits review threads into chat messages on `## ` lines.
+- Use **bold** labels or `###` headings for sections. In a conversation message, never start a line with `## `; the UI splits the thread into chat messages on `## ` lines (`task thread post` writes the heading for you).
 - Put commands, paths, ids, branch names and slugs in `inline code`, and multi-line commands or output in fenced code blocks with a language (```` ```sh ````). The UI adds a copy button to every code block and to every description, instructions field and note.
 - Write links as `[PR #42](https://github.com/...)` or paste the bare URL; both are clickable. Never wrap a URL in backticks, which makes it unclickable.
 - Use `- [ ]` / `- [x]` task lists for checklists and tables only for real tabular data.
@@ -171,52 +171,30 @@ Notes are markdown files stored in the same directory as `tasks.db`. Each note h
 - `task note unlink` is idempotent — succeeds even if the task has no note linked
 - The `--file` flag (global) can be used to target a different task database: `task --file /path/to/tasks.db note list`
 
-## Review Threads
+## The Conversation
 
-When a human gives feedback on a task you completed, it arrives as a note titled `Review — <task title>` with a deterministic slug: `task-<id>-review-thread`. This note is a running, append-only markdown log — the human's feedback and your responses interleave in it as a single conversation, oldest first.
-
-**To read the full history before acting on feedback:**
+Everything between you and the human on a task, whether feedback on finished work, a question you asked, or a note they sent while you work, is one append-only note per task, `task-<id>-thread`. Its sections are `## <Kind> — <YYYY-MM-DD>`: `Agent` and `Question` are yours; `Answer`, `Feedback`, `Message` and `Approval` are the human's; `Snapshot` is system. Always go through the CLI, which links the note to the task and never rewrites history:
 
 ```
-task note show task-<id>-review-thread
+task thread show <id>                              # read the whole conversation
+task thread post <id> --reply "<text>"             # reply; the work status does not change
+task thread post <id> --question "<the question>"  # ask, and set needs-input in one step
 ```
 
-Always read the whole thread, not just the newest section — earlier rounds carry context (what was already tried, what was already explained) that matters for getting the next round right.
+**Read the whole thread before acting, not just the newest section.** Earlier rounds carry context (what was already tried, what was already explained). `task next --json` includes it as `thread`, with `unread: true` when the human wrote last.
 
-**To respond after doing the requested work:**
-
-```
-task note append task-<id>-review-thread --body "## Agent response — <YYYY-MM-DD>
-
-<summary of what changed>"
-```
-
-Then set `task edit <id> --work-status waiting-for-review` again — see `work-agent-tasks` for the full loop.
-
-You'll only ever see a `task-<id>-review-thread` note on a task whose `work_status` is `changes-requested`; the note itself is created automatically by the web UI the first time a human leaves feedback, not by you.
-
-## Asking a Question
-
-When you are blocked on something only the human can answer, put the question where the web UI can show it, so it is not lost in a terminal nobody is watching:
+**After a `changes-requested` round**, do the requested work, reply with what changed, then hand back:
 
 ```
-task note show task-<id>-question 2>/dev/null   # does a question note already exist?
+task thread post <id> --reply "<summary of what changed>"
+task edit <id> --work-status waiting-for-review
 ```
 
-If it does not exist, create it. `task note add` derives the slug from the title, so the title must be exactly `Task <id> Question` for the slug to be `task-<id>-question`:
+**To ask a question** when you are blocked on something only the human can answer, use `--question`. It surfaces in the web UI as a badge, so it is not lost in a terminal nobody is watching. A service cannot ask; record a failed run instead. When the human answers, a `## Answer` section is added and the task becomes `changes-requested` with `pickup: answered_question`: read the end of the thread, treat it as the reply, set `--work-status in-progress`, and continue. Do not ask the same question again.
 
-```
-task note add "Task <id> Question" --task <id>
-```
+**Unsolicited messages.** While you are `todo`, `in-progress` or `changes-requested` the human may write to you without changing the status (`pickup: message`, or `unread: true`). Read the end of the thread, acknowledge with `--reply`, and carry on. When the human approves your work, an `Approval` section is added and the task is marked done.
 
-Then set the question text (`--body` replaces the whole body, which is right because only one question is active at a time) and flag the task:
-
-```
-task note edit task-<id>-question --body "<the question>"
-task edit <id> --work-status needs-input
-```
-
-When the human answers from the web UI, an `## Answer — <YYYY-MM-DD>` section is appended to that note and the task's `work_status` becomes `changes-requested`. If you find a `changes-requested` task whose question note ends in an answer, read the note, treat it as the reply, set `--work-status in-progress`, and continue. Do not ask the same question again.
+Older tasks may still have `task-<id>-review-thread` and `task-<id>-question` notes. They are merged into the thread automatically (the originals move to `Notes/.migrated/`); `task thread migrate [--dry-run]` does it for every task. `task note show|append|edit` on those two slugs still works but appends to the thread, never replaces it.
 
 ## Agent Instructions and Memory
 
