@@ -699,14 +699,6 @@ fn notes_dir(state: &AppState) -> PathBuf {
     state.notes_dir.clone()
 }
 
-fn review_thread_slug(task_id: u32) -> String {
-    crate::agent::review_thread_slug(task_id)
-}
-
-fn question_slug(task_id: u32) -> String {
-    crate::agent::question_slug(task_id)
-}
-
 /// Slugs become filenames (`{slug}.md`) joined onto the notes directory. Reject anything
 /// that isn't alphanumeric/hyphen/underscore so a slug can never escape that directory
 /// (e.g. via `..` path segments or an absolute path).
@@ -793,40 +785,178 @@ async fn create_task_note(
     Ok(Json(note_response(note, modified)))
 }
 
-async fn get_task_review(
-    State(state): State<Arc<AppState>>,
-    AxumPath(id): AxumPath<u32>,
-) -> Result<Json<Option<NoteResponse>>, (StatusCode, Json<serde_json::Value>)> {
-    let task_file = db::load(&state.db_path)
-        .map_err(|e| app_error(StatusCode::INTERNAL_SERVER_ERROR, e))?;
-    if task_file.find_task(id).is_none() {
-        return Err(app_error(StatusCode::NOT_FOUND, format!("Task {} not found", id)));
-    }
-    let dir = notes_dir(&state);
-    let slug = review_thread_slug(id);
-    let path = dir.join(format!("{}.md", slug));
-    let note = crate::note::read_note(&path)
-        .ok()
-        .map(|n| note_response(n, modified_time(&path)));
-    Ok(Json(note))
+#[derive(Serialize)]
+pub struct ThreadResponse {
+    pub note: Option<NoteResponse>,
+    /// What the composer offers right now, derived from the task's lifecycle state.
+    pub allowed_action: crate::thread::Allowed,
+    /// The human wrote last and the agent has not answered yet.
+    pub unread: bool,
 }
 
-async fn get_task_question(
+#[derive(Deserialize)]
+pub struct ThreadPost {
+    /// `answer`, `feedback`, `message` or `approve`.
+    pub kind: String,
+    #[serde(default)]
+    pub text: String,
+}
+
+fn thread_response(dir: &Path, task: &Task) -> ThreadResponse {
+    let view = crate::thread::view(dir, task.id);
+    let unread = view.as_ref().is_some_and(|v| v.unread());
+    let note = view.map(|v| {
+        let slug = crate::thread::slug(task.id);
+        let modified = modified_time(&dir.join(format!("{}.md", slug)));
+        note_response(crate::note::Note { slug, title: format!("Conversation — {}", task.title), body: v.body }, modified)
+    });
+    ThreadResponse { note, allowed_action: crate::thread::allowed(task), unread }
+}
+
+/// Folds any old review/question notes into the thread the first time a task is touched.
+async fn migrate_legacy_notes(state: &AppState, id: u32) -> Result<(), (StatusCode, Json<serde_json::Value>)> {
+    let dir = notes_dir(state);
+    if crate::thread::pending_legacy(&dir, id).is_empty() {
+        return Ok(());
+    }
+    let _guard = state.write_lock.lock().await;
+    let mut task_file = db::begin(&state.db_path).map_err(|e| app_error(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    let Some(t) = task_file.find_task_mut(id) else { return Ok(()) };
+    let archived = crate::thread::migrate(&dir, t).map_err(|e| app_error(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    task_file.commit().map_err(|e| app_error(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    crate::thread::archive(&dir, &archived).map_err(|e| app_error(StatusCode::INTERNAL_SERVER_ERROR, e))
+}
+
+async fn get_task_thread(
+    State(state): State<Arc<AppState>>,
+    AxumPath(id): AxumPath<u32>,
+) -> Result<Json<ThreadResponse>, (StatusCode, Json<serde_json::Value>)> {
+    migrate_legacy_notes(&state, id).await?;
+    let task_file = db::load(&state.db_path).map_err(|e| app_error(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    let task = task_file
+        .find_task(id)
+        .ok_or_else(|| app_error(StatusCode::NOT_FOUND, format!("Task {} not found", id)))?;
+    Ok(Json(thread_response(&notes_dir(&state), task)))
+}
+
+/// Deprecated: the old review/question reads now return the unified thread note.
+async fn get_task_thread_note(
     State(state): State<Arc<AppState>>,
     AxumPath(id): AxumPath<u32>,
 ) -> Result<Json<Option<NoteResponse>>, (StatusCode, Json<serde_json::Value>)> {
-    let task_file = db::load(&state.db_path)
-        .map_err(|e| app_error(StatusCode::INTERNAL_SERVER_ERROR, e))?;
-    if task_file.find_task(id).is_none() {
-        return Err(app_error(StatusCode::NOT_FOUND, format!("Task {} not found", id)));
+    Ok(Json(get_task_thread(State(state), AxumPath(id)).await?.0.note))
+}
+
+async fn post_task_thread(
+    State(state): State<Arc<AppState>>,
+    AxumPath(id): AxumPath<u32>,
+    Json(req): Json<ThreadPost>,
+) -> Result<Json<ThreadResponse>, (StatusCode, Json<serde_json::Value>)> {
+    post_thread(&state, id, &req.kind, req.text.trim()).await.map(Json)
+}
+
+async fn post_thread(
+    state: &AppState,
+    id: u32,
+    kind: &str,
+    text: &str,
+) -> Result<ThreadResponse, (StatusCode, Json<serde_json::Value>)> {
+    use crate::thread::Kind;
+    let note_kind = match kind {
+        "answer" => Kind::Answer,
+        "feedback" => Kind::Feedback,
+        "message" => Kind::Message,
+        "approve" => Kind::Approval,
+        other => return Err(app_error(StatusCode::BAD_REQUEST, format!("unknown kind '{}': use answer, feedback, message or approve", other))),
+    };
+    if kind != "approve" && text.is_empty() {
+        return Err(app_error(StatusCode::BAD_REQUEST, format!("{} text must not be empty", kind)));
     }
-    let dir = notes_dir(&state);
-    let slug = question_slug(id);
-    let path = dir.join(format!("{}.md", slug));
-    let note = crate::note::read_note(&path)
-        .ok()
-        .map(|n| note_response(n, modified_time(&path)));
-    Ok(Json(note))
+
+    let _guard = state.write_lock.lock().await;
+    let mut task_file = db::begin(&state.db_path).map_err(|e| app_error(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    let current = task_file
+        .find_task(id)
+        .cloned()
+        .ok_or_else(|| app_error(StatusCode::NOT_FOUND, format!("Task {} not found", id)))?;
+
+    let verb = match kind {
+        "answer" => "answer a question on",
+        "feedback" => "post review feedback on",
+        "message" => "message the agent on",
+        _ => "approve",
+    };
+    let allowed = crate::thread::allowed(&current);
+    let permitted = if kind == "approve" { allowed.approve } else { allowed.send == Some(kind) };
+    if !permitted {
+        return Err(app_error(
+            StatusCode::CONFLICT,
+            format!("cannot {} task {}: it is {}", verb, id, crate::lifecycle::state_label(&current)),
+        ));
+    }
+
+    let dir = notes_dir(state);
+    let today = chrono::Local::now().date_naive();
+    let archived;
+    match kind {
+        "approve" => {
+            crate::lifecycle::complete(&mut task_file, id, Actor::Human, today)
+                .map_err(|e| app_error(StatusCode::CONFLICT, e))?;
+            let t = task_file.find_task_mut(id).expect("checked above");
+            let body = if text.is_empty() { "Approved." } else { text };
+            archived = crate::thread::post(&dir, t, note_kind, body, today)
+                .map_err(|e| app_error(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+        }
+        _ => {
+            // answer and feedback move the task; a message does not.
+            let mut updated = match kind {
+                "answer" => apply_event_to_copy(&task_file, id, Event::Answer)?,
+                "feedback" => apply_event_to_copy(&task_file, id, Event::Feedback)?,
+                _ => current,
+            };
+            archived = crate::thread::post(&dir, &mut updated, note_kind, text, today)
+                .map_err(|e| app_error(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+            if let Some(t) = task_file.find_task_mut(id) {
+                *t = updated;
+            }
+        }
+    }
+    let task = task_file.find_task(id).cloned().expect("checked above");
+    task_file.commit().map_err(|e| app_error(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    crate::thread::archive(&dir, &archived).map_err(|e| app_error(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    Ok(thread_response(&dir, &task))
+}
+
+/// Deprecated alias for `POST /thread` with kind `feedback` (or `message` when feedback is not open).
+async fn add_task_review_feedback(
+    State(state): State<Arc<AppState>>,
+    AxumPath(id): AxumPath<u32>,
+    Json(req): Json<FeedbackRequest>,
+) -> Result<Json<NoteResponse>, (StatusCode, Json<serde_json::Value>)> {
+    legacy_post(&state, id, "feedback", &req.text).await
+}
+
+/// Deprecated alias for `POST /thread` with kind `answer`.
+async fn answer_task_question(
+    State(state): State<Arc<AppState>>,
+    AxumPath(id): AxumPath<u32>,
+    Json(req): Json<FeedbackRequest>,
+) -> Result<Json<NoteResponse>, (StatusCode, Json<serde_json::Value>)> {
+    legacy_post(&state, id, "answer", &req.text).await
+}
+
+async fn legacy_post(
+    state: &AppState,
+    id: u32,
+    kind: &str,
+    text: &str,
+) -> Result<Json<NoteResponse>, (StatusCode, Json<serde_json::Value>)> {
+    let task_file = db::load(&state.db_path).map_err(|e| app_error(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    // Feedback on a task already in changes-requested is now a plain message.
+    let in_changes = task_file.find_task(id).is_some_and(|t| crate::lifecycle::state_label(t) == "changes-requested");
+    let kind = if in_changes { "message" } else { kind };
+    let r = post_thread(state, id, kind, text.trim()).await?;
+    r.note.map(Json).ok_or_else(|| app_error(StatusCode::INTERNAL_SERVER_ERROR, "thread was not written"))
 }
 
 #[derive(Deserialize)]
@@ -854,101 +984,6 @@ fn apply_event_to_copy(
     lifecycle::apply(&mut t, event, Actor::Human, false, chrono::Local::now().date_naive())
         .map_err(|e| app_error(StatusCode::CONFLICT, e))?;
     Ok(t)
-}
-
-fn store_with_note(task_file: &mut crate::task::TaskFile, mut updated: Task, slug: &str) {
-    if !updated.notes.iter().any(|s| s == slug) {
-        updated.notes.push(slug.to_string());
-    }
-    if let Some(t) = task_file.find_task_mut(updated.id) {
-        *t = updated;
-    }
-}
-
-async fn add_task_review_feedback(
-    State(state): State<Arc<AppState>>,
-    AxumPath(id): AxumPath<u32>,
-    Json(req): Json<FeedbackRequest>,
-) -> Result<Json<NoteResponse>, (StatusCode, Json<serde_json::Value>)> {
-    let text = req.text.trim();
-    if text.is_empty() {
-        return Err(app_error(StatusCode::BAD_REQUEST, "feedback text must not be empty"));
-    }
-
-    let _guard = state.write_lock.lock().await;
-    let mut task_file = db::begin(&state.db_path)
-        .map_err(|e| app_error(StatusCode::INTERNAL_SERVER_ERROR, e))?;
-
-    let dir = notes_dir(&state);
-    let slug = review_thread_slug(id);
-    let note_path = dir.join(format!("{}.md", slug));
-
-    let updated = apply_event_to_copy(&task_file, id, Event::Feedback)?;
-
-    if !note_path.exists() {
-        crate::note::write_note(
-            &dir,
-            &crate::note::Note { slug: slug.clone(), title: format!("Review — {}", updated.title), body: String::new() },
-        )
-        .map_err(|e| app_error(StatusCode::INTERNAL_SERVER_ERROR, e))?;
-    }
-
-    let today = chrono::Local::now().date_naive().format("%Y-%m-%d");
-    let section = format!("## Feedback — {}\n\n{}", today, text);
-    crate::note::append_to_note(&dir, &slug, &section)
-        .map_err(|e| app_error(StatusCode::INTERNAL_SERVER_ERROR, e))?;
-
-    store_with_note(&mut task_file, updated, &slug);
-    task_file.commit()
-        .map_err(|e| app_error(StatusCode::INTERNAL_SERVER_ERROR, e))?;
-
-    let note = crate::note::read_note(&note_path)
-        .map_err(|e| app_error(StatusCode::INTERNAL_SERVER_ERROR, e))?;
-    let modified = modified_time(&note_path);
-    Ok(Json(note_response(note, modified)))
-}
-
-async fn answer_task_question(
-    State(state): State<Arc<AppState>>,
-    AxumPath(id): AxumPath<u32>,
-    Json(req): Json<FeedbackRequest>,
-) -> Result<Json<NoteResponse>, (StatusCode, Json<serde_json::Value>)> {
-    let text = req.text.trim();
-    if text.is_empty() {
-        return Err(app_error(StatusCode::BAD_REQUEST, "answer text must not be empty"));
-    }
-
-    let _guard = state.write_lock.lock().await;
-    let mut task_file = db::begin(&state.db_path)
-        .map_err(|e| app_error(StatusCode::INTERNAL_SERVER_ERROR, e))?;
-
-    let dir = notes_dir(&state);
-    let slug = question_slug(id);
-    let note_path = dir.join(format!("{}.md", slug));
-
-    let updated = apply_event_to_copy(&task_file, id, Event::Answer)?;
-
-    if !note_path.exists() {
-        crate::note::write_note(
-            &dir,
-            &crate::note::Note { slug: slug.clone(), title: format!("Question — {}", updated.title), body: String::new() },
-        )
-        .map_err(|e| app_error(StatusCode::INTERNAL_SERVER_ERROR, e))?;
-    }
-
-    let today = chrono::Local::now().date_naive().format("%Y-%m-%d");
-    let section = format!("## Answer — {}\n\n{}", today, text);
-    crate::note::append_to_note(&dir, &slug, &section)
-        .map_err(|e| app_error(StatusCode::INTERNAL_SERVER_ERROR, e))?;
-
-    store_with_note(&mut task_file, updated, &slug);
-    task_file.commit()
-        .map_err(|e| app_error(StatusCode::INTERNAL_SERVER_ERROR, e))?;
-
-    let note = crate::note::read_note(&note_path)
-        .map_err(|e| app_error(StatusCode::INTERNAL_SERVER_ERROR, e))?;
-    let modified = modified_time(&note_path);
-    Ok(Json(note_response(note, modified)))
 }
 
 /// Mirrors tui.rs's `open_note_external`, minus the raw-mode terminal handling that has
@@ -1098,8 +1133,10 @@ fn api_routes() -> Router<Arc<AppState>> {
         .route("/api/tasks/:id/reopen", axum::routing::post(reopen_task))
         .route("/api/tasks/:id/notes", get(list_task_notes).post(create_task_note))
         .route("/api/tasks/:id/notes/:slug", axum::routing::delete(unlink_task_note))
-        .route("/api/tasks/:id/review", get(get_task_review).post(add_task_review_feedback))
-        .route("/api/tasks/:id/question", get(get_task_question).post(answer_task_question))
+        .route("/api/tasks/:id/thread", get(get_task_thread).post(post_task_thread))
+        // Deprecated aliases for /thread, kept until nothing calls them.
+        .route("/api/tasks/:id/review", get(get_task_thread_note).post(add_task_review_feedback))
+        .route("/api/tasks/:id/question", get(get_task_thread_note).post(answer_task_question))
         .route("/api/notes/:slug", axum::routing::put(edit_note))
         .route("/api/notes/:slug/open", axum::routing::post(open_note))
         .route("/api/agents", get(list_agents))
@@ -2692,8 +2729,11 @@ mod tests {
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
         let json = body_json(response).await;
-        assert_eq!(json["slug"], "task-1-question");
-        assert_eq!(json["body"], "Which environment should this target, staging or prod?");
+        assert_eq!(json["slug"], "task-1-thread");
+        assert!(json["body"].as_str().unwrap().contains("Which environment should this target, staging or prod?"));
+        // Reading folds the old note into the thread and keeps the original under .migrated.
+        assert!(!notes_dir.join("task-1-question.md").exists());
+        assert!(notes_dir.join(".migrated/task-1-question.md").is_file());
     }
 
     fn needs_input_task() -> crate::task::Task {
@@ -2734,7 +2774,7 @@ mod tests {
         let response = router(state.clone()).oneshot(post_question_answer("Use main.")).await.unwrap();
         assert_eq!(response.status(), StatusCode::OK);
         let json = body_json(response).await;
-        assert_eq!(json["slug"], "task-1-question");
+        assert_eq!(json["slug"], "task-1-thread");
         let body = json["body"].as_str().unwrap();
         assert!(body.contains("Which branch should I use?"));
         assert!(body.contains("## Answer —"));
@@ -2793,7 +2833,7 @@ mod tests {
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
         let json = body_json(response).await;
-        assert_eq!(json["slug"], "task-1-review-thread");
+        assert_eq!(json["slug"], "task-1-thread");
         assert!(json["body"].as_str().unwrap().contains("## Feedback —"));
         assert!(json["body"].as_str().unwrap().contains("Please fix the error handling."));
 
@@ -2904,7 +2944,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::CONFLICT);
-        assert!(!state.db_path.parent().unwrap().join("Notes").join("task-1-review-thread.md").exists());
+        assert!(!state.db_path.parent().unwrap().join("Notes").join("task-1-thread.md").exists());
         assert_eq!(db::load(&state.db_path).unwrap().tasks[0].work_status, None);
     }
 
@@ -2964,8 +3004,93 @@ mod tests {
         }
         let tf = db::load(&state.db_path).unwrap();
         let task = tf.find_task(1).unwrap();
-        let occurrences = task.notes.iter().filter(|s| s.as_str() == "task-1-review-thread").count();
-        assert_eq!(occurrences, 1, "the review-thread slug must be linked exactly once, not duplicated on the second post");
+        let occurrences = task.notes.iter().filter(|s| s.as_str() == "task-1-thread").count();
+        assert_eq!(occurrences, 1, "the thread slug must be linked exactly once, not duplicated on the second post");
+    }
+
+    fn thread_request(method: &str, kind: Option<&str>, text: &str) -> Request<Body> {
+        let b = Request::builder().method(method).uri("/api/tasks/1/thread").header("host", "127.0.0.1");
+        match kind {
+            Some(k) => b
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_vec(&serde_json::json!({ "kind": k, "text": text })).unwrap()))
+                .unwrap(),
+            None => b.body(Body::empty()).unwrap(),
+        }
+    }
+
+    fn seed(state: &AppState, ws: Option<crate::task::WorkStatus>, agent: Option<&str>) {
+        let mut tf = crate::task::TaskFile::new();
+        let mut t = sample_task_with_note();
+        t.work_status = ws;
+        t.agent = agent.map(String::from);
+        tf.tasks.push(t);
+        db::save(&state.db_path, &tf).unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_thread_get_reports_allowed_action_and_unread() {
+        let (_dir, state) = make_state();
+        seed(&state, Some(crate::task::WorkStatus::WaitingForReview), Some("bot"));
+        let json = body_json(router(state.clone()).oneshot(thread_request("GET", None, "")).await.unwrap()).await;
+        assert!(json["note"].is_null());
+        assert_eq!(json["allowed_action"], serde_json::json!({ "send": "feedback", "approve": true }));
+        assert_eq!(json["unread"], false);
+
+        let r = router(state).oneshot(thread_request("POST", Some("feedback"), "tighten it")).await.unwrap();
+        let json = body_json(r).await;
+        assert_eq!(json["unread"], true);
+        assert_eq!(json["allowed_action"]["send"], "message");
+        assert!(json["note"]["body"].as_str().unwrap().contains("## Feedback —"));
+    }
+
+    #[tokio::test]
+    async fn test_thread_message_while_working_keeps_the_state() {
+        let (_dir, state) = make_state();
+        seed(&state, Some(crate::task::WorkStatus::InProgress), Some("bot"));
+        let r = router(state.clone()).oneshot(thread_request("POST", Some("message"), "also handle empty input")).await.unwrap();
+        assert_eq!(r.status(), StatusCode::OK);
+        let tf = db::load(&state.db_path).unwrap();
+        let t = tf.find_task(1).unwrap();
+        assert_eq!(t.work_status, Some(crate::task::WorkStatus::InProgress));
+        assert!(t.notes.contains(&"task-1-thread".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_thread_rejects_a_kind_the_state_does_not_allow() {
+        let (_dir, state) = make_state();
+        seed(&state, Some(crate::task::WorkStatus::WaitingForReview), Some("bot"));
+        for kind in ["answer", "message"] {
+            let r = router(state.clone()).oneshot(thread_request("POST", Some(kind), "x")).await.unwrap();
+            assert_eq!(r.status(), StatusCode::CONFLICT, "{}", kind);
+        }
+        let r = router(state.clone()).oneshot(thread_request("POST", Some("shout"), "x")).await.unwrap();
+        assert_eq!(r.status(), StatusCode::BAD_REQUEST);
+        let r = router(state.clone()).oneshot(thread_request("POST", Some("feedback"), "  ")).await.unwrap();
+        assert_eq!(r.status(), StatusCode::BAD_REQUEST);
+        assert!(!state.db_path.parent().unwrap().join("Notes").join("task-1-thread.md").exists());
+
+        // A human-owned task has nobody to message.
+        seed(&state, Some(crate::task::WorkStatus::InProgress), Some("human"));
+        let r = router(state).oneshot(thread_request("POST", Some("message"), "x")).await.unwrap();
+        assert_eq!(r.status(), StatusCode::CONFLICT);
+    }
+
+    #[tokio::test]
+    async fn test_thread_approve_marks_the_task_done_and_records_it() {
+        let (_dir, state) = make_state();
+        seed(&state, Some(crate::task::WorkStatus::WaitingForReview), Some("bot"));
+        let r = router(state.clone()).oneshot(thread_request("POST", Some("approve"), "")).await.unwrap();
+        assert_eq!(r.status(), StatusCode::OK);
+        let json = body_json(r).await;
+        assert!(json["note"]["body"].as_str().unwrap().contains("## Approval —"));
+        let tf = db::load(&state.db_path).unwrap();
+        assert_eq!(tf.find_task(1).unwrap().status, Status::Done);
+
+        // Approving is only offered while the work waits for review.
+        seed(&state, Some(crate::task::WorkStatus::InProgress), Some("bot"));
+        let r = router(state).oneshot(thread_request("POST", Some("approve"), "")).await.unwrap();
+        assert_eq!(r.status(), StatusCode::CONFLICT);
     }
 
     #[tokio::test]

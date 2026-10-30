@@ -16,7 +16,7 @@ test('review loop: submit, feedback, resubmit, done, reopen', async ({ page, cc 
   await page.keyboard.press('Escape');
   await page.locator('#field-title').click({ position: { x: 1, y: 1 } });
 
-  const composer = page.getByPlaceholder('Message the agent…', { exact: false });
+  const composer = page.getByPlaceholder('Request changes…', { exact: false });
   await composer.fill('Tighten the intro');
   await composer.press('Enter');
   await expect(statusControl(page)).toContainText('Changes Requested');
@@ -46,13 +46,47 @@ test('feedback on a done task reopens it for another round', async ({ page, cc }
   await inspectorButton(page, 'Mark done').click();
   await expect(inspectorButton(page, 'Reopen')).toBeVisible();
 
-  const composer = page.getByPlaceholder('Message the agent…', { exact: false });
+  const composer = page.getByPlaceholder('Request changes…', { exact: false });
   await composer.fill('One more thing');
   await composer.press('Enter');
   await expect(statusControl(page)).toContainText('Changes Requested');
   await expect(inspectorButton(page, 'Mark done')).toBeVisible();
   const t = await cc.task(id);
   expect([t.status, t.state]).toEqual(['open', 'changes-requested']);
+});
+
+test('message: the human writes to a working agent without changing its status', async ({ page, cc }) => {
+  const id = cc.add('Refactor the parser', '--agent', BOT);
+  cc.agent(BOT, 'edit', String(id), '--work-status', 'in-progress');
+  await openTask(page, cc, 'Refactor the parser');
+
+  const composer = page.getByPlaceholder('Message the agent…', { exact: false });
+  await composer.fill('Also handle empty input');
+  await composer.press('Enter');
+  await expect(page.getByRole('paragraph').filter({ hasText: 'Also handle empty input' })).toBeVisible();
+  await expect(page.getByText('Not yet seen by the agent')).toBeVisible();
+  // Writing is not a move: the task is still the agent's, in progress.
+  expect((await cc.task(id)).state).toBe('in-progress');
+  expect(cc.agent(BOT, 'next', '--json')).toContain('"pickup": "message"');
+
+  // The agent answers and the marker clears.
+  cc.reply(BOT, id, 'Done, empty input is handled.');
+  await expect(page.getByRole('paragraph').filter({ hasText: 'Done, empty input is handled.' })).toBeVisible();
+  await expect(page.getByText('Not yet seen by the agent')).toBeHidden();
+});
+
+test('approve: accepting reviewed work marks the task done', async ({ page, cc }) => {
+  const id = cc.add('Draft the post', '--agent', BOT);
+  cc.agent(BOT, 'edit', String(id), '--work-status', 'in-progress');
+  cc.reply(BOT, id, 'Draft is ready.');
+  cc.submit(BOT, id);
+  await openTask(page, cc, 'Draft the post');
+
+  await page.getByRole('button', { name: 'Approve' }).click();
+  await expect(inspectorButton(page, 'Reopen')).toBeVisible();
+  const t = await cc.task(id);
+  expect([t.status, t.state]).toEqual(['done', 'done']);
+  expect(cc.human('thread', 'show', String(id))).toContain('## Approval —');
 });
 
 test('question: the agent asks, the human answers', async ({ page, cc }) => {

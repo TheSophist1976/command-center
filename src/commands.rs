@@ -195,6 +195,98 @@ pub fn next(path: &Path, notes_dir: &Path, args: NextArgs) -> Result<String, (i3
     Ok(lines.join("\n"))
 }
 
+/// The conversation on a task, old review/question notes merged in.
+pub fn thread_show(notes_dir: &Path, id: u32) -> Result<String, (i32, String)> {
+    let v = crate::thread::view(notes_dir, id).ok_or_else(|| (1, format!("Task {} has no conversation yet", id)))?;
+    Ok(v.body)
+}
+
+/// Post to a task's conversation as the running actor. `--question` also asks via the
+/// lifecycle (agents only); `--reply` leaves the work status alone.
+pub fn thread_post(
+    path: &Path,
+    notes_dir: &Path,
+    id: u32,
+    reply: Option<String>,
+    question: Option<String>,
+    actor: Actor,
+) -> Result<String, (i32, String)> {
+    use crate::thread::Kind;
+    let (kind, text) = match (reply, question) {
+        (Some(t), None) => (Kind::Agent, t),
+        (None, Some(t)) => (Kind::Question, t),
+        _ => return Err((1, "give exactly one of --reply or --question".to_string())),
+    };
+    if text.trim().is_empty() {
+        return Err((1, "text must not be empty".to_string()));
+    }
+    let mut task_file = db::begin(path).map_err(|e| (1, e))?;
+    let today = chrono::Local::now().date_naive();
+    let t = task_file.find_task_mut(id).ok_or_else(|| (1, format!("Task {} not found", id)))?;
+    if t.is_service() {
+        return Err((1, format!("Task {} is a service; services have no conversation. Record runs with `task service run`", id)));
+    }
+    if kind == Kind::Question {
+        lifecycle::apply(t, Event::Ask, actor, false, today).map_err(|e| (1, e))?;
+    }
+    let archived = crate::thread::post(notes_dir, t, kind, &text, today).map_err(|e| (1, e))?;
+    task_file.commit().map_err(|e| (1, e))?;
+    crate::thread::archive(notes_dir, &archived).map_err(|e| (1, e))?;
+    Ok(match kind {
+        Kind::Question => format!("Asked on task {}; it is now needs-input", id),
+        _ => format!("Replied on task {}", id),
+    })
+}
+
+/// Fold every task's old review/question notes into its thread. With `dry_run`, only report.
+pub fn thread_migrate(path: &Path, notes_dir: &Path, dry_run: bool) -> Result<String, (i32, String)> {
+    let mut task_file = db::begin(path).map_err(|e| (1, e))?;
+    let mut lines = Vec::new();
+    let mut archive = Vec::new();
+    for t in task_file.tasks.iter_mut() {
+        let pending = crate::thread::pending_legacy(notes_dir, t.id);
+        if pending.is_empty() {
+            continue;
+        }
+        if dry_run {
+            lines.push(format!("task {}: would merge {} into {}", t.id, pending.join(", "), crate::thread::slug(t.id)));
+            continue;
+        }
+        let moved = crate::thread::migrate(notes_dir, t).map_err(|e| (1, format!("task {}: {}", t.id, e)))?;
+        lines.push(format!("task {}: merged {} into {}", t.id, moved.join(", "), crate::thread::slug(t.id)));
+        archive.extend(moved);
+    }
+    if dry_run {
+        if lines.is_empty() {
+            lines.push("Nothing to migrate.".to_string());
+        }
+        return Ok(lines.join("\n"));
+    }
+    task_file.commit().map_err(|e| (1, e))?;
+    crate::thread::archive(notes_dir, &archive).map_err(|e| (1, e))?;
+    if lines.is_empty() {
+        lines.push("Nothing to migrate.".to_string());
+    }
+    Ok(lines.join("\n"))
+}
+
+/// `task note show|append|edit` on an old `task-N-question` / `task-N-review-thread` slug:
+/// kept working for callers that predate the thread, and never replaces history.
+pub fn legacy_note_write(path: &Path, notes_dir: &Path, legacy: crate::thread::Legacy, body: &str) -> Result<String, (i32, String)> {
+    use crate::thread::{Kind, Legacy};
+    let (id, kind) = match legacy {
+        Legacy::Review(id) => (id, Kind::Agent),
+        Legacy::Question(id) => (id, Kind::Question),
+    };
+    let mut task_file = db::begin(path).map_err(|e| (1, e))?;
+    let t = task_file.find_task_mut(id).ok_or_else(|| (1, format!("Task {} not found", id)))?;
+    let today = chrono::Local::now().date_naive();
+    let archived = crate::thread::post_raw(notes_dir, t, kind, body, today).map_err(|e| (1, e))?;
+    task_file.commit().map_err(|e| (1, e))?;
+    crate::thread::archive(notes_dir, &archived).map_err(|e| (1, e))?;
+    Ok(notes_dir.join(format!("{}.md", crate::thread::slug(id))).display().to_string())
+}
+
 pub fn show(path: &Path, id: u32) -> Result<String, (i32, String)> {
     let task_file = db::load(path).map_err(|e| (1, e))?;
     let t = task_file.find_task(id).ok_or_else(|| (1, format!("Task {} not found", id)))?;
@@ -905,6 +997,72 @@ mod tests {
         add(&path, AddArgs { title: "Plain".to_string(), priority: "medium".to_string(), due: None, project: None, tags: None, agent: None, description: None, instructions: None }).unwrap();
         assert!(service_run(&path, 2, true, None, None, d("2026-10-10"), false).is_err());
         assert!(db::list_runs(&path, 1, 10, None).unwrap().is_empty());
+    }
+
+    fn add_bot_task(path: &Path) {
+        add(path, AddArgs { title: "Work".to_string(), priority: "medium".to_string(), due: None, project: None, tags: None, agent: Some("Bot".to_string()), description: None, instructions: None }).unwrap();
+    }
+
+    #[test]
+    fn test_thread_post_question_asks_and_reply_keeps_status() {
+        let (dir, path) = setup();
+        let notes = dir.path().join("Notes");
+        add_bot_task(&path);
+
+        // A human cannot ask; an agent can, and the question goes to the thread.
+        assert!(thread_post(&path, &notes, 1, None, Some("which?".into()), Actor::Human).is_err());
+        thread_post(&path, &notes, 1, None, Some("which branch?".into()), Actor::Agent).unwrap();
+        let t = db::load(&path).unwrap().tasks[0].clone();
+        assert_eq!(t.work_status, Some(crate::task::WorkStatus::NeedsInput));
+        assert_eq!(t.notes, vec!["task-1-thread".to_string()]);
+        assert!(thread_show(&notes, 1).unwrap().contains("## Question —"));
+
+        thread_post(&path, &notes, 1, Some("on it".into()), None, Actor::Agent).unwrap();
+        assert_eq!(db::load(&path).unwrap().tasks[0].work_status, Some(crate::task::WorkStatus::NeedsInput));
+        assert!(thread_post(&path, &notes, 1, None, None, Actor::Agent).is_err());
+        assert!(thread_post(&path, &notes, 1, Some(" ".into()), None, Actor::Agent).is_err());
+    }
+
+    #[test]
+    fn test_thread_post_refuses_services() {
+        let (dir, path) = setup();
+        add_service(&path, "2026-10-01");
+        assert!(thread_post(&path, &dir.path().join("Notes"), 1, Some("hi".into()), None, Actor::Agent).is_err());
+    }
+
+    #[test]
+    fn test_legacy_note_writes_append_to_the_thread_instead_of_replacing() {
+        use crate::thread::Legacy;
+        let (dir, path) = setup();
+        let notes = dir.path().join("Notes");
+        add_bot_task(&path);
+        legacy_note_write(&path, &notes, Legacy::Question(1), "first question").unwrap();
+        legacy_note_write(&path, &notes, Legacy::Question(1), "second question").unwrap();
+        legacy_note_write(&path, &notes, Legacy::Review(1), "## Agent response — 2026-10-30\n\ndone").unwrap();
+        let body = thread_show(&notes, 1).unwrap();
+        assert!(body.contains("first question") && body.contains("second question") && body.contains("done"));
+        assert_eq!(body.matches("## Question —").count(), 2);
+        assert!(!notes.join("task-1-question.md").exists());
+    }
+
+    #[test]
+    fn test_thread_migrate_dry_run_writes_nothing_then_merges() {
+        let (dir, path) = setup();
+        let notes = dir.path().join("Notes");
+        add_bot_task(&path);
+        crate::note::write_note(&notes, &crate::note::Note { slug: "task-1-review-thread".into(), title: "R".into(), body: "## Feedback — 2026-10-01\n\nfix".into() }).unwrap();
+        let mut tf = db::begin(&path).unwrap();
+        tf.find_task_mut(1).unwrap().notes.push("task-1-review-thread".into());
+        tf.commit().unwrap();
+
+        let msg = thread_migrate(&path, &notes, true).unwrap();
+        assert!(msg.contains("would merge task-1-review-thread"), "{}", msg);
+        assert!(notes.join("task-1-review-thread.md").exists() && !notes.join("task-1-thread.md").exists());
+
+        thread_migrate(&path, &notes, false).unwrap();
+        assert!(notes.join(".migrated/task-1-review-thread.md").is_file());
+        assert_eq!(db::load(&path).unwrap().tasks[0].notes, vec!["task-1-thread".to_string()]);
+        assert_eq!(thread_migrate(&path, &notes, false).unwrap(), "Nothing to migrate.");
     }
 
     #[test]

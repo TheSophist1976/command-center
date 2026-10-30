@@ -36,11 +36,12 @@ Each task in the JSON has a `pickup` value telling you why it is there:
 |----------|---------|
 | `new` | Not started. |
 | `continue` | Already `in-progress`; resume it. |
-| `review_feedback` | The human left feedback; read `review_thread` first. |
+| `review_feedback` | The human left feedback; read `thread` first. |
 | `service_run` | A due service. Do the run, then record it with `task service run` (see "Services" below). |
-| `answered_question` | The human answered your `needs-input` question; the answer is at the end of `question`. |
+| `answered_question` | The human answered your `needs-input` question; the answer is the last section of `thread`. |
+| `message` | The human wrote to you while you were working; read the end of `thread`. |
 
-Alongside `task` it carries `review_thread` and `question` (note bodies, or `null`) and `notes` (the other linked notes, each with `slug`, `title`, `body`). Top-level `instructions` and `memory` are your standing instructions and memory, so you do not need to read them separately.
+Alongside `task` it carries `thread` (the whole conversation with the human as one markdown body, or `null`), `unread` (true when the human wrote last and you have not replied) and `notes` (the other linked notes, each with `slug`, `title`, `body`). `review_thread` and `question` are deprecated aliases of `thread`. Top-level `instructions` and `memory` are your standing instructions and memory, so you do not need to read them separately.
 
 **Without `TASK_AGENT`**, identity comes from the config file at `~/Library/Application Support/task-manager/config.md` (macOS) or `~/.config/task-manager/config.md` (Linux). Each `agent-*` entry defines a profile and its working directory:
 ```
@@ -199,32 +200,27 @@ task edit <id> --service | --no-service
 
 `task service run` only works when the service is due (`due <= today`), not paused, and assigned to you. In one transaction it records a run (kept in its own `service_runs` table), moves the due date to the first scheduled date after today (missed dates are skipped, not caught up), and clears `work_status` on `ok` or sets it to `failing` on `failed`. `task done` is refused on a service, and `task rm` also deletes its runs. Resuming a service whose date has passed moves it to the first scheduled date on or after today.
 
-**`changes-requested`** means the human left feedback and this task needs another round — read the full review thread note (slug `task-<id>-review-thread`) via `task note show task-<id>-review-thread` for the complete history before doing anything, do the requested work, then append your response with `task note append task-<id>-review-thread --body "## Agent response — <YYYY-MM-DD>\n\n<summary>"` and set `--work-status waiting-for-review` again.
+**`changes-requested`** means the human left feedback and this task needs another round — read the whole conversation first (`task thread show <id>`, or `thread` in `task next --json`) for the complete history before doing anything, do the requested work, then reply with `task thread post <id> --reply "<summary>"` and set `--work-status waiting-for-review` again.
 
 When the human edits a `waiting-for-review` task in the web UI without setting a work status themselves, two hand-offs happen automatically: assigning it to a (non-human) agent resets it to `todo`, so it shows up in that agent's `task next` again; deferring it (moving its due date later) reassigns it to `human` and clears the work status.
 
-**`needs-input`** signals you've paused a task on a blocking question. Before asking, write the question into a note with slug `task-<id>-question` and set `--work-status needs-input` — this surfaces the question as a badge in the command-center web UI even if the human isn't watching the terminal where you asked:
+**The conversation.** Everything between you and the human on a task lives in one note, `task-<id>-thread`, as `## <Kind> — <YYYY-MM-DD>` sections: `Agent` (your replies), `Question` (yours), `Answer`, `Feedback`, `Message` and `Approval` (the human's), and `Snapshot`. You only ever write through the CLI, which links the note to the task and never rewrites history:
 
 ```bash
-task note show task-<id>-question 2>/dev/null   # check whether it already exists
+task thread show <id>                              # read the whole conversation
+task thread post <id> --reply "<text>"             # reply; the work status does not change
+task thread post <id> --question "<the question>"  # ask, and set needs-input in one step
 ```
 
-If that fails (no such note), create it — `task note add`'s slug comes from slugifying the title (there's no `--slug` flag), so the title must be exactly `Task <id> Question` for the slug to come out as `task-<id>-question`:
+Posting a reply or question also counts as the linked note that `waiting-for-review` requires. Do not edit the thread note by hand; the `task-<id>-question` and `task-<id>-review-thread` notes of older tasks are merged into it (the originals move to `Notes/.migrated/`), and `task thread migrate [--dry-run]` does that for every task at once. For callers that predate the thread, `task note show|append|edit` on those two old slugs still works, but appends to the thread instead of replacing it.
 
-```bash
-task note add "Task <id> Question" --task <id>
-```
+**`needs-input`** signals you've paused a task on a blocking question. Ask with `task thread post <id> --question "<the question>"`: it records the question and sets `needs-input`, which surfaces it as a badge in the command-center web UI even if the human isn't watching the terminal where you asked. A service cannot ask; record a failed run instead.
 
-Either way (newly created or already existing), set the actual question text — `edit --body` replaces the whole body, which is correct here since only one question is active at a time:
+The human answers in the web UI. That appends an `## Answer — <YYYY-MM-DD>` section and sets `--work-status changes-requested`, so the task returns to your queue with `pickup: answered_question`. Read the end of the thread, treat it as the reply, set `--work-status in-progress`, and continue. If the human is watching your terminal and answers there instead, set `--work-status` back to `in-progress` yourself.
 
-```bash
-task note edit task-<id>-question --body "<the question>"
-task edit <id> --work-status needs-input
-```
+**Unsolicited messages.** While you are `todo`, `in-progress` or `changes-requested` the human may write to you without changing the status. Such a task comes back with `pickup: message` (or keeps its pickup, with `unread: true`). Read the end of the thread, acknowledge with `task thread post <id> --reply "..."`, and carry on; replying clears `unread`.
 
-Once you get an answer, set `--work-status` back to `in-progress` (or whatever it was before) and continue.
-
-The human can also answer from the web UI. That appends an `## Answer — <YYYY-MM-DD>` section to the `task-<id>-question` note and sets `--work-status changes-requested` (the same pickup path as review feedback). If you find a `changes-requested` task whose question note ends in an answer, read the note, treat it as the reply, set `--work-status in-progress`, and continue.
+When the human approves your work from the web UI, an `Approval` section is added and the task is marked done.
 
 **Update this as you work**, not just at the end — set `in-progress` when you start, `waiting-for-review` when you've finished and want the human to check your work before it's truly done.
 

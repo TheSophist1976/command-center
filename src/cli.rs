@@ -197,6 +197,12 @@ pub enum Command {
         force: bool,
     },
 
+    /// Talk with the human on a task: read the conversation, reply, ask a question
+    Thread {
+        #[command(subcommand)]
+        subcommand: ThreadCommand,
+    },
+
     /// Manage services: recurring agent jobs that advance their own schedule
     Service {
         #[command(subcommand)]
@@ -223,6 +229,36 @@ pub enum Command {
     Rm {
         /// Task id
         id: u32,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum ThreadCommand {
+    /// Show a task's conversation
+    Show {
+        /// Task id
+        id: u32,
+    },
+
+    /// Post to a task's conversation (give exactly one of --reply or --question)
+    Post {
+        /// Task id
+        id: u32,
+
+        /// Reply to the human (does not change the task's work status)
+        #[arg(long, allow_hyphen_values = true, conflicts_with = "question")]
+        reply: Option<String>,
+
+        /// Ask the human a blocking question and set the task to needs-input
+        #[arg(long, allow_hyphen_values = true)]
+        question: Option<String>,
+    },
+
+    /// Merge old review-thread and question notes into each task's thread
+    Migrate {
+        /// Report what would change without writing anything
+        #[arg(long)]
+        dry_run: bool,
     },
 }
 

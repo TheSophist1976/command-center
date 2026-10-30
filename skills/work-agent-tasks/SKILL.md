@@ -9,7 +9,7 @@ Orchestrate task execution by giving each agent type that has open tasks its own
 
 A "worker" is whatever your harness offers for delegated work: a subagent, a parallel session, a background job. If your harness has none, work the agent types one after another in the same order; everything below still applies.
 
-The `task` CLI finds `tasks.db` on its own (`default-dir` in the config file, the `TASK_FILE` environment variable, or the global `--file <path>` flag). Never hardcode a database path. See the `task-manager` skill for the full CLI reference, the review-thread flow, and the question handshake.
+The `task` CLI finds `tasks.db` on its own (`default-dir` in the config file, the `TASK_FILE` environment variable, or the global `--file <path>` flag). Never hardcode a database path. See the `task-manager` skill for the full CLI reference, the conversation thread (replies, questions, messages).
 
 ## Step 1: Discover Agent Types and Their Tasks
 
@@ -23,7 +23,7 @@ For each agent name, run:
 task next --agent <name> --json
 ```
 
-Agent names are matched ignoring case. The result is that agent's work queue, already filtered and ordered: it leaves out tasks that were handed back (`waiting-for-review`), tasks blocked on the human (`needs-input`), and recurring tasks that are not due yet. A `changes-requested` task is included, with `pickup` set to `review_feedback` (the human left feedback on the review thread) or `answered_question` (the human answered a question from the web UI). A task with an empty `tasks` list needs no worker.
+Agent names are matched ignoring case. The result is that agent's work queue, already filtered and ordered: it leaves out tasks that were handed back (`waiting-for-review`), tasks blocked on the human (`needs-input`), and recurring tasks that are not due yet. A `changes-requested` task is included, with `pickup` set to `review_feedback` (the human left feedback), `answered_question` (the human answered a question from the web UI) or `message` (the human wrote to you while you were working). A task with an empty `tasks` list needs no worker.
 
 (Tasks with `agent:human` or no `agent` field never appear in an agent's queue.)
 
@@ -31,7 +31,7 @@ A due service (a recurring job with `"kind": "service"`) comes with `pickup` set
 
 ## Step 2: What Each Worker Gets
 
-`task next --json` already carries everything a worker needs for its agent: `instructions` (the standing instructions note), `memory`, and for each task its full detail, `review_thread`, `question`, and linked `notes`. If `instructions` or `memory` is `null`, there is none: use only the standing instructions in this skill. Treat memory as persistent context that informs how the worker works, not as instructions to follow literally.
+`task next --json` already carries everything a worker needs for its agent: `instructions` (the standing instructions note), `memory`, and for each task its full detail, `thread` (the whole conversation with the human), `unread`, and linked `notes`. If `instructions` or `memory` is `null`, there is none: use only the standing instructions in this skill. Treat memory as persistent context that informs how the worker works, not as instructions to follow literally.
 
 ## Step 3: Start Workers
 
@@ -54,13 +54,15 @@ Start all workers at once if your harness can run them in parallel. Wait for eve
 
 You are working tasks assigned to `agent:<name>`. Follow the instructions provided for your agent type exactly. Apply your memory as persistent context — it reflects patterns and preferences learned from previous work.
 
-**If a task's `work_status` is `changes-requested`**, first read its full review thread — every round, not just the newest — before doing anything else:
+**If a task has `pickup: message`** (or `unread: true`), the human wrote to you while you were working. Read the end of the thread, acknowledge with `task thread post <id> --reply "..."`, and carry on.
+
+**If a task's `work_status` is `changes-requested`**, first read the whole conversation — every round, not just the newest — before doing anything else:
 ```
-task note show task-<id>-review-thread
+task thread show <id>
 ```
 This is a running conversation between you and the human; earlier rounds carry context (what was tried, what was explained) that matters for getting this round right.
 
-**If a `changes-requested` task has a `task-<id>-question` note ending in an `## Answer — <date>` section**, the human answered your `needs-input` question from the web UI. Read the question note (`task note show task-<id>-question`), treat that answer as the response, set `--work-status in-progress`, and continue — do not ask the question again.
+**If a task comes back with `pickup: answered_question`** (the thread ends in an `## Answer — <date>` section), the human answered your `needs-input` question from the web UI. Read the end of the thread, treat that answer as the response, set `--work-status in-progress`, and continue — do not ask the question again.
 
 **For each task, before doing any work:**
 1. Read the task title and description, **and the task's own instructions**: run `task show <id>` and read the `## Instructions` section if it has one. These are what the human wants done for this specific task and they supplement your agent instructions. Never rewrite them yourself — if they are unclear or conflict with your agent instructions, ask (step 3).
@@ -78,18 +80,16 @@ This is a running conversation between you and the human; earlier rounds carry c
 2. **Priority** — within the same due date: `critical` → `high` → `medium` → `low`
 
 **Questions — before starting or mid-work:**
-- Follow the "Asking a Question" steps in the `task-manager` skill: write the question to the `task-<id>-question` note and set `--work-status needs-input`, so it shows as a badge in the web UI even if the human is not watching your session.
+- Follow "The Conversation" in the `task-manager` skill: `task thread post <id> --question "<the question>"` records it and sets `--work-status needs-input` in one step, so it shows as a badge in the web UI even if the human is not watching your session.
 - Then put the question to the human with whatever interactive question mechanism your harness provides, and continue once answered: set `--work-status` back to `in-progress` (or the prior status) and finish the task in the same session.
 - If your harness cannot ask interactively, leave the task at `needs-input`, move on to your next task, and list it in your report. The human answers in the web UI and the task comes back as `changes-requested`.
 - Never guess an answer, and never silently skip part of a task because something was unclear.
 
 **After completing each task, hand it back for review:**
 - Make sure the result is reflected in a note linked to the task (create one with `task note add "<title>" --task <id>` if none exists).
-- **If this was a `changes-requested` round** (a `task-<id>-review-thread` note exists), append your response to that thread:
+- **If this was a `changes-requested` round**, reply in the conversation:
   ```
-  task note append task-<id>-review-thread --body "## Agent response — <YYYY-MM-DD>
-
-  <summary of what changed>"
+  task thread post <id> --reply "<summary of what changed>"
   ```
 - Set `task edit <id> --work-status waiting-for-review`. (`updated` is set automatically.)
 - Consider whether to update memory (see below).
@@ -152,9 +152,9 @@ After all workers finish, summarize to the human:
 | Who am I? | `task whoami` (uses `TASK_AGENT`, else the working directory) |
 | Full task detail (incl. `## Instructions`) | `task show <id>` |
 | Mark started | `task edit <id> --work-status in-progress` |
-| Read a review thread | `task note show task-<id>-review-thread` |
-| Respond to feedback | `task note append task-<id>-review-thread --body "## Agent response — <date>\n\n<summary>"` |
-| Ask a question | write `task-<id>-question` note + `--work-status needs-input` (see `task-manager`) |
+| Read the conversation | `task thread show <id>` |
+| Respond to feedback or a message | `task thread post <id> --reply "<summary>"` |
+| Ask a question | `task thread post <id> --question "<the question>"` (sets `needs-input`) |
 | Hand back for review | `task edit <id> --work-status waiting-for-review` |
 | Read agent instructions / memory | `task agent instructions <name> show` / `task agent memory <name> show` |
 | Update memory | `task agent memory <name> edit --body "<content>"` |

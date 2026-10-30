@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 use chrono::NaiveDate;
 use serde_json::{json, Value};
 
+use crate::thread::Kind;
 use crate::task::{Status, Task, WorkStatus};
 
 /// Environment variable a harness sets to say which agent profile it is running as.
@@ -66,14 +67,6 @@ pub fn identity(env: Option<&str>, config: &Path, cwd: &Path) -> Option<Identity
     Some(Identity { name, source: Source::WorkingDirectory, dir })
 }
 
-pub fn review_thread_slug(task_id: u32) -> String {
-    format!("task-{}-review-thread", task_id)
-}
-
-pub fn question_slug(task_id: u32) -> String {
-    format!("task-{}-question", task_id)
-}
-
 pub fn instructions_slug(name: &str) -> String {
     crate::config::read_config_value(&format!("agent-{}-instructions", name))
         .unwrap_or_else(|| crate::note::slugify(name))
@@ -99,10 +92,6 @@ pub fn read_memory(notes_dir: &Path, name: &str) -> Option<String> {
     crate::note::read_note(&path).ok().map(|n| n.body)
 }
 
-fn read_body(notes_dir: &Path, slug: &str) -> Option<String> {
-    crate::note::read_note(&notes_dir.join(format!("{}.md", slug))).ok().map(|n| n.body)
-}
-
 /// Why a task is in the queue, so a harness does not have to infer it from note contents.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Pickup {
@@ -110,10 +99,12 @@ pub enum Pickup {
     New,
     /// Already `in-progress`; resume it.
     Continue,
-    /// The human left feedback on the review thread.
+    /// The human left feedback on the thread.
     ReviewFeedback,
-    /// The human answered the `needs-input` question; the answer is in the question note.
+    /// The human answered the `needs-input` question; the answer ends the thread.
     AnsweredQuestion,
+    /// The human wrote to the agent while it was working; read the thread's last message.
+    Message,
     /// A due service: do the run, then record it with `task service run`.
     ServiceRun,
 }
@@ -125,22 +116,22 @@ impl Pickup {
             Pickup::Continue => "continue",
             Pickup::ReviewFeedback => "review_feedback",
             Pickup::AnsweredQuestion => "answered_question",
+            Pickup::Message => "message",
             Pickup::ServiceRun => "service_run",
         }
     }
 }
 
-/// True when the last `## ` section of a question note is an answer.
-fn ends_with_answer(question: &str) -> bool {
-    question.lines().rev().find(|l| l.starts_with("## ")).is_some_and(|l| l.starts_with("## Answer"))
-}
-
-pub fn pickup_kind(task: &Task, question: Option<&str>) -> Pickup {
+/// `last_human` is the kind of the thread's last section when the human wrote it
+/// (see [`crate::thread::last_human_kind`]); `None` when the agent spoke last or there is no thread.
+pub fn pickup_kind(task: &Task, last_human: Option<Kind>) -> Pickup {
     match task.work_status {
-        Some(WorkStatus::ChangesRequested) if question.is_some_and(ends_with_answer) => Pickup::AnsweredQuestion,
+        Some(WorkStatus::ChangesRequested) if last_human == Some(Kind::Answer) => Pickup::AnsweredQuestion,
         Some(WorkStatus::ChangesRequested) => Pickup::ReviewFeedback,
+        Some(WorkStatus::InProgress) if last_human == Some(Kind::Message) => Pickup::Message,
         Some(WorkStatus::InProgress) => Pickup::Continue,
         None | Some(WorkStatus::Failing) if task.is_service() => Pickup::ServiceRun,
+        _ if last_human == Some(Kind::Message) => Pickup::Message,
         _ => Pickup::New,
     }
 }
@@ -166,32 +157,46 @@ pub fn eligible<'a>(tasks: &'a [Task], agent: &str, today: NaiveDate) -> Vec<&'a
 pub struct QueueEntry<'a> {
     pub task: &'a Task,
     pub pickup: Pickup,
-    pub review_thread: Option<String>,
-    pub question: Option<String>,
-    /// Linked notes other than the review thread and question.
+    /// The conversation with the human (old review/question notes merged in), or `None`.
+    pub thread: Option<String>,
+    /// The human wrote last: there is something the agent has not answered.
+    pub unread: bool,
+    /// Linked notes other than the thread.
     pub notes: Vec<crate::note::Note>,
 }
 
 pub fn queue_entry<'a>(task: &'a Task, notes_dir: &Path) -> QueueEntry<'a> {
-    let review_slug = review_thread_slug(task.id);
-    let question_slug = question_slug(task.id);
-    let review_thread = read_body(notes_dir, &review_slug);
-    let question = read_body(notes_dir, &question_slug);
+    let view = crate::thread::view(notes_dir, task.id);
+    let last_human = view.as_ref().and_then(|v| crate::thread::last_human_kind(&v.sections));
+    let hidden = [
+        crate::thread::slug(task.id),
+        crate::thread::legacy_review_slug(task.id),
+        crate::thread::legacy_question_slug(task.id),
+    ];
     let notes = task
         .notes
         .iter()
-        .filter(|s| **s != review_slug && **s != question_slug)
+        .filter(|s| !hidden.contains(s))
         .filter_map(|s| crate::note::read_note(&notes_dir.join(format!("{}.md", s))).ok())
         .collect();
-    QueueEntry { pickup: pickup_kind(task, question.as_deref()), task, review_thread, question, notes }
+    QueueEntry {
+        pickup: pickup_kind(task, last_human),
+        task,
+        unread: last_human.is_some(),
+        thread: view.map(|v| v.body),
+        notes,
+    }
 }
 
 pub fn entry_json(e: &QueueEntry) -> Value {
     json!({
         "task": e.task,
         "pickup": e.pickup.as_str(),
-        "review_thread": e.review_thread,
-        "question": e.question,
+        "thread": e.thread,
+        "unread": e.unread,
+        // Deprecated aliases of `thread`, so harnesses written against the old shape keep working.
+        "review_thread": e.thread,
+        "question": e.thread,
         "notes": e.notes.iter().map(|n| json!({"slug": n.slug, "title": n.title, "body": n.body})).collect::<Vec<_>>(),
     })
 }
@@ -364,26 +369,27 @@ mod tests {
     }
 
     #[test]
-    fn pickup_distinguishes_feedback_from_an_answered_question() {
+    fn pickup_follows_who_spoke_last() {
         let mut t = task(1, "Bot");
         assert_eq!(pickup_kind(&t, None), Pickup::New);
+        assert_eq!(pickup_kind(&t, Some(Kind::Message)), Pickup::Message);
         t.work_status = Some(WorkStatus::InProgress);
         assert_eq!(pickup_kind(&t, None), Pickup::Continue);
+        assert_eq!(pickup_kind(&t, Some(Kind::Message)), Pickup::Message);
         t.work_status = Some(WorkStatus::ChangesRequested);
-        assert_eq!(pickup_kind(&t, None), Pickup::ReviewFeedback);
-        assert_eq!(pickup_kind(&t, Some("body\n\n## Answer — 2026-10-06\n\nyes")), Pickup::AnsweredQuestion);
-        // A question that is still the newest section has not been answered.
-        assert_eq!(pickup_kind(&t, Some("## Answer — 2026-10-05\n\nold\n\n## Question\n\nagain?")), Pickup::ReviewFeedback);
+        assert_eq!(pickup_kind(&t, Some(Kind::Feedback)), Pickup::ReviewFeedback);
+        assert_eq!(pickup_kind(&t, Some(Kind::Message)), Pickup::ReviewFeedback);
+        assert_eq!(pickup_kind(&t, Some(Kind::Answer)), Pickup::AnsweredQuestion);
     }
 
     #[test]
-    fn queue_entry_bundles_review_thread_question_and_other_notes() {
+    fn queue_entry_reads_the_thread_including_old_notes_and_hides_it_from_notes() {
         let dir = tempdir().unwrap();
         let write = |slug: &str, title: &str, body: &str| {
             crate::note::write_note(dir.path(), &crate::note::Note { slug: slug.into(), title: title.into(), body: body.into() }).unwrap();
         };
         write("task-1-review-thread", "Review", "## Feedback — 2026-10-06\n\nfix it");
-        write("task-1-question", "Question", "which one?\n\n## Answer — 2026-10-06\n\nthe first");
+        write("task-1-question", "Question", "which one?\n\n## Answer — 2026-10-30\n\nthe first");
         write("how-to", "How to", "steps");
 
         let mut t = task(1, "Bot");
@@ -392,8 +398,9 @@ mod tests {
 
         let e = queue_entry(&t, dir.path());
         assert_eq!(e.pickup, Pickup::AnsweredQuestion);
-        assert!(e.review_thread.unwrap().contains("fix it"));
-        assert!(e.question.unwrap().contains("the first"));
+        assert!(e.unread);
+        let thread = e.thread.unwrap();
+        assert!(thread.contains("fix it") && thread.contains("the first") && thread.contains("which one?"));
         assert_eq!(e.notes.iter().map(|n| n.slug.as_str()).collect::<Vec<_>>(), vec!["how-to"]);
     }
 
@@ -409,7 +416,9 @@ mod tests {
         let first = &v["tasks"][0];
         assert_eq!(first["task"]["id"], 1);
         assert_eq!(first["pickup"], "new");
+        assert!(first["thread"].is_null());
         assert!(first["review_thread"].is_null() && first["question"].is_null());
+        assert_eq!(first["unread"], false);
         assert_eq!(first["notes"], json!([]));
     }
 }
