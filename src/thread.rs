@@ -73,6 +73,12 @@ impl Kind {
         matches!(self, Kind::Answer | Kind::Feedback | Kind::Message | Kind::Approval)
     }
 
+    fn is_known_heading(heading: &str) -> bool {
+        let lower = heading.trim().to_lowercase();
+        let word: String = lower.chars().take_while(|c| c.is_alphabetic()).collect();
+        matches!(word.as_str(), "agent" | "response" | "question" | "answer" | "feedback" | "message" | "approval" | "snapshot")
+    }
+
     fn from_heading(heading: &str) -> Kind {
         let lower = heading.trim().to_lowercase();
         let word: String = lower.chars().take_while(|c| c.is_alphabetic()).collect();
@@ -105,8 +111,23 @@ fn heading_date(heading: &str) -> Option<String> {
     (!tail.is_empty()).then(|| tail.to_string())
 }
 
+/// The thread splits into messages on `## ` lines, so a `## ` inside a message would
+/// start a new one. Demote those headings (outside code fences) to `### `.
+fn demote_headings(text: &str) -> String {
+    let mut in_fence = false;
+    text.lines()
+        .map(|l| {
+            if l.trim_start().starts_with("```") {
+                in_fence = !in_fence;
+            }
+            if !in_fence && l.starts_with("## ") { format!("#{}", l) } else { l.to_string() }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 fn render_section(kind: Kind, date: &str, text: &str) -> String {
-    format!("## {} — {}\n\n{}", kind.heading(), date, text.trim())
+    format!("## {} — {}\n\n{}", kind.heading(), date, demote_headings(text.trim()))
 }
 
 /// Splits a thread body into leading text (before the first `## `) and sections.
@@ -392,7 +413,8 @@ pub fn post(dir: &Path, task: &mut Task, kind: Kind, text: &str, date: NaiveDate
 /// Append text an old-style caller wrote for a legacy note. Text that already opens with a
 /// `## ` heading is kept as written; anything else becomes a section of `default_kind`.
 pub fn post_raw(dir: &Path, task: &mut Task, default_kind: Kind, text: &str, date: NaiveDate) -> Result<Vec<String>, String> {
-    if text.trim_start().starts_with("## ") {
+    let first = text.trim_start().lines().next().unwrap_or("");
+    if first.starts_with("## ") && Kind::is_known_heading(first.trim_start_matches("## ")) {
         let archived = migrate(dir, task)?;
         let thread = slug(task.id);
         if !note_path(dir, &thread).is_file() {
@@ -455,6 +477,19 @@ mod tests {
     }
 
     #[test]
+    fn headings_inside_a_message_do_not_split_the_thread() {
+        let dir = tempdir().unwrap();
+        let mut t = task(Some("Bot"), Some(WorkStatus::InProgress));
+        let d = NaiveDate::from_ymd_opt(2026, 10, 30).unwrap();
+        post(dir.path(), &mut t, Kind::Question, "## Rationale\n\nwhy\n\n```\n## kept in fence\n```\n\n## Sources\n\nx", d).unwrap();
+        let v = view(dir.path(), 1).unwrap();
+        assert_eq!(v.sections.len(), 1);
+        assert_eq!(v.sections[0].kind, Kind::Question);
+        assert!(v.body.contains("### Rationale") && v.body.contains("### Sources") && v.body.contains("\n## kept in fence"));
+        assert!(!v.unread());
+    }
+
+    #[test]
     fn unread_is_true_only_when_the_human_spoke_last() {
         let (_, s) = parse("## Agent — 2026-10-01\n\na\n\n## Message — 2026-10-02\n\nm\n\n## Snapshot — 2026-10-02\n\nx");
         assert!(unread(&s));
@@ -483,6 +518,19 @@ mod tests {
         let mut svc = task(Some("Bot"), None);
         svc.kind = TaskKind::Service;
         assert_eq!(a(&svc), Allowed { send: None, approve: false });
+    }
+
+    #[test]
+    fn post_raw_keeps_known_headings_and_wraps_everything_else() {
+        let dir = tempdir().unwrap();
+        let mut t = task(Some("Bot"), Some(WorkStatus::NeedsInput));
+        let d = NaiveDate::from_ymd_opt(2026, 10, 30).unwrap();
+        post_raw(dir.path(), &mut t, Kind::Question, "## Rationale\n\nwhy", d).unwrap();
+        post_raw(dir.path(), &mut t, Kind::Agent, "## Agent response — 2026-10-31\n\ndone", d).unwrap();
+        let v = view(dir.path(), 1).unwrap();
+        assert_eq!(v.sections.len(), 2);
+        assert_eq!((v.sections[0].kind, v.sections[1].kind), (Kind::Question, Kind::Agent));
+        assert_eq!(v.sections[1].date.as_deref(), Some("2026-10-31"));
     }
 
     #[test]
