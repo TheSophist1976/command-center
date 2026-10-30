@@ -88,6 +88,7 @@ export default function App() {
   const [isResizingPanel, setIsResizingPanel] = useState(false);
   const [taskNotes, setTaskNotes] = useState<Note[]>([]);
   const [thread, setThread] = useState<Thread | null>(null);
+  const threadReq = useRef(0);
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [editingAgent, setEditingAgent] = useState<AgentProfile | null>(null);
   const [servicesOpen, setServicesOpen] = useState(false);
@@ -199,8 +200,12 @@ export default function App() {
       setThread(null);
       return;
     }
+    // A slow GET must not overwrite a newer thread (such as the one a send just returned).
+    const req = ++threadReq.current;
     fetchTaskThread(selected.id)
-      .then(setThread)
+      .then((t) => {
+        if (req === threadReq.current) setThread(t);
+      })
       .catch((e) => setError(String(e)));
   }, [selected?.id, selected?.updated, selected?.work_status]);
 
@@ -339,7 +344,9 @@ export default function App() {
   async function handleSendThread(kind: ThreadSendKind | 'approve', text: string) {
     if (!selected) return;
     try {
-      setThread(await postTaskThread(selected.id, kind, text));
+      const posted = await postTaskThread(selected.id, kind, text);
+      threadReq.current++; // anything still in flight is older than this
+      setThread(posted);
       // Refetch: a send can move the task (or close it), and the allowed moves change.
       const updated = await fetchTask(selected.id);
       setSelected(updated);

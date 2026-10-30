@@ -85,11 +85,14 @@ export class CommandCenter {
     this.agent(agent, 'edit', String(id), '--work-status', 'waiting-for-review');
   }
 
-  /** The agent writes a question note and blocks on it. */
+  /** The agent asks a question in the task's conversation and blocks on it. */
   ask(agent: string, id: number, question: string) {
-    this.agent(agent, 'note', 'add', `Task ${id} Question`, '--task', String(id));
-    this.agent(agent, 'note', 'edit', `task-${id}-question`, '--body', question);
-    this.agent(agent, 'edit', String(id), '--work-status', 'needs-input');
+    this.agent(agent, 'thread', 'post', String(id), '--question', question);
+  }
+
+  /** The agent replies in the task's conversation. */
+  reply(agent: string, id: number, text: string) {
+    this.agent(agent, 'thread', 'post', String(id), '--reply', text);
   }
 
   private run(agent: string | undefined, args: string[]): string {
