@@ -384,6 +384,8 @@ pub fn post(dir: &Path, task: &mut Task, kind: Kind, text: &str, date: NaiveDate
     if !task.notes.contains(&thread) {
         task.notes.push(thread);
     }
+    // The note is a file, so touching the task is what tells live viewers something changed.
+    task.updated = Some(chrono::Utc::now());
     Ok(archived)
 }
 

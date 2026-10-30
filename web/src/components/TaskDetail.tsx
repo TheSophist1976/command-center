@@ -1,13 +1,12 @@
 import type { CSSProperties, ReactNode } from 'react';
 import { X } from 'lucide-react';
-import type { LifecycleAction, Note, Task } from '../types';
+import type { LifecycleAction, Note, Task, Thread, ThreadSendKind } from '../types';
 import type { editTask } from '../api';
 import { EditableField } from './EditableField';
 import { DatePicker } from './DatePicker';
 import { AgentPicker } from './AgentPicker';
 import { Markdown } from './Markdown';
-import { ReviewPanel } from './ReviewPanel';
-import { QuestionPanel } from './QuestionPanel';
+import { ConversationPanel } from './ConversationPanel';
 import { NotesSection } from './NotesSection';
 import { ConvertToService } from './ConvertToService';
 import { PriorityBadge, StatusPill } from './Badges';
@@ -38,12 +37,6 @@ const WORK_STATUS_MOVES: { value: NonNullable<Task['work_status']>; label: strin
   { value: 'waiting-for-review', label: 'Waiting for Review', action: 'submit' },
 ];
 
-/** Feedback is allowed on an agent's task (e.g. one already marked done). */
-function canReview(task: Task) {
-  const agent = task.agent?.toLowerCase();
-  return !!agent && agent !== 'human' && (task.allowed_actions ?? []).includes('feedback');
-}
-
 /** The current work status plus every status the server says the human may move to. */
 function workStatusOptions(task: Task) {
   const current = task.work_status ?? '';
@@ -66,12 +59,11 @@ interface TaskDetailProps {
   actions?: ReactNode;
   onClose?: () => void;
   agentOptions: { value: string; label: string }[];
-  review: Note | null;
-  question: Note | null;
+  thread: Thread | null;
   notes: Note[];
   onEdit: (changes: Parameters<typeof editTask>[1]) => void;
-  onSendFeedback: (text: string) => Promise<void>;
-  onSendAnswer: (text: string) => Promise<void>;
+  onSendThread: (kind: ThreadSendKind, text: string) => Promise<void>;
+  onApprove: (text: string) => Promise<void>;
   onCreateNote: (title: string) => Promise<string | undefined> | void;
   onOpenNote: (slug: string) => void;
   onSaveNote: (slug: string, body: string) => Promise<void>;
@@ -82,13 +74,13 @@ interface TaskDetailProps {
 
 /**
  * Task inspector body, shared by the desktop side panel and the mobile
- * full-screen page. Order: title + meta, agent-waiting banner, review /
- * question panel, description + instructions, a two-column grid of the
+ * full-screen page. Order: title + meta, agent-waiting banner, conversation
+ * panel, description + instructions, a two-column grid of the
  * short fields, then notes.
  */
 export function TaskDetail({
-  task, today, mobile, showId = true, actions, onClose, agentOptions, review, question, notes,
-  onEdit, onSendFeedback, onSendAnswer, onCreateNote, onOpenNote, onSaveNote, onUnlinkNote, onConvertToService,
+  task, today, mobile, showId = true, actions, onClose, agentOptions, thread, notes,
+  onEdit, onSendThread, onApprove, onCreateNote, onOpenNote, onSaveNote, onUnlinkNote, onConvertToService,
 }: TaskDetailProps) {
   const done = task.status === 'done';
   const agentStatus = task.agent ? statusFor(task.agent) : null;
@@ -236,24 +228,8 @@ export function TaskDetail({
         </div>
       )}
 
-      {(review || task.work_status === 'waiting-for-review' || task.work_status === 'changes-requested' || canReview(task)) && (
-        <ReviewPanel
-          review={review}
-          workStatus={task.work_status}
-          accentColor={accent}
-          canSend={task.allowed_actions?.includes('feedback') ?? true}
-          onSendFeedback={onSendFeedback}
-        />
-      )}
-
-      {/* An answered question stays hidden until the agent asks again (needs-input). */}
-      {task.work_status === 'needs-input' && (
-        <QuestionPanel
-          question={question}
-          awaitingAnswer
-          accentColor={accent}
-          onSendAnswer={onSendAnswer}
-        />
+      {thread && (thread.note || thread.allowed_action.send || thread.allowed_action.approve) && (
+        <ConversationPanel task={task} thread={thread} accentColor={accent} onSend={onSendThread} onApprove={onApprove} />
       )}
 
       <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>

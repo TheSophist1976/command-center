@@ -1,4 +1,4 @@
-import type { Task, AgentProfile, Note, VersionInfo, UpdateStatus, Service, ServiceRun } from './types';
+import type { Task, AgentProfile, Note, VersionInfo, UpdateStatus, Service, ServiceRun, Thread, ThreadSendKind } from './types';
 
 async function jsonOrThrow<T>(response: Response): Promise<T> {
   if (!response.ok) {
@@ -187,32 +187,22 @@ export async function unlinkTaskNote(taskId: number, slug: string): Promise<void
   }
 }
 
-export async function fetchTaskReview(taskId: number): Promise<Note | null> {
-  return jsonOrThrow(await apiFetch(`/api/tasks/${taskId}/review`));
+export async function fetchTaskThread(taskId: number): Promise<Thread> {
+  return jsonOrThrow(await apiFetch(`/api/tasks/${taskId}/thread`));
 }
 
-export async function postTaskFeedback(taskId: number, text: string): Promise<Note> {
+export async function postTaskThread(
+  taskId: number,
+  kind: ThreadSendKind | 'approve',
+  text: string,
+): Promise<Thread> {
   return jsonOrThrow(
-    await apiFetch(`/api/tasks/${taskId}/review`, {
+    await apiFetch(`/api/tasks/${taskId}/thread`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ text }),
+      body: JSON.stringify({ kind, text }),
     }),
   );
-}
-
-export async function postTaskAnswer(taskId: number, text: string): Promise<Note> {
-  return jsonOrThrow(
-    await apiFetch(`/api/tasks/${taskId}/question`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ text }),
-    }),
-  );
-}
-
-export async function fetchTaskQuestion(taskId: number): Promise<Note | null> {
-  return jsonOrThrow(await apiFetch(`/api/tasks/${taskId}/question`));
 }
 
 export async function fetchVersion(): Promise<VersionInfo> {

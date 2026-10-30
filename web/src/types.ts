@@ -35,6 +35,16 @@ export type LifecycleAction =
   | 'start' | 'ask' | 'answer' | 'submit' | 'feedback' | 'done' | 'reopen' | 'reset' | 'defer'
   | 'run-ok' | 'run-failed' | 'pause' | 'resume' | 'to-service' | 'to-task';
 
+/** What the conversation composer offers now; the server derives it from the lifecycle. */
+export type ThreadSendKind = 'answer' | 'feedback' | 'message';
+
+export interface Thread {
+  note: Note | null;
+  allowed_action: { send: ThreadSendKind | null; approve: boolean };
+  /** The human wrote last and the agent has not answered yet. */
+  unread: boolean;
+}
+
 export interface ServiceRun {
   id: number;
   task_id: number;

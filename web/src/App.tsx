@@ -5,7 +5,7 @@ import './layout.css';
 import { Terminal, Search, PanelLeftClose, PanelLeftOpen, PanelRightClose, PanelRightOpen, Menu, ChevronLeft, Plus, Repeat } from 'lucide-react';
 import { Button } from './components/Button';
 import { NewTaskForm } from './components/NewTaskForm';
-import { fetchTask, fetchTasks, fetchAgents, addTask, editTask, markDone, reopenTask, deleteTask, fetchTaskNotes, createTaskNote, openNote, saveNote, unlinkTaskNote, fetchTaskReview, postTaskFeedback, fetchTaskQuestion, postTaskAnswer } from './api';
+import { fetchTask, fetchTasks, fetchAgents, addTask, editTask, markDone, reopenTask, deleteTask, fetchTaskNotes, createTaskNote, openNote, saveNote, unlinkTaskNote, fetchTaskThread, postTaskThread } from './api';
 import { AgentEditor } from './components/AgentEditor';
 import { ServicesView } from './components/ServicesView';
 import { fetchServices } from './api';
@@ -18,7 +18,7 @@ import { MobileDrawer } from './components/MobileDrawer';
 import { MobileNewTaskSheet } from './components/MobileNewTaskSheet';
 import { CommandPalette, type PaletteCommand } from './components/CommandPalette';
 import { COL, sectionLabelStyle } from './styles';
-import type { Task, AgentProfile, Note } from './types';
+import type { Task, AgentProfile, Note, Thread, ThreadSendKind } from './types';
 import { startOfToday } from './dueWindow';
 import { statusFor, statusColor } from './mockAgentStatus';
 import { addDays, addMonths, formatLocalDate } from './taskFormat';
@@ -87,8 +87,7 @@ export default function App() {
   });
   const [isResizingPanel, setIsResizingPanel] = useState(false);
   const [taskNotes, setTaskNotes] = useState<Note[]>([]);
-  const [review, setReview] = useState<Note | null>(null);
-  const [question, setQuestion] = useState<Note | null>(null);
+  const [thread, setThread] = useState<Thread | null>(null);
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [editingAgent, setEditingAgent] = useState<AgentProfile | null>(null);
   const [servicesOpen, setServicesOpen] = useState(false);
@@ -116,10 +115,11 @@ export default function App() {
   );
   const panelRaf1 = useRef<number>(0);
   const panelRaf2 = useRef<number>(0);
-  const reviewSlug = selected ? `task-${selected.id}-review-thread` : null;
-  // The question note only gets its own panel while the agent awaits an answer; otherwise list it with the other notes.
-  const questionSlug = selected?.work_status === 'needs-input' ? `task-${selected.id}-question` : null;
-  const visibleNotes = taskNotes.filter((n) => n.slug !== reviewSlug && n.slug !== questionSlug);
+  // The conversation has its own panel; the old review/question notes are folded into it.
+  const threadSlugs = selected
+    ? [`task-${selected.id}-thread`, `task-${selected.id}-review-thread`, `task-${selected.id}-question`]
+    : [];
+  const visibleNotes = taskNotes.filter((n) => !threadSlugs.includes(n.slug));
   // Next is a single queue ordered by due date then priority, so it ignores the chosen grouping.
   const groupBy: GroupBy = dueFilter === 'next' ? 'none' : groupByChoice;
   const filterItem: FilterItem = ALL_FILTER_ITEMS.find((i) => i.value === dueFilter) ?? INBOX_ITEM;
@@ -193,25 +193,16 @@ export default function App() {
       .catch((e) => setError(String(e)));
   }, [selected?.id]);
 
+  // Refetch when the task changes underneath us (an agent replying touches `updated`).
   useEffect(() => {
     if (!selected) {
-      setReview(null);
+      setThread(null);
       return;
     }
-    fetchTaskReview(selected.id)
-      .then(setReview)
+    fetchTaskThread(selected.id)
+      .then(setThread)
       .catch((e) => setError(String(e)));
-  }, [selected?.id]);
-
-  useEffect(() => {
-    if (!selected) {
-      setQuestion(null);
-      return;
-    }
-    fetchTaskQuestion(selected.id)
-      .then(setQuestion)
-      .catch((e) => setError(String(e)));
-  }, [selected?.id]);
+  }, [selected?.id, selected?.updated, selected?.work_status]);
 
   useEffect(() => {
     if (!selected || isMobile) return;
@@ -345,26 +336,11 @@ export default function App() {
     }
   }
 
-  async function handleSendFeedback(text: string) {
+  async function handleSendThread(kind: ThreadSendKind | 'approve', text: string) {
     if (!selected) return;
     try {
-      const note = await postTaskFeedback(selected.id, text);
-      setReview(note);
-      // Refetch: feedback can also reopen a done task, and the allowed moves change.
-      const updated = await fetchTask(selected.id);
-      setSelected(updated);
-      setTasks((prev) => prev.map((t) => (t.id === updated.id ? updated : t)));
-    } catch (e) {
-      setError(String(e));
-      throw e;
-    }
-  }
-
-  async function handleSendAnswer(text: string) {
-    if (!selected) return;
-    try {
-      const note = await postTaskAnswer(selected.id, text);
-      setQuestion(note);
+      setThread(await postTaskThread(selected.id, kind, text));
+      // Refetch: a send can move the task (or close it), and the allowed moves change.
       const updated = await fetchTask(selected.id);
       setSelected(updated);
       setTasks((prev) => prev.map((t) => (t.id === updated.id ? updated : t)));
@@ -613,12 +589,11 @@ export default function App() {
     task: selected,
     today,
     agentOptions,
-    review,
-    question,
+    thread,
     notes: visibleNotes,
     onEdit: (changes: Parameters<typeof editTask>[1]) => handleEditField(selected.id, changes),
-    onSendFeedback: handleSendFeedback,
-    onSendAnswer: handleSendAnswer,
+    onSendThread: handleSendThread,
+    onApprove: (text: string) => handleSendThread('approve', text),
     onCreateNote: handleCreateNote,
     onOpenNote: handleOpenNote,
     onSaveNote: handleSaveNote,
