@@ -222,24 +222,38 @@ fn file_date(path: &Path) -> String {
 }
 
 /// Sections of a legacy note. Text before the first heading (the question an agent
-/// wrote as a bare body) becomes one section of `default_kind`, dated from the file.
+/// wrote as a bare body) becomes one section of `default_kind`, dated from the file,
+/// but never later than the note's earliest dated section: it was written before
+/// anything appended below it, and the file's mtime is when it was last touched.
 fn legacy_sections(dir: &Path, slug: &str, default_kind: Kind) -> Option<Vec<Section>> {
     let path = note_path(dir, slug);
     let note = crate::note::read_note(&path).ok()?;
     let (preamble, mut sections) = parse(&note.body);
     if !preamble.is_empty() {
-        let raw = render_section(default_kind, &file_date(&path), &preamble);
-        sections.insert(0, Section { kind: default_kind, date: Some(file_date(&path)), raw, body: preamble });
+        let mut date = file_date(&path);
+        if let Some(earliest) = sections.iter().filter_map(|s| valid_date(s.date.as_deref())).min() {
+            if earliest < date.as_str() {
+                date = earliest.to_string();
+            }
+        }
+        let raw = render_section(default_kind, &date, &preamble);
+        sections.insert(0, Section { kind: default_kind, date: Some(date), raw, body: preamble });
     }
     Some(sections)
 }
 
-fn date_key(s: &Section, carried: &mut String) -> String {
-    if let Some(d) = s.date.as_deref().filter(|d| {
+/// The `YYYY-MM-DD` prefix of a section date, if it has one.
+fn valid_date(d: Option<&str>) -> Option<&str> {
+    d.filter(|d| {
         let b = d.as_bytes();
         b.len() >= 10 && b[4] == b'-' && b[7] == b'-' && b[..4].iter().all(u8::is_ascii_digit)
-    }) {
-        *carried = d[..10].to_string();
+    })
+    .map(|d| &d[..10])
+}
+
+fn date_key(s: &Section, carried: &mut String) -> String {
+    if let Some(d) = valid_date(s.date.as_deref()) {
+        *carried = d.to_string();
     }
     carried.clone()
 }
@@ -556,8 +570,9 @@ mod tests {
         let body = crate::note::read_note(&note_path(dir.path(), "task-1-thread")).unwrap().body;
         let (_, s) = parse(&body);
         let kinds: Vec<Kind> = s.iter().map(|s| s.kind).collect();
-        // The bare question body is dated from the file (today), so it sorts after the 2026 dates.
-        assert_eq!(kinds, vec![Kind::Snapshot, Kind::Answer, Kind::Feedback, Kind::Agent, Kind::Question]);
+        // The bare question body is dated no later than its own answer, so it stays before it
+        // whatever the file's mtime (today) is.
+        assert_eq!(kinds, vec![Kind::Snapshot, Kind::Question, Kind::Answer, Kind::Feedback, Kind::Agent]);
         assert!(body.contains("which one?") && body.contains("the first") && body.contains("fix it") && body.contains("pinned"));
     }
 
