@@ -113,7 +113,17 @@ export function byDueThenPriority(a: Task, b: Task): number {
   return byPriority(a, b);
 }
 
-/** Next-queue order: deferred tasks sink below everything else; in each half, tasks missing an agent or due date come first (by priority), then the rest by due date then priority. */
+/** Oldest created first; tasks without a created timestamp go last. */
+function byOldest(a: Task, b: Task): number {
+  const ca = Date.parse(a.created);
+  const cb = Date.parse(b.created);
+  const na = Number.isNaN(ca);
+  const nb = Number.isNaN(cb);
+  if (na || nb) return na === nb ? 0 : na ? 1 : -1;
+  return ca - cb;
+}
+
+/** Next-queue order: deferred tasks sink below everything else; in each half, tasks missing an agent or due date come first (by priority), then the rest by due date then priority. Remaining ties go to the oldest task first. */
 export function byDeferredThenDue(deferred: ReadonlySet<number>): (a: Task, b: Task) => number {
   return (a, b) => {
     const da = deferred.has(a.id);
@@ -122,7 +132,7 @@ export function byDeferredThenDue(deferred: ReadonlySet<number>): (a: Task, b: T
     const ta = !a.agent || !a.due_date;
     const tb = !b.agent || !b.due_date;
     if (ta !== tb) return ta ? -1 : 1;
-    return ta ? byPriority(a, b) : byDueThenPriority(a, b);
+    return (ta ? byPriority(a, b) : byDueThenPriority(a, b)) || byOldest(a, b);
   };
 }
 
