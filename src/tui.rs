@@ -175,6 +175,7 @@ enum ColumnId {
     Title,
     Desc,
     Due,
+    Created,
     Project,
     Agent,
     Recur,
@@ -191,6 +192,7 @@ impl ColumnId {
             "title" => Some(ColumnId::Title),
             "desc" => Some(ColumnId::Desc),
             "due" => Some(ColumnId::Due),
+            "created" => Some(ColumnId::Created),
             "project" => Some(ColumnId::Project),
             "agent" => Some(ColumnId::Agent),
             "recur" => Some(ColumnId::Recur),
@@ -2704,6 +2706,11 @@ fn truncate_desc(desc: Option<&str>) -> String {
     }
 }
 
+/// Creation date in local time, `YYYY-MM-DD`.
+fn created_str(task: &crate::task::Task) -> String {
+    task.created.with_timezone(&Local).format("%Y-%m-%d").to_string()
+}
+
 fn build_task_cells(
     task: &crate::task::Task,
     today: NaiveDate,
@@ -2749,6 +2756,7 @@ fn build_task_cells(
                         .unwrap_or_default();
                     cells.push(Cell::from(due_str));
                 }
+                ColumnId::Created => cells.push(Cell::from(created_str(task))),
                 ColumnId::Project => cells.push(Cell::from(task.project.clone().unwrap_or_default())),
                 ColumnId::Agent => cells.push(Cell::from(task.agent.clone().unwrap_or_default())),
                 ColumnId::Recur => {
@@ -2787,6 +2795,7 @@ fn build_task_cells(
                 .unwrap_or_default();
             cells.push(Cell::from(due_str));
         }
+        cells.push(Cell::from(created_str(task)));
         if show_project {
             cells.push(Cell::from(task.project.clone().unwrap_or_default()));
         }
@@ -2862,6 +2871,7 @@ fn draw_table(frame: &mut Frame, app: &mut App, area: Rect) {
                 ColumnId::Title => hdr.push("Title"),
                 ColumnId::Desc => hdr.push("Desc"),
                 ColumnId::Due => hdr.push("Due"),
+                ColumnId::Created => hdr.push("Created"),
                 ColumnId::Project => hdr.push("Project"),
                 ColumnId::Agent => hdr.push("Agent"),
                 ColumnId::Recur => { hdr.push("↻"); hdr.push("Pattern"); }
@@ -2874,6 +2884,7 @@ fn draw_table(frame: &mut Frame, app: &mut App, area: Rect) {
         let mut hdr = vec!["ID", "Status", "Priority", "Title"];
         if show_desc { hdr.push("Desc"); }
         if show_due { hdr.push("Due"); }
+        hdr.push("Created");
         if show_project { hdr.push("Project"); }
         if show_agent { hdr.push("Agent"); }
         if show_effort { hdr.push("Eff"); }
@@ -3061,6 +3072,7 @@ fn draw_table(frame: &mut Frame, app: &mut App, area: Rect) {
                 ColumnId::Title => w.push(Constraint::Fill(1)),
                 ColumnId::Desc => w.push(Constraint::Length(30)),
                 ColumnId::Due => w.push(Constraint::Length(12)),
+                ColumnId::Created => w.push(Constraint::Length(12)),
                 ColumnId::Project => w.push(Constraint::Length(15)),
                 ColumnId::Agent => w.push(Constraint::Length(15)),
                 ColumnId::Recur => { w.push(Constraint::Length(3)); w.push(Constraint::Min(8)); }
@@ -3078,6 +3090,7 @@ fn draw_table(frame: &mut Frame, app: &mut App, area: Rect) {
         ];
         if show_desc { w.push(Constraint::Length(30)); }
         if show_due { w.push(Constraint::Length(12)); }
+        w.push(Constraint::Length(12));
         if show_project { w.push(Constraint::Length(15)); }
         if show_agent { w.push(Constraint::Length(15)); }
         if show_effort { w.push(Constraint::Length(4)); }

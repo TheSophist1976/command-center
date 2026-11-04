@@ -321,7 +321,7 @@ Config is stored at `~/Library/Application Support/task-manager/config.md` (macO
 | `default-dir` | Default directory for task and note files |
 | `default-view` | Starting view: `due`, `no-due-date`, `recurring`, `notes` |
 | `group-by` | Default grouping: `agent`, `project`, `priority`, or `none` |
-| `columns` | Comma-separated column list: `id,status,priority,title,due,agent,tags,project` |
+| `columns` | Comma-separated column list: `id,status,priority,title,due,created,agent,tags,project` |
 | `agent-<name>` | Agent profile — maps a name to a project directory |
 
 ```sh

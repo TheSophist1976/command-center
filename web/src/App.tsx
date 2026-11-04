@@ -907,6 +907,7 @@ export default function App() {
           <span style={{ width: COL.agent, flex: 'none' }}>Agent</span>
           <span style={{ flex: 1 }}>Task</span>
           <span style={{ width: COL.due, flex: 'none' }}>Due</span>
+          <span style={{ width: COL.created, flex: 'none' }}>Created</span>
           <span style={{ width: COL.effort, flex: 'none' }}>Effort</span>
         </div>
         <div style={{ flex: 1, minHeight: 0, overflow: 'auto' }}>
