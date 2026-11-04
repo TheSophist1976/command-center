@@ -87,6 +87,14 @@ export function timestampLabel(iso: string, today: Date): string {
   return `${monthDay(d, today)} · ${d.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' })}`;
 }
 
+/** Table form of a created timestamp: "Oct 27" (year added when not this year), "—" when missing. */
+export function createdLabel(iso: string | undefined, today: Date): string {
+  if (!iso) return '—';
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return '—';
+  return monthDay(d, today);
+}
+
 export function dueColor(t: Task, today: Date): string {
   if (isOverdue(t, today)) return 'var(--danger)';
   return t.due_date ? 'var(--fg-3)' : 'var(--fg-5)';

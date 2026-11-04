@@ -1,7 +1,7 @@
 import { AlertTriangle, CalendarOff, Repeat, UserX } from 'lucide-react';
 import type { Task } from '../types';
 import { isOverdue } from '../dueWindow';
-import { dueColor, dueLabel } from '../taskFormat';
+import { createdLabel, dueColor, dueLabel, timestampLabel } from '../taskFormat';
 import { DoneCheck, PriorityBadge, StatusPill } from './Badges';
 import { COL } from '../styles';
 
@@ -76,6 +76,12 @@ export function TaskRow({ task: t, today, selected, onSelect, onToggleDone }: Ta
         {t.recurrence && (
           <span title={t.recurrence} style={{ display: 'flex' }}><Repeat size={12} color="var(--fg-4)" /></span>
         )}
+      </span>
+      <span
+        title={timestampLabel(t.created, today)}
+        style={{ width: COL.created, flex: 'none', fontFamily: 'var(--font-mono)', fontSize: 12.5, color: 'var(--fg-4)', whiteSpace: 'nowrap' }}
+      >
+        {createdLabel(t.created, today)}
       </span>
       <span style={{ width: COL.effort, flex: 'none', fontFamily: 'var(--font-mono)', fontSize: 12, color: 'var(--fg-3)' }}>
         {t.effort ?? '—'}

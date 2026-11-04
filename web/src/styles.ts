@@ -7,4 +7,4 @@ export const sectionLabelStyle: CSSProperties = {
 };
 
 /** Desktop table column widths, shared by the header row and the task rows. */
-export const COL = { check: 18, id: 30, priority: 72, flags: 44, status: 136, agent: 110, due: 112, effort: 44 };
+export const COL = { check: 18, id: 30, priority: 72, flags: 44, status: 136, agent: 110, due: 112, created: 96, effort: 44 };
