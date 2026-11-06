@@ -35,9 +35,9 @@ jobs:
       fail-fast: true
       matrix:
         include:
-          # Labels checked against GitHub's runner docs on 2026-10-02 (macos-13 is retired; the
+          # (macos-13 is retired and macos-14 was rejected by GitHub on 2026-11-06 ("configuration not supported"); the
           # Intel runner is macos-15-intel). Re-check them if a job sits "waiting for a runner".
-          - { target: aarch64-apple-darwin, os: macos-14 }
+          - { target: aarch64-apple-darwin, os: macos-15 }
           - { target: x86_64-apple-darwin, os: macos-15-intel }
           - { target: x86_64-unknown-linux-gnu, os: ubuntu-22.04 }
           - { target: aarch64-unknown-linux-gnu, os: ubuntu-22.04-arm }
@@ -77,7 +77,7 @@ jobs:
     needs: checksums
     strategy:
       matrix:
-        os: [macos-14, ubuntu-22.04]
+        os: [macos-15, ubuntu-22.04]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
