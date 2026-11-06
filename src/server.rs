@@ -559,6 +559,65 @@ async fn delete_task(
     Ok(StatusCode::NO_CONTENT)
 }
 
+#[derive(Deserialize)]
+pub struct NameRequest {
+    pub name: String,
+}
+
+type ApiError = (StatusCode, Json<serde_json::Value>);
+
+async fn list_registry(state: &AppState, registry: db::Registry) -> Result<Json<Vec<String>>, ApiError> {
+    db::list_names(&state.db_path, registry)
+        .map(Json)
+        .map_err(|e| app_error(StatusCode::INTERNAL_SERVER_ERROR, e))
+}
+
+async fn create_registry(state: &AppState, registry: db::Registry, name: &str) -> Result<Json<serde_json::Value>, ApiError> {
+    let _guard = state.write_lock.lock().await;
+    db::create_name(&state.db_path, registry, name)
+        .map(|name| Json(serde_json::json!({ "name": name })))
+        .map_err(|e| {
+            if e.starts_with("Name must") || e.starts_with("Tag names") {
+                app_error(StatusCode::BAD_REQUEST, e)
+            } else {
+                app_error(StatusCode::INTERNAL_SERVER_ERROR, e)
+            }
+        })
+}
+
+async fn delete_registry(state: &AppState, registry: db::Registry, name: &str) -> Result<StatusCode, ApiError> {
+    let _guard = state.write_lock.lock().await;
+    match db::delete_name(&state.db_path, registry, name) {
+        Ok(true) => Ok(StatusCode::NO_CONTENT),
+        Ok(false) => Err(app_error(StatusCode::NOT_FOUND, format!("\"{}\" not found", name))),
+        Err(e) => Err(app_error(StatusCode::INTERNAL_SERVER_ERROR, e)),
+    }
+}
+
+async fn list_projects(State(state): State<Arc<AppState>>) -> Result<Json<Vec<String>>, ApiError> {
+    list_registry(&state, db::Registry::Project).await
+}
+
+async fn create_project(State(state): State<Arc<AppState>>, Json(req): Json<NameRequest>) -> Result<Json<serde_json::Value>, ApiError> {
+    create_registry(&state, db::Registry::Project, &req.name).await
+}
+
+async fn delete_project(State(state): State<Arc<AppState>>, AxumPath(name): AxumPath<String>) -> Result<StatusCode, ApiError> {
+    delete_registry(&state, db::Registry::Project, &name).await
+}
+
+async fn list_tags(State(state): State<Arc<AppState>>) -> Result<Json<Vec<String>>, ApiError> {
+    list_registry(&state, db::Registry::Tag).await
+}
+
+async fn create_tag(State(state): State<Arc<AppState>>, Json(req): Json<NameRequest>) -> Result<Json<serde_json::Value>, ApiError> {
+    create_registry(&state, db::Registry::Tag, &req.name).await
+}
+
+async fn delete_tag(State(state): State<Arc<AppState>>, AxumPath(name): AxumPath<String>) -> Result<StatusCode, ApiError> {
+    delete_registry(&state, db::Registry::Tag, &name).await
+}
+
 async fn list_agents() -> Json<Vec<AgentProfile>> {
     let profiles = crate::config::list_agent_profiles()
         .into_iter()
@@ -1129,6 +1188,10 @@ fn api_routes() -> Router<Arc<AppState>> {
         .route("/api/services/:id/pause", axum::routing::post(pause_service))
         .route("/api/services/:id/resume", axum::routing::post(resume_service))
         .route("/api/services/:id/runs", get(list_service_runs))
+        .route("/api/projects", get(list_projects).post(create_project))
+        .route("/api/projects/:name", axum::routing::delete(delete_project))
+        .route("/api/tags", get(list_tags).post(create_tag))
+        .route("/api/tags/:name", axum::routing::delete(delete_tag))
         .route("/api/tasks/:id/done", axum::routing::post(done_task))
         .route("/api/tasks/:id/reopen", axum::routing::post(reopen_task))
         .route("/api/tasks/:id/notes", get(list_task_notes).post(create_task_note))
@@ -1226,6 +1289,37 @@ mod tests {
     async fn body_json(response: axum::response::Response) -> serde_json::Value {
         let bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
         serde_json::from_slice(&bytes).unwrap()
+    }
+
+    #[tokio::test]
+    async fn test_projects_and_tags_api_create_list_delete() {
+        let (_dir, state) = make_state();
+        let app = router(state);
+        let send = |method: &str, uri: &str, body: Option<&str>| {
+            let mut req = Request::builder().method(method).uri(uri).header("host", "127.0.0.1:3000");
+            let body = match body {
+                Some(b) => { req = req.header("content-type", "application/json"); Body::from(b.to_string()) }
+                None => Body::empty(),
+            };
+            app.clone().oneshot(req.body(body).unwrap())
+        };
+
+        let r = send("POST", "/api/projects", Some(r#"{"name":"Home Lab"}"#)).await.unwrap();
+        assert_eq!(r.status(), StatusCode::OK);
+        let r = send("POST", "/api/tags", Some(r#"{"name":"a,b"}"#)).await.unwrap();
+        assert_eq!(r.status(), StatusCode::BAD_REQUEST);
+        let r = send("POST", "/api/tags", Some(r#"{"name":"urgent"}"#)).await.unwrap();
+        assert_eq!(r.status(), StatusCode::OK);
+
+        let r = send("GET", "/api/projects", None).await.unwrap();
+        assert_eq!(body_json(r).await, serde_json::json!(["Home Lab"]));
+
+        let r = send("DELETE", "/api/projects/Home%20Lab", None).await.unwrap();
+        assert_eq!(r.status(), StatusCode::NO_CONTENT);
+        let r = send("DELETE", "/api/projects/Home%20Lab", None).await.unwrap();
+        assert_eq!(r.status(), StatusCode::NOT_FOUND);
+        let r = send("GET", "/api/tags", None).await.unwrap();
+        assert_eq!(body_json(r).await, serde_json::json!(["urgent"]));
     }
 
     #[tokio::test]

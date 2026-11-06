@@ -61,6 +61,33 @@ export async function fetchServiceRuns(id: number, limit = 50): Promise<ServiceR
   return jsonOrThrow(await apiFetch(`/api/services/${id}/runs?limit=${limit}`));
 }
 
+export type NameKind = 'projects' | 'tags';
+
+export async function fetchNames(kind: NameKind): Promise<string[]> {
+  return jsonOrThrow(await apiFetch(`/api/${kind}`));
+}
+
+/** Registers a project or tag by itself (no task needed). Returns the stored spelling. */
+export async function createName(kind: NameKind, name: string): Promise<string> {
+  const r = await jsonOrThrow<{ name: string }>(
+    await apiFetch(`/api/${kind}`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ name }),
+    }),
+  );
+  return r.name;
+}
+
+/** Deletes a project or tag and clears it from every task that uses it. */
+export async function deleteName(kind: NameKind, name: string): Promise<void> {
+  const response = await apiFetch(`/api/${kind}/${encodeURIComponent(name)}`, { method: 'DELETE' });
+  if (!response.ok && response.status !== 204) {
+    const body = await response.json().catch(() => ({}));
+    throw new Error(body.error ?? `Failed to delete ${name}`);
+  }
+}
+
 export async function fetchAgents(): Promise<AgentProfile[]> {
   return jsonOrThrow(await apiFetch('/api/agents'));
 }
