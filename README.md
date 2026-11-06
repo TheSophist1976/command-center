@@ -356,6 +356,8 @@ Tasks are stored in a local SQLite database (`tasks.db`) — use the CLI or TUI 
 
 Task fields: `id`, `title`, `status`, `priority`, `tags`, `due_date`, `project`, `recurrence`, `notes`, `agent`, `effort`, `description`, `created`, `updated`.
 
+Projects and tags are also stored on their own, in `projects` and `tags` tables, so one can exist before any task uses it and stays after its last task is gone. Tasks refer to them by name (case-insensitive), so the CLI and TUI keep working unchanged, and any name a task uses is registered automatically. Existing databases are filled in from their tasks the first time they are opened. The web app manages them through `GET`/`POST /api/projects` and `/api/tags`, and `DELETE /api/projects/:name` and `/api/tags/:name`. A delete also clears the name from every task that has it.
+
 ## Command Center Web
 
 A browser-based companion to the `task` CLI/TUI.

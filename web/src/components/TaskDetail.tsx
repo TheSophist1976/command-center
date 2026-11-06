@@ -7,6 +7,8 @@ import { DatePicker } from './DatePicker';
 import { AgentPicker } from './AgentPicker';
 import { Markdown } from './Markdown';
 import { ConversationPanel } from './ConversationPanel';
+import { ProjectPicker } from './ProjectPicker';
+import { TagEditor } from './TagEditor';
 import { NotesSection } from './NotesSection';
 import { ConvertToService } from './ConvertToService';
 import { PriorityBadge, StatusPill } from './Badges';
@@ -64,6 +66,12 @@ interface TaskDetailProps {
   onEdit: (changes: Parameters<typeof editTask>[1]) => void;
   onSendThread: (kind: ThreadSendKind, text: string) => Promise<void>;
   onApprove: (text: string) => Promise<void>;
+  allProjects: string[];
+  allTags: string[];
+  onCreateProject: (name: string) => Promise<string | undefined>;
+  onCreateTag: (name: string) => Promise<string | undefined>;
+  onDeleteProject: (name: string) => void;
+  onDeleteTag: (name: string) => void;
   onCreateNote: (title: string) => Promise<string | undefined> | void;
   onOpenNote: (slug: string) => void;
   onSaveNote: (slug: string, body: string) => Promise<void>;
@@ -80,7 +88,7 @@ interface TaskDetailProps {
  */
 export function TaskDetail({
   task, today, mobile, showId = true, actions, onClose, agentOptions, thread, notes,
-  onEdit, onSendThread, onApprove, onCreateNote, onOpenNote, onSaveNote, onUnlinkNote, onConvertToService,
+  onEdit, allProjects, allTags, onCreateProject, onCreateTag, onDeleteProject, onDeleteTag, onSendThread, onApprove, onCreateNote, onOpenNote, onSaveNote, onUnlinkNote, onConvertToService,
 }: TaskDetailProps) {
   const done = task.status === 'done';
   const agentStatus = task.agent ? statusFor(task.agent) : null;
@@ -112,10 +120,13 @@ export function TaskDetail({
     {
       label: 'Project',
       node: (
-        <EditableField
+        <ProjectPicker
+          id="field-project"
           value={task.project ?? ''}
+          projects={allProjects}
           onSave={(v) => onEdit({ project: v })}
-          display={<span style={ellipsis}>{task.project || placeholder('No project')}</span>}
+          onCreateProject={onCreateProject}
+          onDeleteProject={onDeleteProject}
         />
       ),
     },
@@ -135,11 +146,13 @@ export function TaskDetail({
     {
       label: 'Tags',
       node: (
-        <EditableField
+        <TagEditor
           id="field-tags"
-          value={task.tags.join(', ')}
-          onSave={(v) => onEdit({ tags: v })}
-          display={<span style={ellipsis}>{task.tags.length ? task.tags.join(', ') : placeholder('No tags')}</span>}
+          tags={task.tags}
+          allTags={allTags}
+          onChange={(tags) => onEdit({ tags: tags.join(',') })}
+          onCreateTag={onCreateTag}
+          onDeleteTag={onDeleteTag}
         />
       ),
     },

@@ -35,6 +35,12 @@ CREATE TABLE IF NOT EXISTS service_runs (
     summary       TEXT
 );
 CREATE INDEX IF NOT EXISTS service_runs_task ON service_runs(task_id, ran_at);
+CREATE TABLE IF NOT EXISTS projects (
+    name TEXT PRIMARY KEY COLLATE NOCASE
+);
+CREATE TABLE IF NOT EXISTS tags (
+    name TEXT PRIMARY KEY COLLATE NOCASE
+);
 ";
 
 /// One recorded run of a service (`task service run`).
@@ -118,7 +124,42 @@ fn open_conn(path: &Path) -> Result<Connection, String> {
     // `complete` is retired as a stored work status; it meant waiting-for-review.
     conn.execute("UPDATE tasks SET work_status = 'waiting-for-review' WHERE work_status = 'complete'", [])
         .map_err(|e| format!("Failed to migrate work status: {}", e))?;
+    backfill_registries(&conn)?;
     Ok(conn)
+}
+
+/// Projects and tags live in their own tables; tasks reference them by name.
+/// Databases created before those tables existed get them filled from the names
+/// tasks already use. Runs only while a table is empty, so it is a no-op once seeded.
+fn backfill_registries(conn: &Connection) -> Result<(), String> {
+    let count = |table: &str| -> Result<i64, String> {
+        conn.query_row(&format!("SELECT COUNT(*) FROM {}", table), [], |r| r.get(0))
+            .map_err(|e| format!("Failed to count {}: {}", table, e))
+    };
+    if count("projects")? == 0 {
+        conn.execute(
+            "INSERT OR IGNORE INTO projects (name) SELECT DISTINCT project FROM tasks WHERE project IS NOT NULL AND project != ''",
+            [],
+        )
+        .map_err(|e| format!("Failed to backfill projects: {}", e))?;
+    }
+    if count("tags")? == 0 {
+        let mut stmt = conn
+            .prepare("SELECT tags FROM tasks WHERE tags != ''")
+            .map_err(|e| format!("Failed to read tags: {}", e))?;
+        let rows: Vec<String> = stmt
+            .query_map([], |r| r.get::<_, String>(0))
+            .map_err(|e| format!("Failed to read tags: {}", e))?
+            .filter_map(|r| r.ok())
+            .collect();
+        for row in rows {
+            for tag in text_to_list(&row) {
+                conn.execute("INSERT OR IGNORE INTO tags (name) VALUES (?1)", params![tag])
+                    .map_err(|e| format!("Failed to backfill tags: {}", e))?;
+            }
+        }
+    }
+    Ok(())
 }
 
 fn list_to_text(v: &[String]) -> String {
@@ -293,6 +334,16 @@ fn write_all(conn: &Connection, task_file: &TaskFile, next_version: i64) -> Resu
         .map_err(|e| format!("Failed to clear tasks: {}", e))?;
     for t in &task_file.tasks {
         insert_task_row(conn, t)?;
+        // Anything a task references (including names set by the CLI or TUI) is
+        // registered, so the registries are always a superset of what is in use.
+        if let Some(p) = t.project.as_deref().filter(|p| !p.is_empty()) {
+            conn.execute("INSERT OR IGNORE INTO projects (name) VALUES (?1)", params![p])
+                .map_err(|e| format!("Failed to register project: {}", e))?;
+        }
+        for tag in &t.tags {
+            conn.execute("INSERT OR IGNORE INTO tags (name) VALUES (?1)", params![tag])
+                .map_err(|e| format!("Failed to register tag: {}", e))?;
+        }
     }
     conn.execute_batch(&format!("PRAGMA user_version = {}", next_version))
         .map_err(|e| format!("Failed to bump data version: {}", e))
@@ -436,6 +487,110 @@ pub fn last_run(path: &Path, task_id: u32) -> Result<Option<ServiceRun>, String>
     Ok(list_runs(path, task_id, 1, None)?.into_iter().next())
 }
 
+/// Which registry a name belongs to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Registry {
+    Project,
+    Tag,
+}
+
+impl Registry {
+    fn table(self) -> &'static str {
+        match self {
+            Registry::Project => "projects",
+            Registry::Tag => "tags",
+        }
+    }
+}
+
+fn clean_name(registry: Registry, name: &str) -> Result<String, String> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err("Name must not be empty".to_string());
+    }
+    if registry == Registry::Tag && name.contains(',') {
+        return Err("Tag names must not contain commas".to_string());
+    }
+    Ok(name.to_string())
+}
+
+/// All registered projects or tags, alphabetical (case-insensitive).
+pub fn list_names(path: &Path, registry: Registry) -> Result<Vec<String>, String> {
+    let conn = open_migrated(path)?;
+    let mut stmt = conn
+        .prepare(&format!("SELECT name FROM {} ORDER BY name COLLATE NOCASE", registry.table()))
+        .map_err(|e| format!("Failed to prepare query: {}", e))?;
+    let rows = stmt
+        .query_map([], |r| r.get::<_, String>(0))
+        .map_err(|e| format!("Failed to query {}: {}", registry.table(), e))?;
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|e| format!("Failed to read {}: {}", registry.table(), e))
+}
+
+/// Registers a name. Returns the stored spelling (the existing one if it was already registered).
+pub fn create_name(path: &Path, registry: Registry, name: &str) -> Result<String, String> {
+    let name = clean_name(registry, name)?;
+    let conn = open_migrated(path)?;
+    conn.execute_batch("BEGIN IMMEDIATE")
+        .map_err(|e| format!("Failed to lock {}: {}", path.display(), e))?;
+    let result = (|| {
+        conn.execute(&format!("INSERT OR IGNORE INTO {} (name) VALUES (?1)", registry.table()), params![name])
+            .map_err(|e| format!("Failed to create {}: {}", registry.table(), e))?;
+        let stored: String = conn
+            .query_row(&format!("SELECT name FROM {} WHERE name = ?1", registry.table()), params![name], |r| r.get(0))
+            .map_err(|e| format!("Failed to read back {}: {}", registry.table(), e))?;
+        let next = read_version(&conn)? + 1;
+        conn.execute_batch(&format!("PRAGMA user_version = {}", next))
+            .map_err(|e| format!("Failed to bump data version: {}", e))?;
+        Ok(stored)
+    })();
+    finish(&conn, result)
+}
+
+/// Deletes a project or tag and removes it from every task that uses it, atomically.
+/// Returns false if no such name was registered.
+pub fn delete_name(path: &Path, registry: Registry, name: &str) -> Result<bool, String> {
+    let mut txn = begin(path)?;
+    let mut existed = txn
+        .conn
+        .execute(&format!("DELETE FROM {} WHERE name = ?1", registry.table()), params![name])
+        .map_err(|e| format!("Failed to delete from {}: {}", registry.table(), e))?
+        > 0;
+    for t in txn.task_file.tasks.iter_mut() {
+        match registry {
+            Registry::Project => {
+                if t.project.as_deref().is_some_and(|p| p.eq_ignore_ascii_case(name)) {
+                    t.project = None;
+                    existed = true;
+                }
+            }
+            Registry::Tag => {
+                let before = t.tags.len();
+                t.tags.retain(|x| !x.eq_ignore_ascii_case(name));
+                existed |= t.tags.len() != before;
+            }
+        }
+    }
+    if !existed {
+        return Ok(false); // dropping the transaction rolls it back
+    }
+    txn.commit()?;
+    Ok(true)
+}
+
+fn finish<T>(conn: &Connection, result: Result<T, String>) -> Result<T, String> {
+    match result {
+        Ok(v) => {
+            conn.execute_batch("COMMIT").map_err(|e| format!("Failed to commit transaction: {}", e))?;
+            Ok(v)
+        }
+        Err(e) => {
+            let _ = conn.execute_batch("ROLLBACK");
+            Err(e)
+        }
+    }
+}
+
 /// Unconditionally replaces every task. Last writer wins, so only use it to seed
 /// a database; read-modify-write code must go through `begin`.
 pub fn save(path: &Path, task_file: &TaskFile) -> Result<(), String> {
@@ -571,6 +726,54 @@ mod tests {
         save(&path, &TaskFile::new()).unwrap();
         assert_eq!(version(&path).unwrap(), v0 + 2);
         assert_eq!(load_versioned(&path).unwrap().1, v0 + 2);
+    }
+
+    #[test]
+    fn projects_and_tags_persist_without_tasks_and_backfill_from_existing_tasks() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("tasks.db");
+        let mut seed = TaskFile::new();
+        let mut t = sample_task(1, "a");
+        t.project = Some("Work".to_string());
+        seed.tasks = vec![t];
+        save(&path, &seed).unwrap();
+        assert_eq!(list_names(&path, Registry::Project).unwrap(), vec!["Work"]);
+        assert_eq!(list_names(&path, Registry::Tag).unwrap(), vec!["alpha"]);
+
+        assert_eq!(create_name(&path, Registry::Project, " Home ").unwrap(), "Home");
+        assert_eq!(create_name(&path, Registry::Project, "home").unwrap(), "Home");
+        assert!(create_name(&path, Registry::Tag, "a,b").is_err());
+        assert!(create_name(&path, Registry::Tag, "  ").is_err());
+        assert_eq!(list_names(&path, Registry::Project).unwrap(), vec!["Home", "Work"]);
+
+        // Unused entries survive a task rewrite.
+        begin(&path).unwrap().commit().unwrap();
+        assert_eq!(list_names(&path, Registry::Project).unwrap(), vec!["Home", "Work"]);
+    }
+
+    #[test]
+    fn deleting_a_project_or_tag_clears_it_from_tasks() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("tasks.db");
+        let mut seed = TaskFile::new();
+        let mut t = sample_task(1, "a");
+        t.project = Some("Work".to_string());
+        t.tags = vec!["alpha".to_string(), "beta".to_string()];
+        seed.tasks = vec![t, sample_task(2, "b")];
+        save(&path, &seed).unwrap();
+        let before = version(&path).unwrap();
+
+        assert!(delete_name(&path, Registry::Project, "Work").unwrap());
+        assert!(delete_name(&path, Registry::Tag, "alpha").unwrap());
+        assert!(!delete_name(&path, Registry::Tag, "alpha").unwrap());
+
+        let tf = load(&path).unwrap();
+        assert_eq!(tf.find_task(1).unwrap().project, None);
+        assert_eq!(tf.find_task(1).unwrap().tags, vec!["beta"]);
+        assert!(tf.find_task(2).unwrap().tags.is_empty());
+        assert!(list_names(&path, Registry::Project).unwrap().is_empty());
+        assert_eq!(list_names(&path, Registry::Tag).unwrap(), vec!["beta"]);
+        assert_eq!(version(&path).unwrap(), before + 2);
     }
 
     fn sample_task(id: u32, title: &str) -> Task {

@@ -5,7 +5,8 @@ import './layout.css';
 import { Terminal, Search, PanelLeftClose, PanelLeftOpen, PanelRightClose, PanelRightOpen, Menu, ChevronLeft, Plus, Repeat } from 'lucide-react';
 import { Button } from './components/Button';
 import { NewTaskForm } from './components/NewTaskForm';
-import { fetchTask, fetchTasks, fetchAgents, addTask, editTask, markDone, reopenTask, deleteTask, fetchTaskNotes, createTaskNote, openNote, saveNote, unlinkTaskNote, fetchTaskThread, postTaskThread } from './api';
+import { fetchTask, fetchTasks, fetchAgents, fetchNames, createName, deleteName, addTask, editTask, markDone, reopenTask, deleteTask, fetchTaskNotes, createTaskNote, openNote, saveNote, unlinkTaskNote, fetchTaskThread, postTaskThread } from './api';
+import type { NameKind } from './api';
 import { AgentEditor } from './components/AgentEditor';
 import { ServicesView } from './components/ServicesView';
 import { fetchServices } from './api';
@@ -70,6 +71,8 @@ function countLabel(n: number): string {
 
 export default function App() {
   const [tasks, setTasks] = useState<Task[]>([]);
+  const [allProjects, setAllProjects] = useState<string[]>([]);
+  const [allTags, setAllTags] = useState<string[]>([]);
   // False until the first fetch, so the empty initial list is not taken as the notification baseline.
   const [tasksLoaded, setTasksLoaded] = useState(false);
   const [agents, setAgents] = useState<AgentProfile[]>([]);
@@ -143,9 +146,11 @@ export default function App() {
       fetchServices()
         .then((s) => setFailingServices(s.filter((x) => x.work_status === 'failing' && !x.paused).length))
         .catch(() => {});
-      Promise.all([fetchTasks(), fetchAgents()])
-        .then(([t, a]) => {
+      Promise.all([fetchTasks(), fetchAgents(), fetchNames('projects'), fetchNames('tags')])
+        .then(([t, a, p, tg]) => {
           setTasks(t);
+          setAllProjects(p);
+          setAllTags(tg);
           setTasksLoaded(true);
           setAgents(a);
           setSelected((prev) => (prev ? t.find((task) => task.id === prev.id) ?? null : prev));
@@ -276,6 +281,33 @@ export default function App() {
       const updated = await editTask(id, changes);
       setTasks((prev) => prev.map((t) => (t.id === updated.id ? updated : t)));
       setSelected((prev) => (prev?.id === updated.id ? updated : prev));
+    } catch (e) {
+      setError(String(e));
+    }
+  }
+
+  async function handleCreateName(kind: NameKind, name: string): Promise<string | undefined> {
+    try {
+      const stored = await createName(kind, name);
+      const add = (list: string[]) => (list.includes(stored) ? list : [...list, stored].sort((a, b) => a.localeCompare(b)));
+      if (kind === 'projects') setAllProjects(add); else setAllTags(add);
+      return stored;
+    } catch (e) {
+      setError(String(e));
+    }
+  }
+
+  async function handleDeleteName(kind: NameKind, name: string) {
+    try {
+      await deleteName(kind, name);
+      if (kind === 'projects') setAllProjects((l) => l.filter((x) => x !== name)); else setAllTags((l) => l.filter((x) => x !== name));
+      // Tasks lose the name server-side; the SSE refresh will sync, but update now for snappiness.
+      setTasks((prev) => prev.map((t) => (kind === 'projects'
+        ? (t.project === name ? { ...t, project: undefined } : t)
+        : { ...t, tags: t.tags.filter((x) => x !== name) })));
+      setSelected((prev) => (prev && (kind === 'projects'
+        ? (prev.project === name ? { ...prev, project: undefined } : prev)
+        : { ...prev, tags: prev.tags.filter((x) => x !== name) })));
     } catch (e) {
       setError(String(e));
     }
@@ -597,6 +629,12 @@ export default function App() {
     today,
     agentOptions,
     thread,
+    allProjects,
+    allTags,
+    onCreateProject: (name: string) => handleCreateName('projects', name),
+    onCreateTag: (name: string) => handleCreateName('tags', name),
+    onDeleteProject: (name: string) => handleDeleteName('projects', name),
+    onDeleteTag: (name: string) => handleDeleteName('tags', name),
     notes: visibleNotes,
     onEdit: (changes: Parameters<typeof editTask>[1]) => handleEditField(selected.id, changes),
     onSendThread: handleSendThread,
