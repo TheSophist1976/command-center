@@ -379,7 +379,14 @@ cd .. && cargo run --release --bin task_server
 
 **Known limitation:** `task_server`'s write handlers (add/edit/done/reopen/delete) serialize against each other with an in-process lock, so two browser tabs hitting the same running server can't race each other into a lost write or duplicate id. This does *not* extend across processes — editing the same `tasks.db` with the CLI or TUI while `task_server` is running is still uncoordinated, and whichever process saves last wins, same as before this change.
 
-**Current scope:** table + inspector view of real tasks (the "1a" shell only — table + permanent detail panel, not the kanban-style board layout). Agent status shown in the sidebar and the inspector's "Agent waiting" panel is placeholder/mock data, clearly labeled "(preview — not yet live)" — it's not yet backed by real agent session state. No keyboard shortcuts, drag-and-drop, or in-browser note editing yet.
+**What it shows.** The web UI has two views, switched by one toggle at the top (the choice is remembered):
+
+- **Next** (the home view) is the queue of things that need you, in bands: *Review* (an agent finished and wants approval), *Needs your input* (an agent asked a question), *Triage* (unassigned or assigned to `human`) and *Agents working* (awareness only, folded away until opened). The selected task is docked beside the queue with its conversation front and centre, so you can approve, request changes or answer without leaving the list; everything else about the task is behind a "Task details" fold (open by default for triage). Approving, answering, requesting changes or marking done moves on to the next item.
+- **All tasks** is the full table with filters (Today, This week, This month, This year, No due date, Recurring), grouping, and a slide-in inspector.
+
+A thin strip along the top summarises agents (running means an open task in progress) and services (failing ones are surfaced), and opens the agent editor, the Services screen, Settings and the updater. On a phone the same two views are separate layouts: a stacked queue, a full-screen task you can swipe or step through, and a bottom sheet for status.
+
+Shortcuts (`/` or ⌘K for the command palette, which lists them all): `j`/`k` move, `Enter` marks done, `a` adds a task, `z` defers (Next), `e d p t A E` edit a field, `T N W M Q Y X` set the due date, `[`/`]` change the filter and `G` the grouping (All tasks). The agent-waiting banner in the inspector is still placeholder data. No drag-and-drop or in-browser note editing yet.
 
 ## Running Tests
 
@@ -387,9 +394,14 @@ cd .. && cargo run --release --bin task_server
 cargo test
 ```
 
-Frontend build check:
+Frontend: type-check and build, then unit and component tests (Vitest, including app-level tests against a faked API):
 ```sh
-cd web && npm run build
+cd web && npm run build && npm test
+```
+
+End to end (a real `task serve` per test, the CLI playing the agent; build the frontend and `cargo build` first):
+```sh
+cd e2e && npm ci && npx playwright install chromium && npx playwright test
 ```
 
 ## License

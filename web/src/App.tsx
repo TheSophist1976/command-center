@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import './tokens.css';
 import './taskPanel.css';
 import './layout.css';
-import { Terminal, Search, PanelLeftClose, PanelLeftOpen, PanelRightClose, PanelRightOpen, Menu, ChevronLeft, Plus, Repeat } from 'lucide-react';
+import { Search, PanelRightClose, PanelRightOpen, ChevronLeft, ChevronUp, ChevronDown, Plus } from 'lucide-react';
 import { Button } from './components/Button';
 import { NewTaskForm } from './components/NewTaskForm';
 import { fetchTask, fetchTasks, fetchAgents, fetchNames, createName, deleteName, addTask, editTask, markDone, reopenTask, deleteTask, fetchTaskNotes, createTaskNote, openNote, saveNote, unlinkTaskNote, fetchTaskThread, postTaskThread } from './api';
@@ -11,26 +11,30 @@ import { AgentEditor } from './components/AgentEditor';
 import { ServicesView } from './components/ServicesView';
 import { fetchServices } from './api';
 import { SettingsDialog } from './components/SettingsDialog';
-import { SettingsFooter } from './components/SettingsFooter';
 import { TaskDetail } from './components/TaskDetail';
 import { TaskRow } from './components/TaskRow';
 import { MobileTaskRow } from './components/MobileTaskRow';
-import { MobileDrawer } from './components/MobileDrawer';
 import { MobileNewTaskSheet } from './components/MobileNewTaskSheet';
 import { CommandPalette, type PaletteCommand } from './components/CommandPalette';
-import { COL, sectionLabelStyle } from './styles';
-import type { Task, AgentProfile, Note, Thread, ThreadSendKind } from './types';
+import { ViewToggle, type View } from './components/ViewToggle';
+import { FilterPills } from './components/FilterPills';
+import { NextQueue } from './components/NextQueue';
+import { StatusStrip, MobileStatusBar } from './components/StatusStrip';
+import { COL } from './styles';
+import type { Task, AgentProfile, Note, Service, Thread, ThreadSendKind } from './types';
 import { startOfToday } from './dueWindow';
-import { statusFor, statusColor } from './mockAgentStatus';
+import { agentActivity, serviceSummary } from './status';
+import { bandOf, buildQueue, needsYouCount, nextSelection, queueOrder } from './queue';
 import { addDays, addMonths, formatLocalDate } from './taskFormat';
 import {
-  ALL_FILTER_ITEMS, DUE_WINDOW_ITEMS, GROUP_BY_OPTIONS, INBOX_ITEM, NEXT_ITEM,
-  byDeferredThenDue, countForFilter, groupTasks, matchesFilter, needsHumanAction, type DueFilter, type FilterItem, type GroupBy,
+  ALL_TASKS_FILTERS, GROUP_BY_OPTIONS,
+  groupTasks, matchesFilter, needsHumanAction, type DueFilter, type FilterItem, type GroupBy,
 } from './filters';
 import { useMediaQuery } from './useMediaQuery';
 import { loadDeferrals, loadSettings, saveDeferrals, saveSettings, type Deferrals, type Settings } from './settings';
 import { diffNotifications, loadSnapshot, saveSnapshot, showNotification, snapshotOf } from './notifications';
 
+const VIEW_KEY = 'ccView';
 const PANEL_MIN_WIDTH = 352;
 const PANEL_MAX_WIDTH = 880;
 const PANEL_DEFAULT_WIDTH = 440;
@@ -79,9 +83,12 @@ export default function App() {
   const [selected, setSelected] = useState<Task | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [showNewTaskForm, setShowNewTaskForm] = useState(false);
-  const [groupByChoice, setGroupBy] = useState<GroupBy>('agent');
-  const [dueFilter, setDueFilter] = useState<DueFilter>('day');
-  const [leftOpen, setLeftOpen] = useState(true);
+  const [groupBy, setGroupBy] = useState<GroupBy>('agent');
+  // Next is the home view: the queue of things that need you. All tasks is the full list behind a toggle.
+  const [view, setViewState] = useState<View>(() => (localStorage.getItem(VIEW_KEY) === 'all' ? 'all' : 'next'));
+  const [dueFilter, setDueFilter] = useState<DueFilter>('all-tasks');
+  // The "Agents working" band is awareness only, so it starts folded away.
+  const [workingExpanded, setWorkingExpanded] = useState(false);
   const [rightOpen, setRightOpen] = useState(true);
   const [panelPhase, setPanelPhase] = useState<'closed' | 'entering' | 'open' | 'leaving'>('open');
   const [panelWidth, setPanelWidth] = useState(() => {
@@ -95,7 +102,7 @@ export default function App() {
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [editingAgent, setEditingAgent] = useState<AgentProfile | null>(null);
   const [servicesOpen, setServicesOpen] = useState(false);
-  const [failingServices, setFailingServices] = useState(0);
+  const [services, setServices] = useState<Service[]>([]);
   const [settings, setSettings] = useState<Settings>(loadSettings);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [deferrals, setDeferrals] = useState<Deferrals>(() => loadDeferrals(Date.now()));
@@ -104,7 +111,6 @@ export default function App() {
   // Phone-only UI state.
   const isMobile = useMediaQuery(MOBILE_QUERY);
   const [mobileSearch, setMobileSearch] = useState<string | null>(null);
-  const [drawerOpen, setDrawerOpen] = useState(false);
   const [newSheetOpen, setNewSheetOpen] = useState(false);
   const [swipeOpenId, setSwipeOpenId] = useState<number | null>(null);
 
@@ -124,9 +130,14 @@ export default function App() {
     ? [`task-${selected.id}-thread`, `task-${selected.id}-review-thread`, `task-${selected.id}-question`]
     : [];
   const visibleNotes = taskNotes.filter((n) => !threadSlugs.includes(n.slug));
-  // Next is a single queue ordered by due date then priority, so it ignores the chosen grouping.
-  const groupBy: GroupBy = dueFilter === 'next' ? 'none' : groupByChoice;
-  const filterItem: FilterItem = ALL_FILTER_ITEMS.find((i) => i.value === dueFilter) ?? INBOX_ITEM;
+  const filterItem: FilterItem = ALL_TASKS_FILTERS.find((i) => i.value === dueFilter) ?? ALL_TASKS_FILTERS[0];
+  // The docked pane (Next) is always visible; the All tasks inspector slides in and out.
+  const inspectorVisible = view === 'next' || rightOpen;
+
+  function setView(next: View) {
+    setViewState(next);
+    localStorage.setItem(VIEW_KEY, next);
+  }
 
   function selectTask(task: Task) {
     setSelected(task);
@@ -144,7 +155,7 @@ export default function App() {
   useEffect(() => {
     function refresh() {
       fetchServices()
-        .then((s) => setFailingServices(s.filter((x) => x.work_status === 'failing' && !x.paused).length))
+        .then(setServices)
         .catch(() => {});
       Promise.all([fetchTasks(), fetchAgents(), fetchNames('projects'), fetchNames('tags')])
         .then(([t, a, p, tg]) => {
@@ -217,7 +228,7 @@ export default function App() {
   useEffect(() => {
     if (!selected || isMobile) return;
     document.querySelector(`[data-task-row="${selected.id}"]`)?.scrollIntoView({ block: 'nearest' });
-  }, [selected?.id, isMobile]);
+  }, [selected?.id, isMobile, view]);
 
   async function handleAddTask(input: { title: string; due?: string; agent?: string }) {
     try {
@@ -239,13 +250,13 @@ export default function App() {
         return spawned ? [...next, spawned] : next;
       });
       if (selected?.id !== task.id) return;
-      // On desktop, completing the selected task moves on to the next one so you
-      // can keep triaging; on a phone you stay on the task you just completed.
-      const nextSelection = isMobile || currentIndex === -1
-        ? completed
-        : flatOrder[currentIndex + 1] ?? flatOrder[currentIndex - 1] ?? completed;
-      if (isMobile) setSelected(nextSelection);
-      else selectTask(nextSelection);
+      // Completing the selected task moves on to the next one so you can keep working down the
+      // list. The one exception is a phone browsing All tasks, where you stay on the task you
+      // just completed (it is still in the list and can be reopened).
+      const neighbor = currentIndex === -1 ? undefined : flatOrder[currentIndex + 1] ?? flatOrder[currentIndex - 1];
+      if (isMobile && view === 'all') setSelected(completed);
+      else if (isMobile) setSelected(neighbor ?? null);
+      else selectTask(neighbor ?? completed);
     } catch (e) {
       setError(String(e));
     }
@@ -381,8 +392,18 @@ export default function App() {
       setThread(posted);
       // Refetch: a send can move the task (or close it), and the allowed moves change.
       const updated = await fetchTask(selected.id);
-      setSelected(updated);
       setTasks((prev) => prev.map((t) => (t.id === updated.id ? updated : t)));
+      // In Next, answering, requesting changes or approving hands the task back to an agent (or
+      // finishes it), so move on to whatever still needs you instead of staying on a finished item.
+      const band = bandOf(updated);
+      if (view === 'next' && (band === null || band === 'working')) {
+        const waiting = flatOrder.filter((t) => { const b = bandOf(t); return b !== null && b !== 'working'; });
+        const at = waiting.findIndex((t) => t.id === updated.id);
+        const neighbor = waiting[at + 1] ?? waiting[at - 1];
+        setSelected(neighbor ?? (isMobile ? null : updated));
+      } else {
+        setSelected(updated);
+      }
     } catch (e) {
       setError(String(e));
       throw e;
@@ -390,24 +411,47 @@ export default function App() {
   }
 
   const query = isMobile ? (mobileSearch ?? '') : '';
-  const filteredTasks = useMemo(() => {
-    let result = tasks.filter((t) => matchesFilter(t, today, dueFilter));
+  const searchedTasks = useMemo(() => {
     const q = query.trim().toLowerCase();
-    if (q) {
-      result = result.filter((t) => t.title.toLowerCase().includes(q));
-    }
-    return result;
-  }, [tasks, dueFilter, query, today]);
-
+    return q ? tasks.filter((t) => t.title.toLowerCase().includes(q)) : tasks;
+  }, [tasks, query]);
   const deferredIds = useMemo(
     () => new Set(Object.entries(deferrals).filter(([, until]) => until > now).map(([id]) => Number(id))),
     [deferrals, now],
   );
-  const grouped = useMemo(
-    () => groupTasks(filteredTasks, groupBy, dueFilter === 'next' ? byDeferredThenDue(deferredIds) : undefined),
-    [filteredTasks, groupBy, dueFilter, deferredIds],
+
+  // Next: the queue in bands. All tasks: the filtered, grouped list.
+  const queue = useMemo(() => buildQueue(searchedTasks, deferredIds), [searchedTasks, deferredIds]);
+  const nextOrder = useMemo(() => queueOrder(queue, { workingExpanded }), [queue, workingExpanded]);
+  const filteredTasks = useMemo(
+    () => searchedTasks.filter((t) => matchesFilter(t, today, dueFilter)),
+    [searchedTasks, dueFilter, today],
   );
-  const flatOrder = useMemo(() => [...grouped.values()].flat(), [grouped]);
+  const grouped = useMemo(() => groupTasks(filteredTasks, groupBy), [filteredTasks, groupBy]);
+  const allOrder = useMemo(() => [...grouped.values()].flat(), [grouped]);
+  const flatOrder = view === 'next' ? nextOrder : allOrder;
+  const nextCount = useMemo(() => needsYouCount(tasks), [tasks]);
+  const activity = useMemo(() => agentActivity(tasks, agents), [tasks, agents]);
+  const serviceStatus = useMemo(() => serviceSummary(services), [services]);
+
+  // The docked pane is never left empty: keep the selection on a queued task, and when the selected
+  // one leaves the queue (approved, answered, completed, or changed by an agent) move to its neighbour.
+  // On a phone selecting opens a full-screen page, so it never selects on its own.
+  const prevNextIds = useRef<number[]>([]);
+  const swipeStart = useRef<{ x: number; y: number } | null>(null);
+  const nextIdsKey = nextOrder.map((t) => t.id).join(',');
+  const selectedId = selected?.id ?? null;
+  useEffect(() => {
+    if (view !== 'next' || isMobile) {
+      prevNextIds.current = [];
+      return;
+    }
+    const currIds = nextOrder.map((t) => t.id);
+    const id = nextSelection(prevNextIds.current, currIds, selectedId, true);
+    prevNextIds.current = currIds;
+    if (id !== selectedId) setSelected(id === null ? null : tasks.find((t) => t.id === id) ?? null);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [view, isMobile, nextIdsKey, selectedId]);
 
   function deferTask(task: Task) {
     const until = Date.now() + settings.deferMinutes * 60_000;
@@ -435,9 +479,9 @@ export default function App() {
   }
 
   function cycleDueFilter(delta: number) {
-    const idx = DUE_WINDOW_ITEMS.findIndex((i) => i.value === dueFilter);
-    const next = (idx + delta + DUE_WINDOW_ITEMS.length) % DUE_WINDOW_ITEMS.length;
-    setDueFilter(DUE_WINDOW_ITEMS[next].value);
+    const idx = ALL_TASKS_FILTERS.findIndex((i) => i.value === dueFilter);
+    const next = (idx + delta + ALL_TASKS_FILTERS.length) % ALL_TASKS_FILTERS.length;
+    setDueFilter(ALL_TASKS_FILTERS[next].value);
   }
 
   function cycleGroupBy() {
@@ -445,15 +489,23 @@ export default function App() {
     setGroupBy(GROUP_BY_OPTIONS[(idx + 1) % GROUP_BY_OPTIONS.length].value);
   }
 
+  /** Click a field in the inspector, unfolding the "Task details" fold first when the field sits inside it. */
+  function clickFieldById(id: string) {
+    const el = document.getElementById(id);
+    const fold = el?.closest('details');
+    if (fold && !fold.open) fold.open = true;
+    el?.click();
+  }
+
   function clickField(id: string) {
     if (!selected) return;
-    if (rightOpen) {
-      document.getElementById(id)?.click();
+    if (inspectorVisible) {
+      clickFieldById(id);
       return;
     }
     // Open the inspector first, then click once it has rendered.
     setRightOpen(true);
-    window.setTimeout(() => document.getElementById(id)?.click(), 50);
+    window.setTimeout(() => clickFieldById(id), 50);
   }
 
   function openFirstNote() {
@@ -479,9 +531,9 @@ export default function App() {
     }
     const field = FIELD_KEYS.find(([key]) => key === e.key);
     if (field) {
-      if (selected && rightOpen) {
+      if (selected && inspectorVisible) {
         if (e.key === 'A') e.preventDefault();
-        document.getElementById(field[2])?.click();
+        clickFieldById(field[2]);
       }
       return;
     }
@@ -510,7 +562,7 @@ export default function App() {
         else setShowNewTaskForm(true);
         break;
       case 'z':
-        if (selected && dueFilter === 'next' && needsHumanAction(selected)) {
+        if (selected && view === 'next' && needsHumanAction(selected)) {
           e.preventDefault();
           deferTask(selected);
         }
@@ -524,20 +576,21 @@ export default function App() {
         setPaletteOpen(true);
         break;
       case 'G':
-        e.preventDefault();
-        cycleGroupBy();
+        if (view === 'all') {
+          e.preventDefault();
+          cycleGroupBy();
+        }
         break;
       case '[':
-        e.preventDefault();
-        cycleDueFilter(-1);
-        break;
       case ']':
-        e.preventDefault();
-        cycleDueFilter(1);
+        if (view === 'all') {
+          e.preventDefault();
+          cycleDueFilter(e.key === '[' ? -1 : 1);
+        }
         break;
       case 'Escape':
         if (isMobile) setSelected(null);
-        else setRightOpen(false);
+        else if (view === 'all') setRightOpen(false);
         break;
     }
   }
@@ -604,8 +657,14 @@ export default function App() {
     const cmd = (label: string, kbd: string, fn: () => void): PaletteCommand => ({ label, kbd, run: () => { close(); fn(); } });
     return [
       cmd('New task', 'a', () => setShowNewTaskForm(true)),
-      ...ALL_FILTER_ITEMS.map((f) => cmd(`Go to ${f.label}`, f.value === 'inbox' ? '' : '[ ]', () => setDueFilter(f.value))),
-      ...GROUP_BY_OPTIONS.map((g) => cmd(`Group by ${g.label.toLowerCase()}`, 'G', () => setGroupBy(g.value))),
+      cmd('Go to Next', '', () => setView('next')),
+      cmd('Go to All tasks', '', () => setView('all')),
+      ...(view === 'all'
+        ? [
+            ...ALL_TASKS_FILTERS.map((f) => cmd(`Filter: ${f.label}`, '[ ]', () => setDueFilter(f.value))),
+            ...GROUP_BY_OPTIONS.map((g) => cmd(`Group by ${g.label.toLowerCase()}`, 'G', () => setGroupBy(g.value))),
+          ]
+        : []),
       cmd('Next task', 'j ↓', () => moveSelection(1)),
       cmd('Previous task', 'k ↑', () => moveSelection(-1)),
       ...(selected
@@ -613,15 +672,27 @@ export default function App() {
             cmd(`Selected: ${selected.status === 'done' ? 'reopen' : 'mark done'}`, 'Enter', () => toggleDone(selected)),
             ...QUICK_DUE.map(([key, label, fn]) => cmd(`Selected: ${label.toLowerCase()}`, key, () => setQuickDue(selected, fn ? fn(today) : null))),
             ...FIELD_KEYS.map(([key, label, id]) => cmd(`Selected: ${label.toLowerCase()}`, key, () => clickField(id))),
-            ...(dueFilter === 'next' && needsHumanAction(selected)
+            ...(view === 'next' && needsHumanAction(selected)
               ? [cmd(`Selected: defer ${settings.deferMinutes} min`, 'z', () => deferTask(selected))]
               : []),
             ...(selected.notes?.length ? [cmd('Selected: open first linked note', 'g', openFirstNote)] : []),
           ]
         : []),
-      cmd('Toggle sidebar', '', () => setLeftOpen((v) => !v)),
-      cmd(rightOpen ? 'Close inspector' : 'Open inspector', rightOpen ? 'Esc' : '', () => setRightOpen((v) => !v)),
+      cmd('Open Services', '', () => setServicesOpen(true)),
+      cmd('Settings', '', () => setSettingsOpen(true)),
+      ...(view === 'all' ? [cmd(rightOpen ? 'Close inspector' : 'Open inspector', rightOpen ? 'Esc' : '', () => setRightOpen((v) => !v))] : []),
     ];
+  }
+
+  /** Picking a task in ⌘K shows it where it lives: in the queue if it is there, otherwise in All tasks. */
+  function pickFromPalette(task: Task) {
+    setPaletteOpen(false);
+    if (view === 'next') {
+      const band = bandOf(task);
+      if (band === null) setView('all');
+      else if (band === 'working') setWorkingExpanded(true);
+    }
+    selectTask(task);
   }
 
   const detailProps = selected && {
@@ -646,20 +717,68 @@ export default function App() {
     onConvertToService: (schedule: { recurrence: string; due: string }) => handleConvertToService(selected.id, schedule),
   };
 
-  function groupDot(name: string) {
-    if (groupBy !== 'agent' || !agents.some((a) => a.name === name)) return null;
-    return statusFor(name).state;
+  const statusProps = {
+    activity,
+    services: serviceStatus,
+    onEditAgent: (name: string) => setEditingAgent(agents.find((a) => a.name === name) ?? null),
+    onOpenServices: () => setServicesOpen(true),
+    onOpenSettings: () => setSettingsOpen(true),
+  };
+  // Tasks that still need an agent or a date open with their details unfolded, so they can be fixed in place.
+  const detailsOpen = !!selected && bandOf(selected) === 'triage';
+  // A review or an agent's question is settled by approving or answering, so "Mark done" must not lead there.
+  const doneIsPrimary = !!selected && bandOf(selected) !== 'review' && bandOf(selected) !== 'input';
+  const selectedIndex = selected ? flatOrder.findIndex((t) => t.id === selected.id) : -1;
+  const queueProps = {
+    queue,
+    selectedId,
+    today,
+    deferredIds,
+    workingExpanded,
+    onToggleWorking: () => setWorkingExpanded((v) => !v),
+    onSelect: (t: Task) => (isMobile ? setSelected(t) : selectTask(t)),
+  };
+
+  function swipeToNeighbor(e: React.TouchEvent, phase: 'start' | 'end') {
+    if (phase === 'start') {
+      const touch = e.touches[0];
+      const inScroller = (e.target as HTMLElement).closest('pre, table, textarea, input, [data-no-swipe]');
+      swipeStart.current = inScroller ? null : { x: touch.clientX, y: touch.clientY };
+      return;
+    }
+    const start = swipeStart.current;
+    swipeStart.current = null;
+    if (!start) return;
+    const touch = e.changedTouches[0];
+    const dx = touch.clientX - start.x;
+    const dy = touch.clientY - start.y;
+    if (Math.abs(dx) > 80 && Math.abs(dx) > Math.abs(dy) * 2) moveSelection(dx < 0 ? 1 : -1);
   }
+
+  const detailActions = selected && (
+    <>
+      {selected.status === 'open' ? (
+        <Button size="sm" variant={doneIsPrimary ? 'primary' : 'secondary'} onClick={() => handleMarkDone(selected)}>Mark done</Button>
+      ) : (
+        <Button size="sm" variant="secondary" onClick={() => handleReopen(selected)}>Reopen</Button>
+      )}
+      {needsHumanAction(selected) && (
+        deferredIds.has(selected.id)
+          ? <Button size="sm" variant="secondary" onClick={() => undeferTask(selected)}>Undefer</Button>
+          : <Button size="sm" variant="secondary" onClick={() => deferTask(selected)}>Defer {settings.deferMinutes}m</Button>
+      )}
+      <Button size="sm" variant="secondary" onClick={() => handleDelete(selected)}>Delete</Button>
+    </>
+  );
 
   if (isMobile) {
     return (
       <div style={{ display: 'flex', flexDirection: 'column', height: '100dvh', overflow: 'hidden', paddingTop: 'env(safe-area-inset-top, 0px)' }}>
+        <MobileStatusBar {...statusProps} />
+
         {mobileSearch === null ? (
-          <div style={{ height: 56, flex: 'none', display: 'flex', alignItems: 'center', gap: 4, padding: '0 6px' }}>
-            <MobileIconButton label="Menu" onClick={() => setDrawerOpen(true)}><Menu size={22} color="var(--fg-3)" /></MobileIconButton>
-            <span style={{ fontFamily: 'var(--font-display)', fontWeight: 600, fontSize: 22 }}>{filterItem.label}</span>
-            <span style={{ fontFamily: 'var(--font-mono)', fontSize: 13, color: 'var(--accent)', paddingTop: 4, marginLeft: 4 }}>{filteredTasks.length}</span>
-            <div style={{ flex: 1 }} />
+          <div style={{ flex: 'none', display: 'flex', alignItems: 'center', gap: 6, padding: '10px 6px 8px 16px' }}>
+            <ViewToggle mobile view={view} onChange={setView} nextCount={nextCount} allCount={tasks.length} />
             <MobileIconButton label="Search" onClick={() => setMobileSearch('')}><Search size={20} color="var(--fg-3)" /></MobileIconButton>
           </div>
         ) : (
@@ -683,66 +802,60 @@ export default function App() {
           </div>
         )}
 
-        <div className="no-scrollbar" style={{ flex: 'none', display: 'flex', gap: 8, overflowX: 'auto', padding: '4px 16px 12px' }}>
-          {ALL_FILTER_ITEMS.map((item) => {
-            const active = dueFilter === item.value;
-            return (
-              <button
-                key={item.value}
-                onClick={() => setDueFilter(item.value)}
-                style={{
-                  flex: 'none', display: 'flex', alignItems: 'center', gap: 6, height: 34, padding: '0 12px', borderRadius: 999, cursor: 'pointer', whiteSpace: 'nowrap',
-                  border: `1px solid ${active ? 'var(--accent-ring)' : 'var(--hairline)'}`,
-                  background: active ? 'var(--accent-soft)' : 'transparent',
-                }}
-              >
-                <span style={{ fontSize: 13.5, fontWeight: active ? 600 : 400, color: active ? 'var(--fg-1)' : 'var(--fg-3)' }}>{item.label}</span>
-                <span style={{ fontFamily: 'var(--font-mono)', fontSize: 12, color: active ? 'var(--accent)' : 'var(--fg-5)' }}>
-                  {countForFilter(tasks, today, item.value)}
-                </span>
-              </button>
-            );
-          })}
-        </div>
+        {view === 'all' && (
+          <div style={{ flex: 'none', display: 'flex', alignItems: 'center', gap: 8, padding: '2px 16px 10px' }}>
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <FilterPills mobile items={ALL_TASKS_FILTERS} active={dueFilter} tasks={tasks} today={today} onPick={setDueFilter} />
+            </div>
+            <select
+              aria-label="Group by"
+              value={groupBy}
+              onChange={(e) => setGroupBy(e.target.value as GroupBy)}
+              style={{ flex: 'none', height: 34, background: 'var(--ink-2)', color: 'var(--fg-1)', border: '1px solid var(--hairline)', borderRadius: 999, padding: '0 10px', fontSize: 13 }}
+            >
+              {GROUP_BY_OPTIONS.map((o) => (
+                <option key={o.value} value={o.value}>{o.value === 'none' ? 'No grouping' : `By ${o.label.toLowerCase()}`}</option>
+              ))}
+            </select>
+          </div>
+        )}
 
         {error && <div style={{ padding: '8px 16px', color: 'var(--danger)', fontSize: 13 }}>{error}</div>}
 
         <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', borderTop: '1px solid var(--hairline)', paddingBottom: 96 }}>
-          {[...grouped.entries()].map(([groupName, groupTasksList]) => {
-            const state = groupDot(groupName);
-            return (
-              <div key={groupName || 'all'}>
-                {groupBy !== 'none' && (
-                  <div style={{ position: 'sticky', top: 0, zIndex: 2, display: 'flex', alignItems: 'center', gap: 8, height: 36, padding: '0 16px', background: 'var(--ink-2)', borderBottom: '1px solid var(--hairline-soft)' }}>
-                    {state && <span style={{ width: 7, height: 7, borderRadius: 999, background: statusColor(state) }} />}
-                    <span style={{ fontFamily: 'var(--font-mono)', fontSize: 12.5, fontWeight: 600, textTransform: groupBy === 'priority' ? 'uppercase' : 'none' }}>{groupName}</span>
-                    <span style={{ fontSize: 12, color: 'var(--fg-4)' }}>{countLabel(groupTasksList.length)}</span>
-                    <span style={{ flex: 1 }} />
-                    {state && state !== 'idle' && (
-                      <span style={{ fontFamily: 'var(--font-mono)', fontSize: 11.5, color: statusColor(state) }}>{state}</span>
-                    )}
-                  </div>
-                )}
-                {groupTasksList.map((t) => (
-                  <MobileTaskRow
-                    key={t.id}
-                    task={t}
-                    today={today}
-                    showAgent={groupBy !== 'agent'}
-                    swipeOpen={swipeOpenId === t.id}
-                    onSwipeOpenChange={(open) => setSwipeOpenId(open ? t.id : null)}
-                    onSelect={() => { setSwipeOpenId(null); setSelected(t); }}
-                    onToggleDone={() => toggleDone(t)}
-                    onQuickDue={(days) => setQuickDue(t, addDays(today, days))}
-                  />
-                ))}
-              </div>
-            );
-          })}
-          {filteredTasks.length === 0 ? (
-            <EmptyState title={query ? 'No matches.' : filterItem.empty[0]} body={query ? '' : filterItem.empty[1]} padding="72px 32px" />
+          {view === 'next' ? (
+            <NextQueue mobile {...queueProps} />
           ) : (
-            <div style={{ padding: 16, textAlign: 'center', fontSize: 12, color: 'var(--fg-5)' }}>Swipe right to complete · left to set a due date</div>
+            <>
+              {[...grouped.entries()].map(([groupName, groupTasksList]) => (
+                <div key={groupName || 'all'}>
+                  {groupBy !== 'none' && (
+                    <div style={{ position: 'sticky', top: 0, zIndex: 2, display: 'flex', alignItems: 'center', gap: 8, height: 36, padding: '0 16px', background: 'var(--ink-2)', borderBottom: '1px solid var(--hairline-soft)' }}>
+                      <span style={{ fontFamily: 'var(--font-mono)', fontSize: 12.5, fontWeight: 600, textTransform: groupBy === 'priority' ? 'uppercase' : 'none' }}>{groupName}</span>
+                      <span style={{ fontSize: 12, color: 'var(--fg-4)' }}>{countLabel(groupTasksList.length)}</span>
+                    </div>
+                  )}
+                  {groupTasksList.map((t) => (
+                    <MobileTaskRow
+                      key={t.id}
+                      task={t}
+                      today={today}
+                      showAgent={groupBy !== 'agent'}
+                      swipeOpen={swipeOpenId === t.id}
+                      onSwipeOpenChange={(open) => setSwipeOpenId(open ? t.id : null)}
+                      onSelect={() => { setSwipeOpenId(null); setSelected(t); }}
+                      onToggleDone={() => toggleDone(t)}
+                      onQuickDue={(days) => setQuickDue(t, addDays(today, days))}
+                    />
+                  ))}
+                </div>
+              ))}
+              {filteredTasks.length === 0 ? (
+                <EmptyState title={query ? 'No matches.' : filterItem.empty[0]} body={query ? '' : filterItem.empty[1]} padding="72px 32px" />
+              ) : (
+                <div style={{ padding: 16, textAlign: 'center', fontSize: 12, color: 'var(--fg-5)' }}>Swipe right to complete · left to set a due date</div>
+              )}
+            </>
           )}
         </div>
 
@@ -760,22 +873,30 @@ export default function App() {
 
         {selected && detailProps && (
           <div className="mobile-detail" style={{ paddingTop: 'env(safe-area-inset-top, 0px)' }}>
-            <div style={{ height: 52, flex: 'none', display: 'flex', alignItems: 'center', gap: 4, padding: '0 6px', borderBottom: '1px solid var(--hairline)' }}>
+            <div style={{ height: 52, flex: 'none', display: 'flex', alignItems: 'center', gap: 2, padding: '0 6px', borderBottom: '1px solid var(--hairline)' }}>
               <button
                 onClick={() => setSelected(null)}
                 style={{ height: 44, display: 'flex', alignItems: 'center', gap: 2, padding: '0 8px 0 4px', background: 'transparent', border: 'none', cursor: 'pointer', color: 'var(--accent)', fontSize: 15, fontWeight: 600 }}
               >
                 <ChevronLeft size={22} color="var(--accent)" />
-                {filterItem.label}
+                {view === 'next' ? 'Next' : 'All tasks'}
               </button>
-              <div style={{ flex: 1 }} />
-              <span style={{ fontFamily: 'var(--font-mono)', fontSize: 13, color: 'var(--fg-4)', paddingRight: 14 }}>#{selected.id}</span>
+              <div style={{ flex: 1, textAlign: 'center', fontFamily: 'var(--font-mono)', fontSize: 12.5, color: 'var(--fg-4)' }}>
+                {selectedIndex >= 0 ? `${selectedIndex + 1} of ${flatOrder.length}` : `#${selected.id}`}
+              </div>
+              <MobileIconButton label="Previous task" onClick={() => moveSelection(-1)}><ChevronUp size={20} color="var(--fg-3)" /></MobileIconButton>
+              <MobileIconButton label="Next task" onClick={() => moveSelection(1)}><ChevronDown size={20} color="var(--fg-3)" /></MobileIconButton>
             </div>
-            <div key={selected.id} style={{ flex: 1, minHeight: 0, overflowY: 'auto', padding: '16px 20px 24px', color: 'var(--fg-5)' }}>
-              <TaskDetail {...detailProps} mobile showId={false} />
+            <div
+              key={selected.id}
+              onTouchStart={(e) => swipeToNeighbor(e, 'start')}
+              onTouchEnd={(e) => swipeToNeighbor(e, 'end')}
+              style={{ flex: 1, minHeight: 0, overflowY: 'auto', padding: '16px 20px 24px', color: 'var(--fg-5)' }}
+            >
+              <TaskDetail {...detailProps} mobile showId={false} compact detailsOpen={detailsOpen} />
             </div>
             <div style={{ flex: 'none', display: 'flex', gap: 10, padding: '12px 16px calc(12px + env(safe-area-inset-bottom, 22px))', borderTop: '1px solid var(--hairline)', background: 'var(--ink-2)' }}>
-              <MobileActionButton grow primary={selected.status === 'open'} onClick={() => toggleDone(selected)}>
+              <MobileActionButton grow primary={selected.status === 'open' && doneIsPrimary} onClick={() => toggleDone(selected)}>
                 {selected.status === 'open' ? 'Mark done' : 'Reopen'}
               </MobileActionButton>
               {needsHumanAction(selected) && (
@@ -788,21 +909,7 @@ export default function App() {
           </div>
         )}
 
-        {drawerOpen && (
-          <MobileDrawer
-            tasks={tasks}
-            today={today}
-            agents={agents}
-            filter={dueFilter}
-            groupBy={groupBy}
-            onFilter={(f) => { setDueFilter(f); setDrawerOpen(false); }}
-            onGroupBy={setGroupBy}
-            onClose={() => setDrawerOpen(false)}
-            onOpenSettings={() => { setDrawerOpen(false); setSettingsOpen(true); }}
-            failingServices={failingServices}
-            onOpenServices={() => { setDrawerOpen(false); setServicesOpen(true); }}
-          />
-        )}
+        {editingAgent && <AgentEditor agent={editingAgent} onClose={() => setEditingAgent(null)} />}
 
         {servicesOpen && <ServicesView mobile agents={agents} onClose={() => setServicesOpen(false)} />}
 
@@ -827,206 +934,155 @@ export default function App() {
   }
 
   return (
-    <div style={{ display: 'flex', height: '100vh', overflow: 'hidden' }}>
-      {leftOpen && (
-      <aside
-        style={{
-          width: 252, flex: 'none', background: 'var(--ink-2)', overflowY: 'auto',
-          borderRight: '1px solid var(--hairline)', display: 'flex', flexDirection: 'column', padding: '20px 0',
-        }}
-      >
-        <div style={{ padding: '0 20px 22px', display: 'flex', alignItems: 'center', gap: 10 }}>
-          <div style={{ width: 26, height: 26, borderRadius: 5, background: 'var(--accent)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-            <Terminal size={15} color="var(--ink)" />
-          </div>
-          <span style={{ fontFamily: 'var(--font-display)', fontWeight: 700, fontSize: 14 }}>command center</span>
-        </div>
-        <SidebarNav items={[NEXT_ITEM, INBOX_ITEM]} active={dueFilter} tasks={tasks} today={today} onPick={setDueFilter} />
-        <div style={{ padding: '0 10px', marginBottom: 12 }}>
-          <div
-            onClick={() => setServicesOpen(true)}
-            style={{ display: 'flex', alignItems: 'center', gap: 10, height: 36, padding: '0 10px', borderRadius: 5, cursor: 'pointer' }}
-          >
-            <Repeat size={16} color="var(--fg-4)" />
-            <span style={{ flex: 1, fontSize: 14, color: 'var(--fg-3)' }}>Services</span>
-            {failingServices > 0 && (
-              <span title="Failing services" style={{ fontFamily: 'var(--font-mono)', fontSize: 12, color: 'var(--danger, #e5484d)', fontWeight: 600 }}>
-                {failingServices}
-              </span>
+    <div style={{ display: 'flex', flexDirection: 'column', height: '100vh', overflow: 'hidden' }}>
+      <StatusStrip {...statusProps} />
+
+      <div style={{ flex: 1, minHeight: 0, display: 'flex' }}>
+        <main style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column' }}>
+          <header style={{ height: 52, flex: 'none', padding: '0 16px', borderBottom: '1px solid var(--hairline)', display: 'flex', alignItems: 'center', gap: 12 }}>
+            <ViewToggle view={view} onChange={setView} nextCount={nextCount} allCount={tasks.length} />
+            <div style={{ flex: 1 }} />
+            {view === 'all' && (
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8, height: 30, padding: '0 10px', border: '1px solid var(--hairline)', borderRadius: 5 }}>
+                <label htmlFor="group-by" style={{ fontSize: 13, color: 'var(--fg-4)' }}>Group</label>
+                <select
+                  id="group-by"
+                  value={groupBy}
+                  onChange={(e) => setGroupBy(e.target.value as GroupBy)}
+                  style={{ background: 'transparent', border: 'none', outline: 'none', color: 'var(--fg-1)', fontSize: 13, fontWeight: 600 }}
+                >
+                  {GROUP_BY_OPTIONS.map((o) => (
+                    <option key={o.value} value={o.value} style={{ background: 'var(--ink-2)' }}>
+                      {o.label}
+                    </option>
+                  ))}
+                </select>
+              </div>
             )}
-          </div>
-        </div>
-        <div style={{ ...sectionLabelStyle, padding: '0 20px 8px' }}>Due window</div>
-        <SidebarNav items={DUE_WINDOW_ITEMS} active={dueFilter} tasks={tasks} today={today} onPick={setDueFilter} />
-        {agents.length > 0 && <div style={{ ...sectionLabelStyle, padding: '4px 20px 8px' }}>Agents</div>}
-        <div style={{ padding: '0 20px', display: 'flex', flexDirection: 'column', gap: 4, marginBottom: 12 }}>
-          {agents.map((a) => {
-            const status = statusFor(a.name);
-            return (
-              <div
-                key={a.name}
-                onClick={() => setEditingAgent(a)}
-                title={status.detail ? `${status.detail} — click to edit ${a.name}` : `Edit ${a.name}`}
-                style={{ display: 'flex', alignItems: 'center', gap: 10, height: 28, cursor: 'pointer', borderRadius: 4 }}
-              >
-                <span style={{ width: 7, height: 7, borderRadius: 999, background: statusColor(status.state) }} />
-                <span style={{ flex: 1, minWidth: 0, fontFamily: 'var(--font-mono)', fontSize: 12.5, color: 'var(--fg-3)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{a.name}</span>
-                {status.state !== 'idle' && (
-                  <span style={{ fontSize: 11.5, color: statusColor(status.state) }}>{status.state}</span>
-                )}
-              </div>
-            );
-          })}
-        </div>
-        <SettingsFooter onOpenSettings={() => setSettingsOpen(true)} />
-      </aside>
-      )}
-
-      <main style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column' }}>
-        <header style={{ height: 72, flex: 'none', padding: '0 24px', borderBottom: '1px solid var(--hairline)', display: 'flex', alignItems: 'center', gap: 16 }}>
-          <button
-            onClick={() => setLeftOpen((v) => !v)}
-            title={leftOpen ? 'Hide sidebar' : 'Show sidebar'}
-            style={{ background: 'transparent', border: 'none', cursor: 'pointer', display: 'flex', padding: 4 }}
-          >
-            {leftOpen ? <PanelLeftClose size={18} color="var(--fg-4)" /> : <PanelLeftOpen size={18} color="var(--fg-4)" />}
-          </button>
-          <span style={{ fontFamily: 'var(--font-display)', fontWeight: 600, fontSize: 22, whiteSpace: 'nowrap' }}>{filterItem.label}</span>
-          <span style={{ fontFamily: 'var(--font-mono)', fontSize: 13, color: 'var(--accent)', paddingTop: 4 }}>{filteredTasks.length}</span>
-          <div style={{ flex: 1 }} />
-          <div style={{ display: 'flex', alignItems: 'center', gap: 8, height: 34, padding: '0 12px', border: '1px solid var(--hairline)', borderRadius: 5 }}>
-            <span style={{ fontSize: 13, color: 'var(--fg-4)' }}>Group</span>
-            <select
-              value={groupBy}
-              onChange={(e) => setGroupBy(e.target.value as GroupBy)}
-              style={{ background: 'transparent', border: 'none', outline: 'none', color: 'var(--fg-1)', fontSize: 13, fontWeight: 600 }}
+            <button
+              onClick={() => setPaletteOpen(true)}
+              title="Search tasks or run a command (⌘K)"
+              style={{
+                display: 'flex', alignItems: 'center', gap: 8, height: 30, padding: '0 6px 0 12px', border: '1px solid var(--hairline)',
+                borderRadius: 5, background: 'var(--ink-2)', width: 260, minWidth: 0, flexShrink: 1, cursor: 'pointer',
+              }}
             >
-              {GROUP_BY_OPTIONS.map((o) => (
-                <option key={o.value} value={o.value} style={{ background: 'var(--ink-2)' }}>
-                  {o.label}
-                </option>
-              ))}
-            </select>
-          </div>
-          <button
-            onClick={() => setPaletteOpen(true)}
-            title="Search tasks or run a command (⌘K)"
-            style={{
-              display: 'flex', alignItems: 'center', gap: 8, height: 34, padding: '0 6px 0 12px', border: '1px solid var(--hairline)',
-              borderRadius: 5, background: 'var(--ink-2)', width: 280, minWidth: 0, flexShrink: 1, cursor: 'pointer',
-            }}
-          >
-            <Search size={14} color="var(--fg-4)" style={{ flex: 'none' }} />
-            <span style={{ flex: 1, minWidth: 0, textAlign: 'left', color: 'var(--fg-5)', fontSize: 13, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-              Search or run a command…
-            </span>
-            <span style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--fg-3)', border: '1px solid var(--hairline)', borderRadius: 4, padding: '2px 6px' }}>⌘K</span>
-          </button>
-          {showNewTaskForm ? (
-            <NewTaskForm onSubmit={(title) => handleAddTask({ title })} onCancel={() => setShowNewTaskForm(false)} />
-          ) : (
-            <Button onClick={() => setShowNewTaskForm(true)}>New task</Button>
-          )}
-          <button
-            onClick={() => setRightOpen((v) => !v)}
-            title={rightOpen ? 'Hide inspector' : 'Show inspector'}
-            style={{ background: 'transparent', border: 'none', cursor: 'pointer', display: 'flex', padding: 4 }}
-          >
-            {rightOpen ? <PanelRightClose size={18} color="var(--fg-4)" /> : <PanelRightOpen size={18} color="var(--fg-4)" />}
-          </button>
-        </header>
-        {error && <div style={{ padding: 16, color: 'var(--danger)' }}>{error}</div>}
-        <div style={{ display: 'flex', alignItems: 'center', gap: 16, height: 34, flex: 'none', padding: '0 24px', borderBottom: '1px solid var(--hairline-soft)', fontFamily: 'var(--font-display)', fontSize: 11, fontWeight: 700, letterSpacing: '0.06em', textTransform: 'uppercase', color: 'var(--fg-5)' }}>
-          <span style={{ width: COL.check, flex: 'none' }} />
-          <span style={{ width: COL.id, flex: 'none' }}>ID</span>
-          <span style={{ width: COL.priority, flex: 'none' }}>Priority</span>
-          <span style={{ width: COL.flags, flex: 'none' }} />
-          <span style={{ width: COL.status, flex: 'none' }}>Status</span>
-          <span style={{ width: COL.agent, flex: 'none' }}>Agent</span>
-          <span style={{ flex: 1 }}>Task</span>
-          <span style={{ width: COL.due, flex: 'none' }}>Due</span>
-          <span style={{ width: COL.created, flex: 'none' }}>Created</span>
-          <span style={{ width: COL.effort, flex: 'none' }}>Effort</span>
-        </div>
-        <div style={{ flex: 1, minHeight: 0, overflow: 'auto' }}>
-          {[...grouped.entries()].map(([groupName, groupTasksList]) => {
-            const state = groupDot(groupName);
-            return (
-              <div key={groupName || 'all'}>
-                {groupBy !== 'none' && (
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 10, height: 38, padding: '0 24px', background: 'var(--ink-2)', borderBottom: '1px solid var(--hairline-soft)' }}>
-                    {state && <span style={{ width: 7, height: 7, borderRadius: 999, background: statusColor(state) }} />}
-                    <span style={{ fontFamily: 'var(--font-mono)', fontSize: 12.5, fontWeight: 600, textTransform: groupBy === 'priority' ? 'uppercase' : 'none' }}>
-                      {groupName}
-                    </span>
-                    <span style={{ fontSize: 12, color: 'var(--fg-4)' }}>{countLabel(groupTasksList.length)}</span>
-                  </div>
-                )}
-                {groupTasksList.map((t) => (
-                  <TaskRow
-                    key={t.id}
-                    task={t}
-                    today={today}
-                    selected={selected?.id === t.id}
-                    onSelect={() => selectTask(t)}
-                    onToggleDone={() => toggleDone(t)}
-                  />
-                ))}
-              </div>
-            );
-          })}
-          {filteredTasks.length === 0 && (
-            <EmptyState title={filterItem.empty[0]} body={filterItem.empty[1]} padding="120px 24px" onNewTask={() => setShowNewTaskForm(true)} />
-          )}
-        </div>
-      </main>
+              <Search size={14} color="var(--fg-4)" style={{ flex: 'none' }} />
+              <span style={{ flex: 1, minWidth: 0, textAlign: 'left', color: 'var(--fg-5)', fontSize: 13, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                Search or run a command…
+              </span>
+              <span style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--fg-3)', border: '1px solid var(--hairline)', borderRadius: 4, padding: '2px 6px' }}>⌘K</span>
+            </button>
+            {showNewTaskForm ? (
+              <NewTaskForm onSubmit={(title) => handleAddTask({ title })} onCancel={() => setShowNewTaskForm(false)} />
+            ) : (
+              <Button onClick={() => setShowNewTaskForm(true)}>New task</Button>
+            )}
+            {view === 'all' && (
+              <button
+                onClick={() => setRightOpen((v) => !v)}
+                title={rightOpen ? 'Hide inspector' : 'Show inspector'}
+                aria-label={rightOpen ? 'Hide inspector' : 'Show inspector'}
+                style={{ background: 'transparent', border: 'none', cursor: 'pointer', display: 'flex', padding: 4 }}
+              >
+                {rightOpen ? <PanelRightClose size={18} color="var(--fg-4)" /> : <PanelRightOpen size={18} color="var(--fg-4)" />}
+              </button>
+            )}
+          </header>
+          {error && <div style={{ padding: 16, color: 'var(--danger)' }}>{error}</div>}
 
-      {panelPhase !== 'closed' && (
-      <>
-      <div
-        className={`task-panel-scrim${panelPhase === 'open' ? ' is-open' : ''}`}
-        onClick={() => setRightOpen(false)}
-      />
-      <aside
-        className={`task-panel${panelPhase === 'open' ? ' is-open' : ''}${isResizingPanel ? ' is-resizing' : ''}`}
-        style={{ width: panelWidth }}
-      >
-        <div
-          className="task-panel-resize-handle"
-          onMouseDown={(e) => {
-            e.preventDefault();
-            setIsResizingPanel(true);
-          }}
-          title="Drag to resize"
-        />
-        <div key={selected?.id ?? 'empty'} className={selected ? 'task-panel-content' : 'task-panel-content task-panel-empty'}>
-        {selected && detailProps ? (
-          <TaskDetail
-            {...detailProps}
-            onClose={() => setRightOpen(false)}
-            actions={
-              <>
-                {selected.status === 'open' ? (
-                  <Button size="sm" onClick={() => handleMarkDone(selected)}>Mark done</Button>
+          {view === 'next' ? (
+            <div style={{ flex: 1, minHeight: 0, display: 'flex' }}>
+              <div style={{ width: 'clamp(300px, 36%, 420px)', flex: 'none', overflowY: 'auto', borderRight: '1px solid var(--hairline)' }}>
+                <NextQueue {...queueProps} />
+              </div>
+              <section aria-label="Selected task" style={{ flex: 1, minWidth: 0, overflowY: 'auto', background: 'var(--ink-3)', color: 'var(--fg-5)' }}>
+                {selected && detailProps ? (
+                  <div key={selected.id} className="task-panel-content" style={{ maxWidth: 880, margin: '0 auto' }}>
+                    <TaskDetail {...detailProps} compact detailsOpen={detailsOpen} conversationMaxHeight="52vh" actions={detailActions} />
+                  </div>
                 ) : (
-                  <Button size="sm" variant="secondary" onClick={() => handleReopen(selected)}>Reopen</Button>
+                  <div style={{ height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>Select a task</div>
                 )}
-                {needsHumanAction(selected) && (
-                  deferredIds.has(selected.id)
-                    ? <Button size="sm" variant="secondary" onClick={() => undeferTask(selected)}>Undefer</Button>
-                    : <Button size="sm" variant="secondary" onClick={() => deferTask(selected)}>Defer {settings.deferMinutes}m</Button>
+              </section>
+            </div>
+          ) : (
+            <>
+              <div style={{ flex: 'none', padding: '10px 16px', borderBottom: '1px solid var(--hairline-soft)' }}>
+                <FilterPills items={ALL_TASKS_FILTERS} active={dueFilter} tasks={tasks} today={today} onPick={setDueFilter} />
+              </div>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 16, height: 34, flex: 'none', padding: '0 24px', borderBottom: '1px solid var(--hairline-soft)', fontFamily: 'var(--font-display)', fontSize: 11, fontWeight: 700, letterSpacing: '0.06em', textTransform: 'uppercase', color: 'var(--fg-5)' }}>
+                <span style={{ width: COL.check, flex: 'none' }} />
+                <span style={{ width: COL.id, flex: 'none' }}>ID</span>
+                <span style={{ width: COL.priority, flex: 'none' }}>Priority</span>
+                <span style={{ width: COL.flags, flex: 'none' }} />
+                <span style={{ width: COL.status, flex: 'none' }}>Status</span>
+                <span style={{ width: COL.agent, flex: 'none' }}>Agent</span>
+                <span style={{ flex: 1 }}>Task</span>
+                <span style={{ width: COL.due, flex: 'none' }}>Due</span>
+                <span style={{ width: COL.created, flex: 'none' }}>Created</span>
+                <span style={{ width: COL.effort, flex: 'none' }}>Effort</span>
+              </div>
+              <div style={{ flex: 1, minHeight: 0, overflow: 'auto' }}>
+                {[...grouped.entries()].map(([groupName, groupTasksList]) => (
+                  <div key={groupName || 'all'}>
+                    {groupBy !== 'none' && (
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 10, height: 38, padding: '0 24px', background: 'var(--ink-2)', borderBottom: '1px solid var(--hairline-soft)' }}>
+                        <span style={{ fontFamily: 'var(--font-mono)', fontSize: 12.5, fontWeight: 600, textTransform: groupBy === 'priority' ? 'uppercase' : 'none' }}>
+                          {groupName}
+                        </span>
+                        <span style={{ fontSize: 12, color: 'var(--fg-4)' }}>{countLabel(groupTasksList.length)}</span>
+                      </div>
+                    )}
+                    {groupTasksList.map((t) => (
+                      <TaskRow
+                        key={t.id}
+                        task={t}
+                        today={today}
+                        selected={selected?.id === t.id}
+                        onSelect={() => selectTask(t)}
+                        onToggleDone={() => toggleDone(t)}
+                      />
+                    ))}
+                  </div>
+                ))}
+                {filteredTasks.length === 0 && (
+                  <EmptyState title={filterItem.empty[0]} body={filterItem.empty[1]} padding="120px 24px" onNewTask={() => setShowNewTaskForm(true)} />
                 )}
-                <Button size="sm" variant="secondary" onClick={() => handleDelete(selected)}>Delete</Button>
-              </>
-            }
-          />
-        ) : (
-          'Select a task'
+              </div>
+            </>
+          )}
+        </main>
+
+        {view === 'all' && panelPhase !== 'closed' && (
+          <>
+            <div
+              className={`task-panel-scrim${panelPhase === 'open' ? ' is-open' : ''}`}
+              onClick={() => setRightOpen(false)}
+            />
+            <aside
+              className={`task-panel${panelPhase === 'open' ? ' is-open' : ''}${isResizingPanel ? ' is-resizing' : ''}`}
+              style={{ width: panelWidth }}
+            >
+              <div
+                className="task-panel-resize-handle"
+                onMouseDown={(e) => {
+                  e.preventDefault();
+                  setIsResizingPanel(true);
+                }}
+                title="Drag to resize"
+              />
+              <div key={selected?.id ?? 'empty'} className={selected ? 'task-panel-content' : 'task-panel-content task-panel-empty'}>
+                {selected && detailProps ? (
+                  <TaskDetail {...detailProps} onClose={() => setRightOpen(false)} actions={detailActions} />
+                ) : (
+                  'Select a task'
+                )}
+              </div>
+            </aside>
+          </>
         )}
-        </div>
-      </aside>
-      </>
-      )}
+      </div>
 
       {editingAgent && (
         <AgentEditor agent={editingAgent} onClose={() => setEditingAgent(null)} />
@@ -1046,45 +1102,11 @@ export default function App() {
         <CommandPalette
           tasks={tasks}
           commands={paletteCommands()}
-          onPickTask={(t) => { setPaletteOpen(false); selectTask(t); }}
+          onPickTask={pickFromPalette}
           onClose={() => setPaletteOpen(false)}
         />
       )}
     </div>
-  );
-}
-
-function SidebarNav({ items, active, tasks, today, onPick }: {
-  items: FilterItem[];
-  active: DueFilter;
-  tasks: Task[];
-  today: Date;
-  onPick: (f: DueFilter) => void;
-}) {
-  return (
-    <nav style={{ display: 'flex', flexDirection: 'column', padding: '0 10px', gap: 2, marginBottom: 12 }}>
-      {items.map((item) => {
-        const on = active === item.value;
-        const Icon = item.icon;
-        return (
-          <div
-            key={item.value}
-            onClick={() => onPick(item.value)}
-            style={{
-              display: 'flex', alignItems: 'center', gap: 10, height: 36, padding: '0 10px', borderRadius: 5, cursor: 'pointer',
-              background: on ? 'var(--accent-soft)' : 'transparent',
-              boxShadow: on ? '0 0 0 1px var(--accent-ring)' : 'none',
-            }}
-          >
-            <Icon size={16} color={on ? 'var(--accent)' : 'var(--fg-4)'} />
-            <span style={{ flex: 1, fontSize: 14, fontWeight: on ? 600 : 400, color: on ? 'var(--fg-1)' : 'var(--fg-3)' }}>{item.label}</span>
-            <span style={{ fontFamily: 'var(--font-mono)', fontSize: 12, color: on ? 'var(--accent)' : 'var(--fg-5)' }}>
-              {countForFilter(tasks, today, item.value)}
-            </span>
-          </div>
-        );
-      })}
-    </nav>
   );
 }
 

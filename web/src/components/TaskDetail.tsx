@@ -78,6 +78,15 @@ interface TaskDetailProps {
   onUnlinkNote: (slug: string) => void;
   /** Turn the task into a service; the button is hidden when not given. */
   onConvertToService?: (schedule: { recurrence: string; due: string }) => Promise<void>;
+  /**
+   * Lead with the conversation and fold the rest (description, instructions, fields, notes) into
+   * a "Task details" disclosure. The Next view works this way: most tasks there need a reply, not an edit.
+   */
+  compact?: boolean;
+  /** With `compact`, open the details fold by default (e.g. a task that still needs an agent or a date). */
+  detailsOpen?: boolean;
+  /** Height at which the conversation starts scrolling. */
+  conversationMaxHeight?: number | string;
 }
 
 /**
@@ -89,6 +98,7 @@ interface TaskDetailProps {
 export function TaskDetail({
   task, today, mobile, showId = true, actions, onClose, agentOptions, thread, notes,
   onEdit, allProjects, allTags, onCreateProject, onCreateTag, onDeleteProject, onDeleteTag, onSendThread, onApprove, onCreateNote, onOpenNote, onSaveNote, onUnlinkNote, onConvertToService,
+  compact, detailsOpen, conversationMaxHeight,
 }: TaskDetailProps) {
   const done = task.status === 'done';
   const agentStatus = task.agent ? statusFor(task.agent) : null;
@@ -173,6 +183,54 @@ export function TaskDetail({
     },
   ];
 
+  const lowerSections = (
+    <>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+      {longFields.map((f) => {
+        const value = task[f.key] ?? '';
+        return (
+          <div key={f.key} style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+            <span style={sectionLabelStyle}>{f.label}</span>
+            <div style={{ fontSize: mobile ? 15 : 13.5, lineHeight: 1.5, color: 'var(--fg-2)', textWrap: 'pretty' }}>
+              <EditableField
+                id={f.id}
+                value={value}
+                type="textarea"
+                onSave={(v) => onEdit({ [f.key]: v })}
+                display={value
+                  ? <Markdown text={value} copyable />
+                  : <span style={{ color: 'var(--fg-5)', fontStyle: 'italic' }}>{f.empty}</span>}
+              />
+            </div>
+          </div>
+        );
+      })}
+    </div>
+
+    <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) minmax(0, 1fr)', borderTop: '1px solid var(--hairline-soft)' }}>
+      {gridFields.map((f) => (
+        <div
+          key={f.label}
+          style={{
+            display: 'flex', flexDirection: 'column', justifyContent: 'center', gap: 3, minWidth: 0,
+            minHeight: mobile ? 56 : undefined, padding: mobile ? '8px 12px 8px 0' : '10px 12px 10px 0',
+            borderBottom: '1px solid var(--hairline-soft)',
+          }}
+        >
+          <span style={{ fontSize: mobile ? 12 : 11.5, color: 'var(--fg-4)' }}>{f.label}</span>
+          <div style={{ fontSize: mobile ? 14.5 : 13, color: 'var(--fg-1)', minWidth: 0 }}>{f.node}</div>
+        </div>
+      ))}
+    </div>
+
+    <NotesSection notes={notes} onCreate={onCreateNote} onOpen={onOpenNote} onSave={onSaveNote} onUnlink={onUnlinkNote} touch={mobile} />
+
+    {onConvertToService && !done && task.kind !== 'service' && (
+      <ConvertToService key={task.id} task={task} today={today} onConvert={onConvertToService} />
+    )}
+    </>
+  );
+
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
       <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
@@ -242,52 +300,21 @@ export function TaskDetail({
       )}
 
       {thread && (thread.note || thread.allowed_action.send || thread.allowed_action.approve) && (
-        <ConversationPanel task={task} thread={thread} accentColor={accent} onSend={onSendThread} onApprove={onApprove} />
+        <ConversationPanel task={task} thread={thread} accentColor={accent} onSend={onSendThread} onApprove={onApprove} messagesMaxHeight={conversationMaxHeight} />
       )}
 
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
-        {longFields.map((f) => {
-          const value = task[f.key] ?? '';
-          return (
-            <div key={f.key} style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-              <span style={sectionLabelStyle}>{f.label}</span>
-              <div style={{ fontSize: mobile ? 15 : 13.5, lineHeight: 1.5, color: 'var(--fg-2)', textWrap: 'pretty' }}>
-                <EditableField
-                  id={f.id}
-                  value={value}
-                  type="textarea"
-                  onSave={(v) => onEdit({ [f.key]: v })}
-                  display={value
-                    ? <Markdown text={value} copyable />
-                    : <span style={{ color: 'var(--fg-5)', fontStyle: 'italic' }}>{f.empty}</span>}
-                />
-              </div>
-            </div>
-          );
-        })}
-      </div>
-
-      <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) minmax(0, 1fr)', borderTop: '1px solid var(--hairline-soft)' }}>
-        {gridFields.map((f) => (
-          <div
-            key={f.label}
-            style={{
-              display: 'flex', flexDirection: 'column', justifyContent: 'center', gap: 3, minWidth: 0,
-              minHeight: mobile ? 56 : undefined, padding: mobile ? '8px 12px 8px 0' : '10px 12px 10px 0',
-              borderBottom: '1px solid var(--hairline-soft)',
-            }}
-          >
-            <span style={{ fontSize: mobile ? 12 : 11.5, color: 'var(--fg-4)' }}>{f.label}</span>
-            <div style={{ fontSize: mobile ? 14.5 : 13, color: 'var(--fg-1)', minWidth: 0 }}>{f.node}</div>
-          </div>
-        ))}
-      </div>
-
-      <NotesSection notes={notes} onCreate={onCreateNote} onOpen={onOpenNote} onSave={onSaveNote} onUnlink={onUnlinkNote} touch={mobile} />
-
-      {onConvertToService && !done && task.kind !== 'service' && (
-        <ConvertToService key={task.id} task={task} today={today} onConvert={onConvertToService} />
-      )}
+      {compact ? (
+        <details
+          key={task.id}
+          open={detailsOpen}
+          style={{ border: '1px solid var(--hairline-soft)', borderRadius: 8 }}
+        >
+          <summary style={{ cursor: 'pointer', padding: mobile ? '14px 14px' : '9px 12px', fontSize: 13, color: 'var(--fg-4)', minHeight: mobile ? 44 : undefined }}>
+            Task details <span style={{ color: 'var(--fg-5)' }}>· description, agent, due, project, notes</span>
+          </summary>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 20, padding: '4px 12px 14px' }}>{lowerSections}</div>
+        </details>
+      ) : lowerSections}
     </div>
   );
 }

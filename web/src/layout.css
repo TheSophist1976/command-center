@@ -33,3 +33,18 @@
 @media (prefers-reduced-motion: reduce) {
   .mobile-detail { animation: none; }
 }
+
+/* A running agent's dot gently pulses. */
+.status-dot-pulse {
+  animation: status-dot-pulse 1.8s ease-out infinite;
+}
+
+@keyframes status-dot-pulse {
+  0% { box-shadow: 0 0 0 0 rgba(143, 188, 187, 0.6); }
+  70% { box-shadow: 0 0 0 6px rgba(143, 188, 187, 0); }
+  100% { box-shadow: 0 0 0 0 rgba(143, 188, 187, 0); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .status-dot-pulse { animation: none; }
+}
