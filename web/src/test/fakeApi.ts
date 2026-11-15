@@ -13,6 +13,8 @@ export interface FakeApi {
   calls: string[];
   /** Bodies posted to a task's thread, in order. */
   posts: { id: number; kind: string; text: string }[];
+  /** Fields sent to PATCH /api/tasks/:id, in order. */
+  patches: { id: number; body: Record<string, string> }[];
 }
 
 const json = (body: unknown, status = 200) =>
@@ -37,7 +39,7 @@ function threadFor(task: Task): Thread {
  * which jsdom lacks.
  */
 export function installFakeApi({ tasks, agents = [], services = [] }: FakeApiOptions): FakeApi {
-  const api: FakeApi = { tasks: structuredClone(tasks), calls: [], posts: [] };
+  const api: FakeApi = { tasks: structuredClone(tasks), calls: [], posts: [], patches: [] };
   const find = (id: number) => api.tasks.find((t) => t.id === id)!;
 
   vi.stubGlobal('EventSource', class {
@@ -76,7 +78,11 @@ export function installFakeApi({ tasks, agents = [], services = [] }: FakeApiOpt
     }
     if ((m = input.match(/^\/api\/tasks\/(\d+)$/))) {
       const task = find(Number(m[1]));
-      if (method === 'PATCH') Object.assign(task, JSON.parse(String(init?.body)));
+      if (method === 'PATCH') {
+        const body = JSON.parse(String(init?.body));
+        api.patches.push({ id: task.id, body });
+        Object.assign(task, body);
+      }
       return json(task);
     }
     return json({ error: `unhandled ${method} ${input}` }, 404);

@@ -120,6 +120,55 @@ test('keyboard: j and k move through the queue, Enter marks done and moves on', 
   expect((await cc.task(a)).status).toBe('done');
 });
 
+test('clicking a row and pressing Enter completes that task, once', async ({ page, cc }) => {
+  const a = awaitReview(cc, 'Alpha review', 1, 'Alpha.');
+  const b = awaitReview(cc, 'Beta review', 2, 'Beta.');
+  await openNext(page, cc);
+
+  await row(page, 'Beta review').click();
+  await expect(docked(page).locator('#field-title')).toContainText('Beta review');
+  await page.keyboard.press('Enter');
+
+  await expect.poll(async () => (await cc.task(b)).status).toBe('done');
+  expect((await cc.task(a)).status).toBe('open');
+  await expect(docked(page).locator('#field-title')).toContainText('Alpha review');
+});
+
+test('Space on the Task details fold opens it and does not complete the task', async ({ page, cc }) => {
+  const id = awaitReview(cc, 'Write the report', 1, 'Ready.');
+  await openNext(page, cc);
+  await expect(docked(page).locator('#field-title')).toContainText('Write the report');
+
+  await docked(page).getByText('Task details').click();
+  await expect(docked(page).locator('details')).toHaveAttribute('open', '');
+  await page.keyboard.press('Space');
+
+  await expect(docked(page).locator('details')).not.toHaveAttribute('open', '');
+  expect((await cc.task(id)).status).toBe('open');
+});
+
+test('pressing e edits the title without typing an e into it', async ({ page, cc }) => {
+  const id = awaitReview(cc, 'Write the report', 1, 'Ready.');
+  await openNext(page, cc);
+  await expect(docked(page).locator('#field-title')).toContainText('Write the report');
+
+  await page.keyboard.press('e');
+  const editor = docked(page).locator('input').first();
+  await expect(editor).toHaveValue('Write the report');
+  await page.keyboard.press('Enter');
+  expect((await cc.task(id)).title).toBe('Write the report');
+});
+
+test('the command palette reaches filters and grouping from the Next view', async ({ page, cc }) => {
+  cc.add('Anything');
+  await openNext(page, cc);
+  await page.keyboard.press('Control+k');
+  await page.getByPlaceholder('Search tasks or type a command…').fill('Recurring');
+  await page.getByText('Filter: Recurring').click();
+  await expect(page.getByRole('tab', { name: /All tasks/ })).toHaveAttribute('aria-selected', 'true');
+  await expect(page.getByRole('button', { name: /^Recurring/ })).toHaveAttribute('aria-pressed', 'true');
+});
+
 test('a task that still needs an agent opens with its details unfolded, so it can be assigned in place', async ({ page, cc }) => {
   const id = cc.add('Unowned idea');
   await openNext(page, cc);
