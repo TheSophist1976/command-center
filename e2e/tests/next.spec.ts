@@ -1,6 +1,6 @@
 // End-to-end: the Next view is the home screen. The `task` CLI plays the agent, the human
 // works the queue in the browser, and every move is checked in the stored state too.
-import { band, docked, expect, isoDate, openNext, row, test, type CommandCenter } from './fixtures';
+import { band, docked, expect, isoDate, openNext, row, swipeRow, test, type CommandCenter } from './fixtures';
 
 const BOT = 'Bot';
 
@@ -194,6 +194,51 @@ test.describe('on a phone', () => {
     await detail.getByRole('button', { name: /Next$/ }).click();
     await expect(detail).toHaveCount(0);
     await expect(row(page, 'First review')).toHaveCount(0);
+  });
+
+  test('swiping a queue row right completes the task without opening it', async ({ page, cc }) => {
+    const id = cc.add('Swipe me done');
+    cc.add('Stay put');
+    await openNext(page, cc);
+
+    await swipeRow(page, row(page, 'Swipe me done'), 140);
+
+    await expect.poll(async () => (await cc.task(id)).status).toBe('done');
+    await expect(row(page, 'Swipe me done')).toHaveCount(0);
+    await expect(row(page, 'Stay put')).toBeVisible();
+    await expect(page.locator('.mobile-detail')).toHaveCount(0);
+  });
+
+  test('swiping a queue row left reveals due-date buttons that set the date', async ({ page, cc }) => {
+    const id = cc.add('Swipe me later');
+    await openNext(page, cc);
+
+    await swipeRow(page, row(page, 'Swipe me later'), -160);
+    await row(page, 'Swipe me later').getByRole('button', { name: /Tmrw/ }).click();
+
+    await expect.poll(async () => (await cc.task(id)).due_date).toBe(isoDate(1));
+    await expect(page.locator('.mobile-detail')).toHaveCount(0);
+  });
+
+  test('a short swipe does nothing, and a tap still opens the task', async ({ page, cc }) => {
+    const id = cc.add('Just a tap');
+    await openNext(page, cc);
+
+    await swipeRow(page, row(page, 'Just a tap'), 30);
+    expect((await cc.task(id)).status).toBe('open');
+    await row(page, 'Just a tap').click();
+    await expect(page.locator('.mobile-detail')).toContainText('Just a tap');
+  });
+
+  test('swiping works on the All tasks list too', async ({ page, cc }) => {
+    const id = cc.add('Swipe in all tasks');
+    await openNext(page, cc);
+    await page.getByRole('tab', { name: /All tasks/ }).click();
+
+    await swipeRow(page, row(page, 'Swipe in all tasks'), 140);
+
+    await expect.poll(async () => (await cc.task(id)).status).toBe('done');
+    await expect(page.locator('.mobile-detail')).toHaveCount(0);
   });
 
   test('All tasks is a card list with filter pills', async ({ page, cc }) => {

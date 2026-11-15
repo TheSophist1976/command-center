@@ -855,7 +855,16 @@ export default function App() {
 
         <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', borderTop: '1px solid var(--hairline)', paddingBottom: 96 }}>
           {view === 'next' ? (
-            <NextQueue mobile {...queueProps} />
+            <NextQueue
+              mobile
+              {...queueProps}
+              swipe={{
+                openId: swipeOpenId,
+                onOpenChange: setSwipeOpenId,
+                onToggleDone: toggleDone,
+                onQuickDue: (t, days) => setQuickDue(t, addDays(today, days)),
+              }}
+            />
           ) : (
             <>
               {[...grouped.entries()].map(([groupName, groupTasksList]) => (

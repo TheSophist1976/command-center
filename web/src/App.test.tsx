@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it } from 'vitest';
-import { render, screen, waitFor, within } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import App from './App';
 import { installFakeApi, type FakeApi } from './test/fakeApi';
@@ -227,6 +227,33 @@ describe('mobile', () => {
     await waitFor(() => expect(within(detail()).getByText('Reorganise notes')).toBeInTheDocument());
     expect(within(detail()).getByText('1 of 3')).toBeInTheDocument();
     expect(api.posts).toEqual([{ id: 1, kind: 'approve', text: '' }]);
+  });
+
+  /** Drag a queue row the way a finger would; returns the row so its revealed buttons can be reached. */
+  function swipe(title: string, dx: number) {
+    const rowEl = screen.getByText(title).closest('[data-task-row]') as HTMLElement;
+    const surface = within(rowEl).getByRole('button', { name: new RegExp(title) });
+    fireEvent.pointerDown(surface, { clientX: 200, clientY: 100, pointerId: 1 });
+    fireEvent.pointerMove(surface, { clientX: 200 + dx / 2, clientY: 100, pointerId: 1 });
+    fireEvent.pointerMove(surface, { clientX: 200 + dx, clientY: 100, pointerId: 1 });
+    fireEvent.pointerUp(surface, { clientX: 200 + dx, clientY: 100, pointerId: 1 });
+    return rowEl;
+  }
+
+  it('swipes a queue row right to mark the task done, without opening it', async () => {
+    await renderMobile();
+    swipe('Unowned idea', 130);
+    await waitFor(() => expect(api.calls).toContain('POST /api/tasks/4/done'));
+    expect(detail()).toBeNull();
+    await waitFor(() => expect(screen.queryByRole('button', { name: /Unowned idea/ })).not.toBeInTheDocument());
+  });
+
+  it('swipes a queue row left to set its due date', async () => {
+    await renderMobile();
+    const rowEl = swipe('Unowned idea', -150);
+    await userEvent.click(within(rowEl).getByRole('button', { name: /Tmrw/ }));
+    await waitFor(() => expect(api.calls).toContain('PATCH /api/tasks/4'));
+    expect(detail()).toBeNull();
   });
 
   it('returns to the queue from the back button', async () => {
