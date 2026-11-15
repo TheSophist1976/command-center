@@ -1,5 +1,6 @@
 import { ChevronDown, ChevronRight, Eye, HelpCircle, Inbox, RefreshCw, type LucideIcon } from 'lucide-react';
-import type { Task } from '../types';
+import type { Project, Task } from '../types';
+import { ProjectDot } from './ProjectDot';
 import { BAND_LABEL, reasonFor, type Band, type QueueBand } from '../queue';
 import { dueColor, dueLabel } from '../taskFormat';
 import { PriorityBadge } from './Badges';
@@ -19,10 +20,12 @@ interface NextQueueProps {
   onToggleWorking: () => void;
   /** Phone layout: taller rows, two-line titles. */
   mobile?: boolean;
+  /** Project metadata by lowercase name, for the color dot on a row's project chip. */
+  projectMeta?: Map<string, Project>;
 }
 
 /** The Next view's list: bands of tasks, each row a title, why it is here, and a few chips. */
-export function NextQueue({ queue, selectedId, onSelect, today, deferredIds, workingExpanded, onToggleWorking, mobile }: NextQueueProps) {
+export function NextQueue({ queue, selectedId, onSelect, today, deferredIds, workingExpanded, onToggleWorking, mobile, projectMeta }: NextQueueProps) {
   const visible = queue.filter((b) => b.tasks.length > 0);
   const needsYou = queue.some((b) => b.band !== 'working' && b.tasks.length > 0);
 
@@ -77,6 +80,7 @@ export function NextQueue({ queue, selectedId, onSelect, today, deferredIds, wor
                 selected={t.id === selectedId}
                 deferred={deferredIds.has(t.id)}
                 mobile={mobile}
+                projectColor={t.project ? projectMeta?.get(t.project.toLowerCase())?.color : undefined}
                 onSelect={() => onSelect(t)}
               />
             ))}
@@ -87,8 +91,8 @@ export function NextQueue({ queue, selectedId, onSelect, today, deferredIds, wor
   );
 }
 
-function QueueRow({ task: t, band, today, selected, deferred, mobile, onSelect }: {
-  task: Task; band: Band; today: Date; selected: boolean; deferred: boolean; mobile?: boolean; onSelect: () => void;
+function QueueRow({ task: t, band, today, selected, deferred, mobile, projectColor, onSelect }: {
+  task: Task; band: Band; today: Date; selected: boolean; deferred: boolean; mobile?: boolean; projectColor?: string | null; onSelect: () => void;
 }) {
   const Icon = BAND_ICON[band];
   const chip = { fontSize: mobile ? 12 : 11.5, padding: '1px 8px', borderRadius: 999, background: 'var(--ink-3)', color: 'var(--fg-3)' };
@@ -127,7 +131,11 @@ function QueueRow({ task: t, band, today, selected, deferred, mobile, onSelect }
             <span style={{ ...chip, fontFamily: 'var(--font-mono)', color: 'var(--accent)' }}>{t.agent}</span>
           )}
           {t.due_date && <span style={{ ...chip, color: dueColor(t, today) }}>{dueLabel(t, today)}</span>}
-          {t.project && <span style={chip}>{t.project}</span>}
+          {t.project && (
+            <span style={{ ...chip, display: 'inline-flex', alignItems: 'center', gap: 5 }}>
+              <ProjectDot color={projectColor} size={7} />{t.project}
+            </span>
+          )}
           {urgent && <PriorityBadge priority={t.priority} size={10.5} />}
           {deferred && <span style={{ ...chip, fontStyle: 'italic' }}>deferred</span>}
         </span>

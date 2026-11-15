@@ -84,3 +84,29 @@ export interface UpdateStatus {
   error: { kind: string; message: string } | null;
   skipped_files: string[];
 }
+
+export type ProjectStatus = 'active' | 'on-hold' | 'done' | 'archived';
+
+/** A project and its metadata, as returned by `GET /api/projects?detail=1`. */
+export interface Project {
+  name: string;
+  description?: string | null;
+  status: ProjectStatus;
+  /** A palette name (see `PROJECT_COLORS`) or `#rrggbb`. */
+  color?: string | null;
+  default_agent?: string | null;
+  /** `YYYY-MM-DD`. */
+  due?: string | null;
+  created?: string | null;
+  updated?: string | null;
+}
+
+/** Fields to change on a project; for text fields an empty string clears. `name` renames. */
+export interface ProjectPatch {
+  name?: string;
+  description?: string;
+  status?: ProjectStatus;
+  color?: string;
+  default_agent?: string;
+  due?: string;
+}

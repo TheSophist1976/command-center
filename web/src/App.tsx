@@ -5,7 +5,7 @@ import './layout.css';
 import { Search, PanelRightClose, PanelRightOpen, ChevronLeft, ChevronUp, ChevronDown, Plus } from 'lucide-react';
 import { Button } from './components/Button';
 import { NewTaskForm } from './components/NewTaskForm';
-import { fetchTask, fetchTasks, fetchAgents, fetchNames, createName, deleteName, addTask, editTask, markDone, reopenTask, deleteTask, fetchTaskNotes, createTaskNote, openNote, saveNote, unlinkTaskNote, fetchTaskThread, postTaskThread } from './api';
+import { fetchTask, fetchTasks, fetchAgents, fetchNames, fetchProjectDetails, updateProject, createName, deleteName, addTask, editTask, markDone, reopenTask, deleteTask, fetchTaskNotes, createTaskNote, openNote, saveNote, unlinkTaskNote, fetchTaskThread, postTaskThread } from './api';
 import type { NameKind } from './api';
 import { AgentEditor } from './components/AgentEditor';
 import { ServicesView } from './components/ServicesView';
@@ -21,7 +21,9 @@ import { FilterPills } from './components/FilterPills';
 import { NextQueue } from './components/NextQueue';
 import { StatusStrip, MobileStatusBar } from './components/StatusStrip';
 import { COL } from './styles';
-import type { Task, AgentProfile, Note, Service, Thread, ThreadSendKind } from './types';
+import type { Task, AgentProfile, Note, Service, Thread, ThreadSendKind, Project, ProjectPatch } from './types';
+import { indexProjects } from './projects';
+import { ProjectDot } from './components/ProjectDot';
 import { startOfToday } from './dueWindow';
 import { agentActivity, serviceSummary } from './status';
 import { bandOf, buildQueue, needsYouCount, nextSelection, queueOrder } from './queue';
@@ -76,6 +78,8 @@ function countLabel(n: number): string {
 export default function App() {
   const [tasks, setTasks] = useState<Task[]>([]);
   const [allProjects, setAllProjects] = useState<string[]>([]);
+  const [projectList, setProjectList] = useState<Project[]>([]);
+  const projectMeta = useMemo(() => indexProjects(projectList), [projectList]);
   const [allTags, setAllTags] = useState<string[]>([]);
   // False until the first fetch, so the empty initial list is not taken as the notification baseline.
   const [tasksLoaded, setTasksLoaded] = useState(false);
@@ -157,10 +161,11 @@ export default function App() {
       fetchServices()
         .then(setServices)
         .catch(() => {});
-      Promise.all([fetchTasks(), fetchAgents(), fetchNames('projects'), fetchNames('tags')])
-        .then(([t, a, p, tg]) => {
+      Promise.all([fetchTasks(), fetchAgents(), fetchNames('projects'), fetchNames('tags'), fetchProjectDetails()])
+        .then(([t, a, p, tg, pd]) => {
           setTasks(t);
           setAllProjects(p);
+          setProjectList(pd);
           setAllTags(tg);
           setTasksLoaded(true);
           setAgents(a);
@@ -297,11 +302,34 @@ export default function App() {
     }
   }
 
+  /** Refetches project names and metadata (archiving moves a project in or out of the names list). */
+  async function reloadProjects() {
+    try {
+      const [names, details] = await Promise.all([fetchNames('projects'), fetchProjectDetails()]);
+      setAllProjects(names);
+      setProjectList(details);
+    } catch (e) {
+      setError(String(e));
+    }
+  }
+
+  /** Saves project metadata. Rejects with the server's message so the editor can show it. */
+  async function handleUpdateProject(name: string, patch: ProjectPatch) {
+    const updated = await updateProject(name, patch);
+    if (updated.name !== name) {
+      // The server renamed the project on every task that uses it; mirror that now.
+      const rename = (t: Task): Task => (t.project?.toLowerCase() === name.toLowerCase() ? { ...t, project: updated.name } : t);
+      setTasks((prev) => prev.map(rename));
+      setSelected((prev) => (prev ? rename(prev) : prev));
+    }
+    await reloadProjects();
+  }
+
   async function handleCreateName(kind: NameKind, name: string): Promise<string | undefined> {
     try {
       const stored = await createName(kind, name);
       const add = (list: string[]) => (list.includes(stored) ? list : [...list, stored].sort((a, b) => a.localeCompare(b)));
-      if (kind === 'projects') setAllProjects(add); else setAllTags(add);
+      if (kind === 'projects') { setAllProjects(add); void reloadProjects(); } else setAllTags(add);
       return stored;
     } catch (e) {
       setError(String(e));
@@ -311,7 +339,7 @@ export default function App() {
   async function handleDeleteName(kind: NameKind, name: string) {
     try {
       await deleteName(kind, name);
-      if (kind === 'projects') setAllProjects((l) => l.filter((x) => x !== name)); else setAllTags((l) => l.filter((x) => x !== name));
+      if (kind === 'projects') { setAllProjects((l) => l.filter((x) => x !== name)); setProjectList((l) => l.filter((x) => x.name !== name)); } else setAllTags((l) => l.filter((x) => x !== name));
       // Tasks lose the name server-side; the SSE refresh will sync, but update now for snappiness.
       setTasks((prev) => prev.map((t) => (kind === 'projects'
         ? (t.project === name ? { ...t, project: undefined } : t)
@@ -705,6 +733,8 @@ export default function App() {
     onCreateProject: (name: string) => handleCreateName('projects', name),
     onCreateTag: (name: string) => handleCreateName('tags', name),
     onDeleteProject: (name: string) => handleDeleteName('projects', name),
+    projectMeta,
+    onUpdateProject: handleUpdateProject,
     onDeleteTag: (name: string) => handleDeleteName('tags', name),
     notes: visibleNotes,
     onEdit: (changes: Parameters<typeof editTask>[1]) => handleEditField(selected.id, changes),
@@ -737,6 +767,7 @@ export default function App() {
     workingExpanded,
     onToggleWorking: () => setWorkingExpanded((v) => !v),
     onSelect: (t: Task) => (isMobile ? setSelected(t) : selectTask(t)),
+    projectMeta,
   };
 
   function swipeToNeighbor(e: React.TouchEvent, phase: 'start' | 'end') {
@@ -831,6 +862,7 @@ export default function App() {
                 <div key={groupName || 'all'}>
                   {groupBy !== 'none' && (
                     <div style={{ position: 'sticky', top: 0, zIndex: 2, display: 'flex', alignItems: 'center', gap: 8, height: 36, padding: '0 16px', background: 'var(--ink-2)', borderBottom: '1px solid var(--hairline-soft)' }}>
+                      {groupBy === 'project' && <ProjectDot color={projectMeta.get(groupName.toLowerCase())?.color} />}
                       <span style={{ fontFamily: 'var(--font-mono)', fontSize: 12.5, fontWeight: 600, textTransform: groupBy === 'priority' ? 'uppercase' : 'none' }}>{groupName}</span>
                       <span style={{ fontSize: 12, color: 'var(--fg-4)' }}>{countLabel(groupTasksList.length)}</span>
                     </div>
@@ -1028,6 +1060,7 @@ export default function App() {
                   <div key={groupName || 'all'}>
                     {groupBy !== 'none' && (
                       <div style={{ display: 'flex', alignItems: 'center', gap: 10, height: 38, padding: '0 24px', background: 'var(--ink-2)', borderBottom: '1px solid var(--hairline-soft)' }}>
+                        {groupBy === 'project' && <ProjectDot color={projectMeta.get(groupName.toLowerCase())?.color} />}
                         <span style={{ fontFamily: 'var(--font-mono)', fontSize: 12.5, fontWeight: 600, textTransform: groupBy === 'priority' ? 'uppercase' : 'none' }}>
                           {groupName}
                         </span>

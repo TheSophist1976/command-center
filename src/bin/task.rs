@@ -369,6 +369,11 @@ fn run(cli: Cli) -> Result<(), (i32, String)> {
             Ok(())
         }
 
+        Some(Command::Project { subcommand }) => {
+            println!("{}", task::commands::project(&path, subcommand)?);
+            Ok(())
+        }
+
         Some(Command::Agent { subcommand }) => {
             let notes_dir = task::db::resolve_notes_dir(&path);
 

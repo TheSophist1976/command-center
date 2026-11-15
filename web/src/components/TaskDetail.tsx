@@ -1,6 +1,6 @@
 import type { CSSProperties, ReactNode } from 'react';
 import { X } from 'lucide-react';
-import type { LifecycleAction, Note, Task, Thread, ThreadSendKind } from '../types';
+import type { LifecycleAction, Note, Project, ProjectPatch, Task, Thread, ThreadSendKind } from '../types';
 import type { editTask } from '../api';
 import { EditableField } from './EditableField';
 import { DatePicker } from './DatePicker';
@@ -71,6 +71,8 @@ interface TaskDetailProps {
   onCreateProject: (name: string) => Promise<string | undefined>;
   onCreateTag: (name: string) => Promise<string | undefined>;
   onDeleteProject: (name: string) => void;
+  projectMeta?: Map<string, Project>;
+  onUpdateProject?: (name: string, patch: ProjectPatch) => Promise<void>;
   onDeleteTag: (name: string) => void;
   onCreateNote: (title: string) => Promise<string | undefined> | void;
   onOpenNote: (slug: string) => void;
@@ -97,7 +99,7 @@ interface TaskDetailProps {
  */
 export function TaskDetail({
   task, today, mobile, showId = true, actions, onClose, agentOptions, thread, notes,
-  onEdit, allProjects, allTags, onCreateProject, onCreateTag, onDeleteProject, onDeleteTag, onSendThread, onApprove, onCreateNote, onOpenNote, onSaveNote, onUnlinkNote, onConvertToService,
+  onEdit, allProjects, allTags, onCreateProject, onCreateTag, onDeleteProject, onDeleteTag, projectMeta, onUpdateProject, onSendThread, onApprove, onCreateNote, onOpenNote, onSaveNote, onUnlinkNote, onConvertToService,
   compact, detailsOpen, conversationMaxHeight,
 }: TaskDetailProps) {
   const done = task.status === 'done';
@@ -134,9 +136,15 @@ export function TaskDetail({
           id="field-project"
           value={task.project ?? ''}
           projects={allProjects}
-          onSave={(v) => onEdit({ project: v })}
+          // Moving an unassigned task into a project hands it to the project's default agent; an agent already set is kept.
+          onSave={(v) => {
+            const defaultAgent = projectMeta?.get(v.toLowerCase())?.default_agent;
+            onEdit(!task.agent && defaultAgent ? { project: v, agent: defaultAgent } : { project: v });
+          }}
           onCreateProject={onCreateProject}
           onDeleteProject={onDeleteProject}
+          meta={projectMeta}
+          onUpdateProject={onUpdateProject}
         />
       ),
     },

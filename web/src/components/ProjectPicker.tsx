@@ -1,5 +1,8 @@
 import { useEffect, useRef, useState } from 'react';
-import { Check, Plus, Trash2 } from 'lucide-react';
+import { Check, Pencil, Plus, Trash2 } from 'lucide-react';
+import type { Project, ProjectPatch } from '../types';
+import { ProjectDot } from './ProjectDot';
+import { ProjectEditor } from './ProjectEditor';
 
 interface ProjectPickerProps {
   id?: string;
@@ -11,13 +14,19 @@ interface ProjectPickerProps {
   onCreateProject: (name: string) => Promise<string | undefined>;
   /** Remove a project from every task that uses it. */
   onDeleteProject: (name: string) => void;
+  /** Metadata for every project, archived ones included, keyed by lowercase name. */
+  meta?: Map<string, Project>;
+  /** Save metadata changes; rejects with the server's message when invalid. */
+  onUpdateProject?: (name: string, patch: ProjectPatch) => Promise<void>;
 }
 
 /** Dropdown of existing projects, with inline "add new" and per-project delete. */
-export function ProjectPicker({ id, value, projects, onSave, onCreateProject, onDeleteProject }: ProjectPickerProps) {
+export function ProjectPicker({ id, value, projects, onSave, onCreateProject, onDeleteProject, meta, onUpdateProject }: ProjectPickerProps) {
   const [open, setOpen] = useState(false);
   const [draft, setDraft] = useState('');
   const [confirming, setConfirming] = useState<string | null>(null);
+  const [editing, setEditing] = useState<string | null>(null);
+  const [showArchived, setShowArchived] = useState(false);
   const containerRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -33,6 +42,8 @@ export function ProjectPicker({ id, value, projects, onSave, onCreateProject, on
     setOpen(false);
     setDraft('');
     setConfirming(null);
+    setEditing(null);
+    setShowArchived(false);
   }
 
   function choose(v: string) {
@@ -50,7 +61,12 @@ export function ProjectPicker({ id, value, projects, onSave, onCreateProject, on
   const trimmed = draft.trim();
   const exists = projects.some((p) => p.toLowerCase() === trimmed.toLowerCase());
   // Keep the current value visible even if it somehow isn't in the list.
-  const list = value && !projects.includes(value) ? [value, ...projects] : projects;
+  const archived = [...(meta?.values() ?? [])]
+    .filter((p) => p.status === 'archived' && !projects.includes(p.name))
+    .map((p) => p.name);
+  const base = showArchived ? [...projects, ...archived].sort((a, b) => a.localeCompare(b)) : projects;
+  const list = value && !base.includes(value) ? [value, ...base] : base;
+  const metaOf = (name: string) => meta?.get(name.toLowerCase());
 
   const rowStyle = (active: boolean) => ({
     display: 'flex', alignItems: 'center', gap: 6, padding: '6px 8px', fontSize: 13, borderRadius: 4,
@@ -62,7 +78,9 @@ export function ProjectPicker({ id, value, projects, onSave, onCreateProject, on
     <div ref={containerRef} style={{ position: 'relative' }}>
       <div id={id} onClick={() => setOpen(true)} style={{ cursor: 'pointer', minHeight: 20 }} title="Click to select">
         <span style={{ display: 'block', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-          {value || <span style={{ color: 'var(--fg-5)' }}>No project</span>}
+          {value
+            ? <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}><ProjectDot color={metaOf(value)?.color} />{value}</span>
+            : <span style={{ color: 'var(--fg-5)' }}>No project</span>}
         </span>
       </div>
       {open && (
@@ -84,7 +102,14 @@ export function ProjectPicker({ id, value, projects, onSave, onCreateProject, on
               {!value && <Check size={13} />}
             </div>
             {list.map((p) =>
-              confirming === p ? (
+              editing === p && metaOf(p) && onUpdateProject ? (
+                <ProjectEditor
+                  key={p}
+                  project={metaOf(p)!}
+                  onCancel={() => setEditing(null)}
+                  onSave={async (patch) => { await onUpdateProject(p, patch); setEditing(null); }}
+                />
+              ) : confirming === p ? (
                 <div key={p} style={{ ...rowStyle(false), cursor: 'default', gap: 8, color: 'var(--fg-2)' }}>
                   <span style={{ flex: 1 }}>Delete “{p}” from all tasks?</span>
                   <button
@@ -104,8 +129,22 @@ export function ProjectPicker({ id, value, projects, onSave, onCreateProject, on
                 </div>
               ) : (
                 <div key={p} onClick={() => choose(p)} className="project-row" style={rowStyle(p === value)}>
+                  <ProjectDot color={metaOf(p)?.color} />
                   <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{p}</span>
+                  {metaOf(p) && metaOf(p)!.status !== 'active' && (
+                    <span style={{ fontSize: 10.5, color: 'var(--fg-4)' }}>{metaOf(p)!.status}</span>
+                  )}
                   {p === value && <Check size={13} />}
+                  {metaOf(p) && onUpdateProject && (
+                    <button
+                      type="button"
+                      title={`Edit project “${p}”`}
+                      onClick={(e) => { e.stopPropagation(); setEditing(p); }}
+                      style={{ background: 'transparent', border: 'none', cursor: 'pointer', display: 'flex', padding: 2 }}
+                    >
+                      <Pencil size={13} color="var(--fg-4)" />
+                    </button>
+                  )}
                   <button
                     type="button"
                     title={`Delete project “${p}”`}
@@ -118,6 +157,12 @@ export function ProjectPicker({ id, value, projects, onSave, onCreateProject, on
               ),
             )}
           </div>
+          {(archived.length > 0 || showArchived) && (
+            <label style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '6px 8px 2px', fontSize: 12, color: 'var(--fg-4)', cursor: 'pointer' }}>
+              <input type="checkbox" checked={showArchived} onChange={(e) => setShowArchived(e.target.checked)} />
+              Show archived
+            </label>
+          )}
           <div style={{ display: 'flex', gap: 4, marginTop: 4, paddingTop: 6, borderTop: '1px solid var(--hairline-soft)' }}>
             <input
               autoFocus

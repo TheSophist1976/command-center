@@ -594,12 +594,55 @@ async fn delete_registry(state: &AppState, registry: db::Registry, name: &str) -
     }
 }
 
-async fn list_projects(State(state): State<Arc<AppState>>) -> Result<Json<Vec<String>>, ApiError> {
-    list_registry(&state, db::Registry::Project).await
+#[derive(Deserialize)]
+pub struct ProjectsQuery {
+    /// Include archived projects.
+    pub all: Option<String>,
+    /// Return full project objects instead of names.
+    pub detail: Option<String>,
 }
 
-async fn create_project(State(state): State<Arc<AppState>>, Json(req): Json<NameRequest>) -> Result<Json<serde_json::Value>, ApiError> {
-    create_registry(&state, db::Registry::Project, &req.name).await
+fn truthy(v: &Option<String>) -> bool {
+    v.as_deref().is_some_and(|v| !matches!(v, "" | "0" | "false"))
+}
+
+fn project_error(e: String) -> ApiError {
+    if e.contains("already exists") {
+        app_error(StatusCode::CONFLICT, e)
+    } else if e.starts_with("Invalid ") || e.starts_with("Name must") {
+        app_error(StatusCode::BAD_REQUEST, e)
+    } else {
+        app_error(StatusCode::INTERNAL_SERVER_ERROR, e)
+    }
+}
+
+async fn list_projects(State(state): State<Arc<AppState>>, Query(q): Query<ProjectsQuery>) -> Result<Json<serde_json::Value>, ApiError> {
+    let projects = db::list_projects(&state.db_path, truthy(&q.all)).map_err(project_error)?;
+    if truthy(&q.detail) {
+        Ok(Json(serde_json::json!(projects)))
+    } else {
+        Ok(Json(serde_json::json!(projects.into_iter().map(|p| p.name).collect::<Vec<_>>())))
+    }
+}
+
+async fn get_project(State(state): State<Arc<AppState>>, AxumPath(name): AxumPath<String>) -> Result<Json<db::Project>, ApiError> {
+    match db::get_project(&state.db_path, &name).map_err(project_error)? {
+        Some(p) => Ok(Json(p)),
+        None => Err(app_error(StatusCode::NOT_FOUND, format!("\"{}\" not found", name))),
+    }
+}
+
+async fn create_project(State(state): State<Arc<AppState>>, Json(req): Json<db::ProjectPatch>) -> Result<Json<db::Project>, ApiError> {
+    let _guard = state.write_lock.lock().await;
+    db::create_project(&state.db_path, &req).map(Json).map_err(project_error)
+}
+
+async fn patch_project(State(state): State<Arc<AppState>>, AxumPath(name): AxumPath<String>, Json(req): Json<db::ProjectPatch>) -> Result<Json<db::Project>, ApiError> {
+    let _guard = state.write_lock.lock().await;
+    match db::update_project(&state.db_path, &name, &req).map_err(project_error)? {
+        Some(p) => Ok(Json(p)),
+        None => Err(app_error(StatusCode::NOT_FOUND, format!("\"{}\" not found", name))),
+    }
 }
 
 async fn delete_project(State(state): State<Arc<AppState>>, AxumPath(name): AxumPath<String>) -> Result<StatusCode, ApiError> {
@@ -1189,7 +1232,7 @@ fn api_routes() -> Router<Arc<AppState>> {
         .route("/api/services/:id/resume", axum::routing::post(resume_service))
         .route("/api/services/:id/runs", get(list_service_runs))
         .route("/api/projects", get(list_projects).post(create_project))
-        .route("/api/projects/:name", axum::routing::delete(delete_project))
+        .route("/api/projects/:name", get(get_project).patch(patch_project).delete(delete_project))
         .route("/api/tags", get(list_tags).post(create_tag))
         .route("/api/tags/:name", axum::routing::delete(delete_tag))
         .route("/api/tasks/:id/done", axum::routing::post(done_task))
@@ -1289,6 +1332,52 @@ mod tests {
     async fn body_json(response: axum::response::Response) -> serde_json::Value {
         let bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
         serde_json::from_slice(&bytes).unwrap()
+    }
+
+    #[tokio::test]
+    async fn test_project_metadata_api() {
+        let (_dir, state) = make_state();
+        let app = router(state);
+        let send = |method: &str, uri: &str, body: Option<&str>| {
+            let mut req = Request::builder().method(method).uri(uri).header("host", "127.0.0.1:3000");
+            let body = match body {
+                Some(b) => { req = req.header("content-type", "application/json"); Body::from(b.to_string()) }
+                None => Body::empty(),
+            };
+            app.clone().oneshot(req.body(body).unwrap())
+        };
+
+        let r = send("POST", "/api/projects", Some(r#"{"name":"Alpha","color":"blue","default_agent":"Home"}"#)).await.unwrap();
+        assert_eq!(r.status(), StatusCode::OK);
+        assert_eq!(body_json(r).await["color"], "blue");
+        let r = send("POST", "/api/projects", Some(r#"{"name":"Beta","status":"archived"}"#)).await.unwrap();
+        assert_eq!(r.status(), StatusCode::OK);
+        let r = send("POST", "/api/projects", Some(r#"{"name":"Bad","color":"mauve"}"#)).await.unwrap();
+        assert_eq!(r.status(), StatusCode::BAD_REQUEST);
+
+        let r = send("GET", "/api/projects", None).await.unwrap();
+        assert_eq!(body_json(r).await, serde_json::json!(["Alpha"]));
+        let r = send("GET", "/api/projects?all=1", None).await.unwrap();
+        assert_eq!(body_json(r).await, serde_json::json!(["Alpha", "Beta"]));
+        let r = send("GET", "/api/projects?detail=1", None).await.unwrap();
+        let v = body_json(r).await;
+        assert_eq!(v[0]["default_agent"], "Home");
+        assert_eq!(v[0]["status"], "active");
+
+        let r = send("PATCH", "/api/projects/Alpha", Some(r#"{"name":"Gamma","status":"on-hold","description":"d"}"#)).await.unwrap();
+        assert_eq!(r.status(), StatusCode::OK);
+        let v = body_json(r).await;
+        assert_eq!((v["name"].as_str(), v["status"].as_str(), v["description"].as_str()), (Some("Gamma"), Some("on-hold"), Some("d")));
+        let r = send("PATCH", "/api/projects/Gamma", Some(r#"{"name":"beta"}"#)).await.unwrap();
+        assert_eq!(r.status(), StatusCode::CONFLICT);
+        let r = send("PATCH", "/api/projects/Gamma", Some(r#"{"due":"soon"}"#)).await.unwrap();
+        assert_eq!(r.status(), StatusCode::BAD_REQUEST);
+        let r = send("PATCH", "/api/projects/Nope", Some(r#"{"status":"done"}"#)).await.unwrap();
+        assert_eq!(r.status(), StatusCode::NOT_FOUND);
+        let r = send("GET", "/api/projects/Gamma", None).await.unwrap();
+        assert_eq!(r.status(), StatusCode::OK);
+        let r = send("GET", "/api/projects/Alpha", None).await.unwrap();
+        assert_eq!(r.status(), StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]

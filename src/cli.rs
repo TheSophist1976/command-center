@@ -51,6 +51,12 @@ pub enum Command {
         subcommand: NoteCommand,
     },
 
+    /// Manage projects and their metadata
+    Project {
+        #[command(subcommand)]
+        subcommand: ProjectCommand,
+    },
+
     /// Manage agent profiles and instructions
     Agent {
         #[command(subcommand)]
@@ -495,5 +501,81 @@ pub enum NoteCommand {
     Unlink {
         /// Task ID to unlink
         task_id: u32,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum ProjectCommand {
+    /// List projects (archived ones only with --all)
+    List {
+        /// Include archived projects
+        #[arg(long)]
+        all: bool,
+
+        /// Print projects as JSON
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Show one project
+    Show {
+        name: String,
+
+        /// Print the project as JSON
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Add a project
+    Add {
+        name: String,
+
+        #[arg(long)]
+        description: Option<String>,
+
+        /// active (default), on-hold, done, archived
+        #[arg(long)]
+        status: Option<String>,
+
+        /// Named color (red, orange, yellow, green, teal, blue, purple, pink, gray) or #rrggbb
+        #[arg(long)]
+        color: Option<String>,
+
+        /// Agent that new tasks in this project are assigned to by default
+        #[arg(long)]
+        agent: Option<String>,
+
+        /// Project deadline (YYYY-MM-DD)
+        #[arg(long)]
+        due: Option<String>,
+    },
+
+    /// Edit a project; an empty value clears a field
+    Edit {
+        name: String,
+
+        #[arg(long)]
+        description: Option<String>,
+
+        #[arg(long)]
+        status: Option<String>,
+
+        #[arg(long)]
+        color: Option<String>,
+
+        #[arg(long)]
+        agent: Option<String>,
+
+        #[arg(long)]
+        due: Option<String>,
+
+        /// Rename the project, updating every task that uses it
+        #[arg(long)]
+        rename: Option<String>,
+    },
+
+    /// Delete a project and clear it from every task that uses it
+    Delete {
+        name: String,
     },
 }
