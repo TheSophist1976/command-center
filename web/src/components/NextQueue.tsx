@@ -4,6 +4,7 @@ import { ProjectDot } from './ProjectDot';
 import { BAND_LABEL, reasonFor, type Band, type QueueBand } from '../queue';
 import { dueColor, dueLabel } from '../taskFormat';
 import { PriorityBadge } from './Badges';
+import { SwipeableRow } from './SwipeableRow';
 
 const BAND_ICON: Record<Band, LucideIcon> = { review: Eye, input: HelpCircle, triage: Inbox, working: RefreshCw };
 const BAND_COLOR: Record<Band, string> = {
@@ -22,10 +23,17 @@ interface NextQueueProps {
   mobile?: boolean;
   /** Project metadata by lowercase name, for the color dot on a row's project chip. */
   projectMeta?: Map<string, Project>;
+  /** Phone swipe gestures: right to mark done, left to set a due date. Only one row is open at a time. */
+  swipe?: {
+    openId: number | null;
+    onOpenChange: (id: number | null) => void;
+    onToggleDone: (task: Task) => void;
+    onQuickDue: (task: Task, days: number) => void;
+  };
 }
 
 /** The Next view's list: bands of tasks, each row a title, why it is here, and a few chips. */
-export function NextQueue({ queue, selectedId, onSelect, today, deferredIds, workingExpanded, onToggleWorking, mobile, projectMeta }: NextQueueProps) {
+export function NextQueue({ queue, selectedId, onSelect, today, deferredIds, workingExpanded, onToggleWorking, mobile, projectMeta, swipe }: NextQueueProps) {
   const visible = queue.filter((b) => b.tasks.length > 0);
   const needsYou = queue.some((b) => b.band !== 'working' && b.tasks.length > 0);
 
@@ -81,6 +89,7 @@ export function NextQueue({ queue, selectedId, onSelect, today, deferredIds, wor
                 deferred={deferredIds.has(t.id)}
                 mobile={mobile}
                 projectColor={t.project ? projectMeta?.get(t.project.toLowerCase())?.color : undefined}
+                swipe={swipe}
                 onSelect={() => onSelect(t)}
               />
             ))}
@@ -91,12 +100,69 @@ export function NextQueue({ queue, selectedId, onSelect, today, deferredIds, wor
   );
 }
 
-function QueueRow({ task: t, band, today, selected, deferred, mobile, projectColor, onSelect }: {
-  task: Task; band: Band; today: Date; selected: boolean; deferred: boolean; mobile?: boolean; projectColor?: string | null; onSelect: () => void;
+function QueueRow({ task: t, band, today, selected, deferred, mobile, projectColor, swipe, onSelect }: {
+  task: Task; band: Band; today: Date; selected: boolean; deferred: boolean; mobile?: boolean; projectColor?: string | null;
+  swipe?: NextQueueProps['swipe']; onSelect: () => void;
 }) {
   const Icon = BAND_ICON[band];
   const chip = { fontSize: mobile ? 12 : 11.5, padding: '1px 8px', borderRadius: 999, background: 'var(--ink-3)', color: 'var(--fg-3)' };
   const urgent = t.priority === 'critical' || t.priority === 'high';
+  const body = (
+    <>
+    <Icon size={mobile ? 16 : 15} color={BAND_COLOR[band]} style={{ flex: 'none', marginTop: 3 }} aria-hidden />
+    <span style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', gap: 3 }}>
+      <span
+        style={{
+          fontSize: mobile ? 15 : 14, fontWeight: band === 'working' ? 500 : 600, color: 'var(--fg-1)', lineHeight: 1.35,
+          ...(mobile
+            ? { display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical', overflow: 'hidden' }
+            : { whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }),
+        }}
+      >
+        {t.title}
+      </span>
+      <span style={{ fontSize: mobile ? 13 : 12.5, color: 'var(--fg-4)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+        {reasonFor(t, band)}
+      </span>
+      <span style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 6, marginTop: 3 }}>
+        {t.agent && t.agent.toLowerCase() !== 'human' && (
+          <span style={{ ...chip, fontFamily: 'var(--font-mono)', color: 'var(--accent)' }}>{t.agent}</span>
+        )}
+        {t.due_date && <span style={{ ...chip, color: dueColor(t, today) }}>{dueLabel(t, today)}</span>}
+        {t.project && (
+          <span style={{ ...chip, display: 'inline-flex', alignItems: 'center', gap: 5 }}>
+            <ProjectDot color={projectColor} size={7} />{t.project}
+          </span>
+        )}
+        {urgent && <PriorityBadge priority={t.priority} size={10.5} />}
+        {deferred && <span style={{ ...chip, fontStyle: 'italic' }}>deferred</span>}
+      </span>
+    </span>
+    <span style={{ flex: 'none', fontFamily: 'var(--font-mono)', fontSize: 11.5, color: 'var(--fg-5)', marginTop: 2 }}>#{t.id}</span>
+    </>
+  );
+  const dim = deferred || band === 'working' ? 0.7 : 1;
+
+  if (mobile && swipe) {
+    return (
+      <SwipeableRow
+        taskId={t.id}
+        today={today}
+        done={t.status === 'done'}
+        swipeOpen={swipe.openId === t.id}
+        onSwipeOpenChange={(open) => swipe.onOpenChange(open ? t.id : null)}
+        onSelect={onSelect}
+        onToggleDone={() => swipe.onToggleDone(t)}
+        onQuickDue={(days) => swipe.onQuickDue(t, days)}
+        asButton
+        selected={selected}
+        contentStyle={{ gap: 12, minHeight: 68, padding: '14px 16px', opacity: dim, color: 'var(--fg-1)' }}
+      >
+        {body}
+      </SwipeableRow>
+    );
+  }
+
   return (
     <button
       type="button"
@@ -108,39 +174,10 @@ function QueueRow({ task: t, band, today, selected, deferred, mobile, projectCol
         minHeight: mobile ? 68 : 0, padding: mobile ? '14px 16px' : '10px 16px', cursor: 'pointer', border: 'none',
         borderBottom: '1px solid var(--hairline-soft)', borderLeft: `3px solid ${selected ? 'var(--accent)' : 'transparent'}`,
         background: selected ? 'var(--accent-soft)' : 'transparent',
-        opacity: deferred || band === 'working' ? 0.7 : 1,
+        opacity: dim,
       }}
     >
-      <Icon size={mobile ? 16 : 15} color={BAND_COLOR[band]} style={{ flex: 'none', marginTop: 3 }} aria-hidden />
-      <span style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', gap: 3 }}>
-        <span
-          style={{
-            fontSize: mobile ? 15 : 14, fontWeight: band === 'working' ? 500 : 600, color: 'var(--fg-1)', lineHeight: 1.35,
-            ...(mobile
-              ? { display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical', overflow: 'hidden' }
-              : { whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }),
-          }}
-        >
-          {t.title}
-        </span>
-        <span style={{ fontSize: mobile ? 13 : 12.5, color: 'var(--fg-4)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-          {reasonFor(t, band)}
-        </span>
-        <span style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 6, marginTop: 3 }}>
-          {t.agent && t.agent.toLowerCase() !== 'human' && (
-            <span style={{ ...chip, fontFamily: 'var(--font-mono)', color: 'var(--accent)' }}>{t.agent}</span>
-          )}
-          {t.due_date && <span style={{ ...chip, color: dueColor(t, today) }}>{dueLabel(t, today)}</span>}
-          {t.project && (
-            <span style={{ ...chip, display: 'inline-flex', alignItems: 'center', gap: 5 }}>
-              <ProjectDot color={projectColor} size={7} />{t.project}
-            </span>
-          )}
-          {urgent && <PriorityBadge priority={t.priority} size={10.5} />}
-          {deferred && <span style={{ ...chip, fontStyle: 'italic' }}>deferred</span>}
-        </span>
-      </span>
-      <span style={{ flex: 'none', fontFamily: 'var(--font-mono)', fontSize: 11.5, color: 'var(--fg-5)', marginTop: 2 }}>#{t.id}</span>
+      {body}
     </button>
   );
 }

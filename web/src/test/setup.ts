@@ -25,6 +25,18 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
+// jsdom has no PointerEvent, and without it clientX/clientY are dropped from synthetic pointer events.
+if (!('PointerEvent' in window)) {
+  class PointerEventPolyfill extends MouseEvent {
+    pointerId: number;
+    constructor(type: string, init: PointerEventInit = {}) {
+      super(type, init);
+      this.pointerId = init.pointerId ?? 1;
+    }
+  }
+  Object.defineProperty(window, 'PointerEvent', { value: PointerEventPolyfill, configurable: true });
+}
+
 // jsdom has no layout engine, so these browser APIs are missing; stub the bits the app touches.
 Element.prototype.scrollIntoView = () => {};
 

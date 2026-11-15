@@ -1,4 +1,4 @@
-import { test as base, expect, type Page } from '@playwright/test';
+import { test as base, expect, type Locator, type Page } from '@playwright/test';
 import { execFileSync, spawn, type ChildProcess } from 'node:child_process';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { createServer } from 'node:net';
@@ -14,6 +14,7 @@ export interface StoredTask {
   title: string;
   status: 'open' | 'done';
   agent?: string;
+  due_date?: string;
   work_status?: string;
   kind?: string;
   paused?: boolean;
@@ -162,6 +163,19 @@ export function band(page: Page, name: string) {
 /** A task's row in the Next queue or the All tasks table. */
 export function row(page: Page, title: string) {
   return page.locator('[data-task-row]').filter({ hasText: title });
+}
+
+/** Drag a row sideways the way a finger would (positive `dx` is a swipe right). */
+export async function swipeRow(page: Page, rowLocator: Locator, dx: number) {
+  const box = await rowLocator.boundingBox();
+  if (!box) throw new Error('row is not on screen');
+  const x = box.x + box.width / 2;
+  const y = box.y + box.height / 2;
+  await page.mouse.move(x, y);
+  await page.mouse.down();
+  await page.mouse.move(x + dx / 2, y, { steps: 5 });
+  await page.mouse.move(x + dx, y, { steps: 5 });
+  await page.mouse.up();
 }
 
 /** The docked pane beside the Next queue: the selected task and its conversation. */
