@@ -143,9 +143,30 @@ export function isoDate(daysFromToday: number): string {
 /** Open the app on the "All tasks" view and select a task by title. */
 export async function openTask(page: Page, cc: CommandCenter, title: string) {
   await page.goto(cc.baseURL);
-  await page.getByText('All tasks', { exact: true }).first().click();
+  await page.getByRole('tab', { name: /All tasks/ }).click();
   await page.locator('[data-task-row]').filter({ hasText: title }).first().click();
   await expect(page.locator('#field-title')).toContainText(title);
+}
+
+/** Open the app on its home view: the Next queue, with the first task docked beside it. */
+export async function openNext(page: Page, cc: CommandCenter) {
+  await page.goto(cc.baseURL);
+  await expect(page.getByRole('tab', { name: /Next/ })).toHaveAttribute('aria-selected', 'true');
+}
+
+/** A band of the Next queue ("Review", "Needs your input", "Triage", "Agents working"). */
+export function band(page: Page, name: string) {
+  return page.getByRole('region', { name, exact: true });
+}
+
+/** A task's row in the Next queue or the All tasks table. */
+export function row(page: Page, title: string) {
+  return page.locator('[data-task-row]').filter({ hasText: title });
+}
+
+/** The docked pane beside the Next queue: the selected task and its conversation. */
+export function docked(page: Page) {
+  return page.getByRole('region', { name: 'Selected task' });
 }
 
 /** The work-status control in the inspector (a select while editing). */

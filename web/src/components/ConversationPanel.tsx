@@ -9,6 +9,8 @@ interface ConversationPanelProps {
   accentColor?: string;
   onSend: (kind: ThreadSendKind, text: string) => Promise<void>;
   onApprove: (text: string) => Promise<void>;
+  /** Height at which the message list starts scrolling; the docked pane has more room than the side panel. */
+  messagesMaxHeight?: number | string;
 }
 
 type Sender = 'agent' | 'human' | 'system';
@@ -89,7 +91,7 @@ function Avatar({ sender, color }: { sender: 'agent' | 'human'; color: string })
   );
 }
 
-export function ConversationPanel({ task, thread, accentColor, onSend, onApprove }: ConversationPanelProps) {
+export function ConversationPanel({ task, thread, accentColor, onSend, onApprove, messagesMaxHeight = 360 }: ConversationPanelProps) {
   const [text, setText] = useState('');
   const [sendState, setSendState] = useState<'idle' | 'sending' | 'sent'>('idle');
   const [open, setOpen] = useState(false);
@@ -165,7 +167,7 @@ export function ConversationPanel({ task, thread, accentColor, onSend, onApprove
           ref={scrollRef}
           style={{
             display: 'flex', flexDirection: 'column', gap: 10, border: `1px solid ${color}`, borderRadius: 8,
-            padding: '10px 10px', background: 'var(--ink-2)', maxHeight: 360, overflowY: 'auto',
+            padding: '10px 10px', background: 'var(--ink-2)', maxHeight: messagesMaxHeight, overflowY: 'auto',
           }}
         >
           {messages.map((m, i) =>

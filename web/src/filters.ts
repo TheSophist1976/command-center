@@ -1,8 +1,8 @@
-import { CalendarDays, HelpCircle, Inbox, ListTodo, Repeat, Sun, type LucideIcon } from 'lucide-react';
+import { CalendarDays, HelpCircle, Repeat, Sun, type LucideIcon } from 'lucide-react';
 import type { Task } from './types';
-import { dueMatches, isOverdue, type DueWindow } from './dueWindow';
+import { dueMatches, type DueWindow } from './dueWindow';
 
-export type DueFilter = DueWindow | 'no-due-date' | 'recurring' | 'all-tasks' | 'inbox' | 'next';
+export type DueFilter = DueWindow | 'no-due-date' | 'recurring' | 'all-tasks';
 
 export interface FilterItem {
   value: DueFilter;
@@ -11,16 +11,6 @@ export interface FilterItem {
   /** Empty-state title and body. */
   empty: [string, string];
 }
-
-export const NEXT_ITEM: FilterItem = {
-  value: 'next', label: 'Next', icon: ListTodo,
-  empty: ['Nothing needs you.', 'No open tasks are unassigned, assigned to you, awaiting review, or blocked on your input.'],
-};
-
-export const INBOX_ITEM: FilterItem = {
-  value: 'inbox', label: 'Inbox', icon: Inbox,
-  empty: ['Inbox zero.', 'Every open task has a due date and an agent, and nothing is overdue.'],
-};
 
 export const DUE_WINDOW_ITEMS: FilterItem[] = [
   { value: 'day', label: 'Today', icon: Sun, empty: ['Nothing due today.', 'Pull something forward from This week, or add a task.'] },
@@ -32,7 +22,11 @@ export const DUE_WINDOW_ITEMS: FilterItem[] = [
   { value: 'all-tasks', label: 'All tasks', icon: CalendarDays, empty: ['No tasks yet.', 'Add your first task.'] },
 ];
 
-export const ALL_FILTER_ITEMS: FilterItem[] = [NEXT_ITEM, INBOX_ITEM, ...DUE_WINDOW_ITEMS];
+/** The filter pills of the All tasks view: everything first, then the narrowing filters. */
+export const ALL_TASKS_FILTERS: FilterItem[] = [
+  ...DUE_WINDOW_ITEMS.filter((i) => i.value === 'all-tasks'),
+  ...DUE_WINDOW_ITEMS.filter((i) => i.value !== 'all-tasks'),
+];
 
 export function hasNoDueDate(t: Task): boolean {
   return t.status === 'open' && !t.due_date;
@@ -42,10 +36,6 @@ export function isRecurring(t: Task): boolean {
   return t.status === 'open' && !!t.recurrence;
 }
 
-export function isInboxTask(t: Task, today: Date): boolean {
-  return t.status === 'open' && (!t.agent || !t.due_date || isOverdue(t, today));
-}
-
 /** Open work only a human can move: unassigned, human-assigned, awaiting review, or blocked on input. */
 export function needsHumanAction(t: Task): boolean {
   return t.status === 'open' && (!t.agent || t.agent.toLowerCase() === 'human' || t.work_status === 'waiting-for-review' || t.work_status === 'needs-input');
@@ -53,10 +43,6 @@ export function needsHumanAction(t: Task): boolean {
 
 export function matchesFilter(t: Task, today: Date, filter: DueFilter): boolean {
   switch (filter) {
-    case 'next':
-      return needsHumanAction(t);
-    case 'inbox':
-      return isInboxTask(t, today);
     case 'all-tasks':
       return true;
     case 'no-due-date':
