@@ -4,6 +4,7 @@ import userEvent from '@testing-library/user-event';
 import { NextQueue } from './NextQueue';
 import { buildQueue, reasonFor } from '../queue';
 import { makeTask } from '../test/factories';
+import { indexProjects } from '../projects';
 
 const today = new Date('2026-11-15T00:00:00');
 
@@ -86,5 +87,12 @@ describe('reasonFor', () => {
 
   it('describes agents revising after a change request', () => {
     expect(reasonFor(makeTask({ agent: 'Vault', work_status: 'changes-requested' }), 'working')).toBe('Vault is revising');
+  });
+
+  it('shows a project color dot on the row chip when the project has a color', () => {
+    setup({ projectMeta: indexProjects([{ name: 'Command-Center', status: 'active', color: 'blue' }]) });
+    const row = screen.getByText('Ship release').closest('button')!;
+    expect(within(row).getByTestId('project-dot')).toBeInTheDocument();
+    expect(within(screen.getByText('Unowned idea').closest('button')!).queryByTestId('project-dot')).toBeNull();
   });
 });

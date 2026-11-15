@@ -74,6 +74,45 @@ impl std::str::FromStr for WorkStatus {
     }
 }
 
+/// Lifecycle state of a project. `Archived` hides the project from pickers and
+/// default lists; it never touches the project's tasks.
+#[derive(Debug, Clone, Copy, PartialEq, Default, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ProjectStatus {
+    #[default]
+    Active,
+    OnHold,
+    Done,
+    Archived,
+}
+
+impl std::fmt::Display for ProjectStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ProjectStatus::Active => write!(f, "active"),
+            ProjectStatus::OnHold => write!(f, "on-hold"),
+            ProjectStatus::Done => write!(f, "done"),
+            ProjectStatus::Archived => write!(f, "archived"),
+        }
+    }
+}
+
+impl std::str::FromStr for ProjectStatus {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.trim().to_lowercase().as_str() {
+            "active" => Ok(ProjectStatus::Active),
+            "on-hold" | "on_hold" | "onhold" | "hold" => Ok(ProjectStatus::OnHold),
+            "done" => Ok(ProjectStatus::Done),
+            "archived" | "archive" => Ok(ProjectStatus::Archived),
+            _ => Err(format!(
+                "Invalid project status: '{}'. Valid values: active, on-hold, done, archived",
+                s
+            )),
+        }
+    }
+}
+
 /// Whether a row is a normal task or a service: a recurring agent job that
 /// advances its own schedule with `task service run` and never goes to review.
 #[derive(Debug, Clone, Copy, PartialEq, Default, Serialize)]

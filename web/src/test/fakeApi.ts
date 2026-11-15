@@ -54,7 +54,7 @@ export function installFakeApi({ tasks, agents = [], services = [] }: FakeApiOpt
     if (input === '/api/tasks' && method === 'GET') return json(api.tasks);
     if (input === '/api/agents') return json(agents);
     if (input === '/api/services') return json(services);
-    if (input === '/api/projects' || input === '/api/tags') return json([]);
+    if (input === '/api/projects' || input === '/api/tags' || input.startsWith('/api/projects?')) return json([]);
     if (input === '/api/version') return json({ current: '5.4.2', latest: null, update_available: false, update_supported: false });
     if ((m = input.match(/^\/api\/tasks\/(\d+)\/notes$/))) return json([]);
     if ((m = input.match(/^\/api\/tasks\/(\d+)\/thread$/))) {

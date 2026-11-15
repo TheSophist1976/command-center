@@ -1,4 +1,4 @@
-import type { Task, AgentProfile, Note, VersionInfo, UpdateStatus, Service, ServiceRun, Thread, ThreadSendKind } from './types';
+import type { Task, AgentProfile, Note, VersionInfo, UpdateStatus, Service, ServiceRun, Thread, ThreadSendKind, Project, ProjectPatch } from './types';
 
 async function jsonOrThrow<T>(response: Response): Promise<T> {
   if (!response.ok) {
@@ -86,6 +86,22 @@ export async function deleteName(kind: NameKind, name: string): Promise<void> {
     const body = await response.json().catch(() => ({}));
     throw new Error(body.error ?? `Failed to delete ${name}`);
   }
+}
+
+/** Every project with its metadata, archived ones included. */
+export async function fetchProjectDetails(): Promise<Project[]> {
+  return jsonOrThrow(await apiFetch('/api/projects?detail=1&all=1'));
+}
+
+/** Changes a project's metadata; a new `name` renames it and every task that uses it. */
+export async function updateProject(name: string, patch: ProjectPatch): Promise<Project> {
+  return jsonOrThrow(
+    await apiFetch(`/api/projects/${encodeURIComponent(name)}`, {
+      method: 'PATCH',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(patch),
+    }),
+  );
 }
 
 export async function fetchAgents(): Promise<AgentProfile[]> {

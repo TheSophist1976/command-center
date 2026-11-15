@@ -54,6 +54,13 @@ pub struct EditArgs {
 }
 
 pub fn add(path: &Path, args: AddArgs) -> Result<String, (i32, String)> {
+    // A task added to a project with a default agent goes to that agent unless one is given.
+    // Looked up before the write transaction opens: a second connection would block on its lock.
+    let agent = match (args.agent, args.project.as_deref()) {
+        (Some(a), _) => Some(a),
+        (None, Some(p)) => db::get_project(path, p).map_err(|e| (1, e))?.and_then(|p| p.default_agent),
+        (None, None) => None,
+    };
     let mut task_file = db::begin(path).map_err(|e| (1, e))?;
     let priority = Priority::from_str(&args.priority).map_err(|e| (1, e))?;
     let today = chrono::Local::now().date_naive();
@@ -80,7 +87,7 @@ pub fn add(path: &Path, args: AddArgs) -> Result<String, (i32, String)> {
         project: args.project,
         recurrence: None,
         notes: Vec::new(),
-        agent: args.agent,
+        agent,
         effort: None,
         work_status: None, kind: Default::default(), paused: false,
     });
@@ -467,6 +474,60 @@ pub fn rm(path: &Path, id: u32) -> Result<String, (i32, String)> {
     }
     task_file.commit().map_err(|e| (1, e))?;
     Ok(format!("Deleted task {}: {}", id, removed.title))
+}
+
+// -- Projects --
+
+fn format_project(p: &db::Project) -> String {
+    let mut out = format!("{} [{}]", p.name, p.status);
+    if let Some(c) = &p.color { out.push_str(&format!(" color:{}", c)); }
+    if let Some(a) = &p.default_agent { out.push_str(&format!(" agent:{}", a)); }
+    if let Some(d) = &p.due { out.push_str(&format!(" due:{}", d)); }
+    if let Some(d) = &p.description { out.push_str(&format!("\n  {}", d)); }
+    out
+}
+
+/// Dispatch a `task project` subcommand.
+pub fn project(path: &Path, cmd: crate::cli::ProjectCommand) -> Result<String, (i32, String)> {
+    use crate::cli::ProjectCommand as P;
+    let err = |e: String| (1, e);
+    match cmd {
+        P::List { all, json } => {
+            let projects = db::list_projects(path, all).map_err(err)?;
+            if json {
+                return serde_json::to_string_pretty(&projects).map_err(|e| (1, e.to_string()));
+            }
+            if projects.is_empty() {
+                return Ok("No projects.".to_string());
+            }
+            Ok(projects.iter().map(format_project).collect::<Vec<_>>().join("\n"))
+        }
+        P::Show { name, json } => {
+            let p = db::get_project(path, &name).map_err(err)?.ok_or_else(|| (1, format!("Project '{}' not found", name)))?;
+            if json {
+                serde_json::to_string_pretty(&p).map_err(|e| (1, e.to_string()))
+            } else {
+                Ok(format_project(&p))
+            }
+        }
+        P::Add { name, description, status, color, agent, due } => {
+            let patch = db::ProjectPatch { name: Some(name), description, status, color, default_agent: agent, due };
+            let p = db::create_project(path, &patch).map_err(err)?;
+            Ok(format!("Created project {}", p.name))
+        }
+        P::Edit { name, description, status, color, agent, due, rename } => {
+            let patch = db::ProjectPatch { name: rename, description, status, color, default_agent: agent, due };
+            let p = db::update_project(path, &name, &patch).map_err(err)?.ok_or_else(|| (1, format!("Project '{}' not found", name)))?;
+            Ok(format!("Updated project {}", p.name))
+        }
+        P::Delete { name } => {
+            if db::delete_name(path, db::Registry::Project, &name).map_err(err)? {
+                Ok(format!("Deleted project {}", name))
+            } else {
+                Err((1, format!("Project '{}' not found", name)))
+            }
+        }
+    }
 }
 
 // -- Services --
@@ -1101,5 +1162,29 @@ mod tests {
         let ok = EditArgs { title: None, priority: None, due: Some("2099-01-01".to_string()), project: None, tags: None, agent: None, description: None, instructions: None, effort: None, work_status: None, recur: Some("weekly".to_string()), service: Some(true) };
         edit(&path, 1, ok).unwrap();
         assert!(db::load(&path).unwrap().tasks[0].is_service());
+    }
+
+    #[test]
+    fn project_commands_and_default_agent() {
+        use crate::cli::ProjectCommand as P;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("tasks.db");
+        project(&path, P::Add { name: "Lab".into(), description: Some("racks".into()), status: None, color: Some("green".into()), agent: Some("Home".into()), due: None }).unwrap();
+        assert!(project(&path, P::Add { name: "X".into(), description: None, status: Some("bogus".into()), color: None, agent: None, due: None }).is_err());
+
+        // Default agent fills in when none is given, and never overrides an explicit one.
+        let add_in_lab = |agent: Option<&str>| AddArgs { title: "T".into(), priority: "medium".into(), due: None, project: Some("Lab".into()), tags: None, agent: agent.map(String::from), description: None, instructions: None };
+        add(&path, add_in_lab(None)).unwrap();
+        add(&path, add_in_lab(Some("Other"))).unwrap();
+        let tf = db::load(&path).unwrap();
+        assert_eq!(tf.find_task(1).unwrap().agent.as_deref(), Some("Home"));
+        assert_eq!(tf.find_task(2).unwrap().agent.as_deref(), Some("Other"));
+
+        project(&path, P::Edit { name: "Lab".into(), description: None, status: Some("archived".into()), color: None, agent: None, due: None, rename: Some("Rack".into()) }).unwrap();
+        assert_eq!(db::load(&path).unwrap().find_task(1).unwrap().project.as_deref(), Some("Rack"));
+        assert_eq!(project(&path, P::List { all: false, json: false }).unwrap(), "No projects.");
+        assert!(project(&path, P::List { all: true, json: false }).unwrap().contains("Rack [archived]"));
+        project(&path, P::Delete { name: "Rack".into() }).unwrap();
+        assert!(project(&path, P::Show { name: "Rack".into(), json: false }).is_err());
     }
 }

@@ -153,6 +153,8 @@ task add "Task title" --priority high --due 2026-03-15 --project Work --tags fro
 
 Only `title` is required; `--priority` defaults to `medium`. `--due` takes `YYYY-MM-DD` or a weekday name (next future occurrence); a date before today is rejected with an error, here and in `task edit`. The id is assigned automatically — it will be printed in the output (`Created task 12: Task title`).
 
+If the task's `--project` has a **default agent** and you do not pass `--agent`, the task is assigned to that agent. An explicit `--agent` always wins.
+
 ### Editing a task
 
 ```bash
@@ -253,6 +255,24 @@ task show <id>
 ```
 
 This prints the task's metadata, its description, and — if it has any — a `## Instructions` section.
+
+### Projects
+
+A project is a name that tasks reference through `--project`, plus metadata: `description`, `status`, `color`, `default_agent` and `due` (a `YYYY-MM-DD` deadline).
+
+```bash
+task project list [--all] [--json]
+task project show <name> [--json]
+task project add <name> --description "..." --status active --color blue --agent command-center --due 2026-12-31
+task project edit <name> --status on-hold --rename "New name"
+task project delete <name>
+```
+
+- `status` is `active`, `on-hold`, `done` or `archived`. `list` hides archived projects unless you pass `--all`.
+- **Archiving or finishing a project only hides it.** Its tasks are untouched: they still appear in `task next`, `task list` and search, so keep working them.
+- `--rename` updates every task that uses the project. `task project delete` clears the project from its tasks.
+- In `edit`, an empty value (`--color ""`) clears a field.
+- Humans own project metadata; do not change it unless a task tells you to.
 
 ### Rules to Never Break
 

@@ -4,7 +4,7 @@ use chrono::{DateTime, NaiveDate, Utc};
 use std::str::FromStr;
 use std::fs;
 
-use crate::task::{Effort, Priority, Recurrence, Status, Task, TaskFile, TaskKind, WorkStatus};
+use crate::task::{Effort, Priority, ProjectStatus, Recurrence, Status, Task, TaskFile, TaskKind, WorkStatus};
 
 const SCHEMA_SQL: &str = "
 CREATE TABLE IF NOT EXISTS tasks (
@@ -121,6 +121,17 @@ fn open_conn(path: &Path) -> Result<Connection, String> {
         .ok();
     conn.execute("ALTER TABLE tasks ADD COLUMN paused INTEGER", [])
         .ok();
+    for col in [
+        "description TEXT",
+        "status TEXT NOT NULL DEFAULT 'active'",
+        "color TEXT",
+        "default_agent TEXT",
+        "due TEXT",
+        "created TEXT",
+        "updated TEXT",
+    ] {
+        conn.execute(&format!("ALTER TABLE projects ADD COLUMN {}", col), []).ok();
+    }
     // `complete` is retired as a stored work status; it meant waiting-for-review.
     conn.execute("UPDATE tasks SET work_status = 'waiting-for-review' WHERE work_status = 'complete'", [])
         .map_err(|e| format!("Failed to migrate work status: {}", e))?;
@@ -576,6 +587,203 @@ pub fn delete_name(path: &Path, registry: Registry, name: &str) -> Result<bool, 
     }
     txn.commit()?;
     Ok(true)
+}
+
+/// A project with its metadata. Tasks reference it by `name`.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct Project {
+    pub name: String,
+    pub description: Option<String>,
+    pub status: ProjectStatus,
+    pub color: Option<String>,
+    pub default_agent: Option<String>,
+    /// `YYYY-MM-DD`.
+    pub due: Option<String>,
+    pub created: Option<String>,
+    pub updated: Option<String>,
+}
+
+/// Fields to change on a project. `None` leaves a field alone; for the text
+/// fields an empty string clears it. `name` renames the project.
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+#[serde(default)]
+pub struct ProjectPatch {
+    pub name: Option<String>,
+    pub description: Option<String>,
+    pub status: Option<String>,
+    pub color: Option<String>,
+    pub default_agent: Option<String>,
+    pub due: Option<String>,
+}
+
+/// Named colors a project may use; `#rrggbb` is also accepted.
+pub const PROJECT_COLORS: &[&str] = &["red", "orange", "yellow", "green", "teal", "blue", "purple", "pink", "gray"];
+
+fn now_stamp() -> String {
+    chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+}
+
+fn blank_to_none(s: &str) -> Option<String> {
+    let s = s.trim();
+    if s.is_empty() { None } else { Some(s.to_string()) }
+}
+
+fn validate_color(c: &str) -> Result<String, String> {
+    let lower = c.to_lowercase();
+    let is_hex = lower.len() == 7 && lower.starts_with('#') && lower[1..].chars().all(|ch| ch.is_ascii_hexdigit());
+    if is_hex || PROJECT_COLORS.contains(&lower.as_str()) {
+        Ok(lower)
+    } else {
+        Err(format!("Invalid color: '{}'. Use #rrggbb or one of: {}", c, PROJECT_COLORS.join(", ")))
+    }
+}
+
+fn validate_project_due(d: &str) -> Result<String, String> {
+    chrono::NaiveDate::parse_from_str(d, "%Y-%m-%d")
+        .map(|d| d.format("%Y-%m-%d").to_string())
+        .map_err(|_| format!("Invalid date: '{}'. Expected YYYY-MM-DD.", d))
+}
+
+/// Validates `patch` against `base` and returns the resulting project.
+/// Does not touch `created`/`updated`.
+fn apply_patch(base: &Project, patch: &ProjectPatch) -> Result<Project, String> {
+    let mut p = base.clone();
+    if let Some(n) = &patch.name {
+        p.name = clean_name(Registry::Project, n)?;
+    }
+    if let Some(d) = &patch.description {
+        p.description = blank_to_none(d);
+    }
+    if let Some(s) = &patch.status {
+        p.status = s.parse()?;
+    }
+    if let Some(c) = &patch.color {
+        p.color = blank_to_none(c).map(|c| validate_color(&c)).transpose()?;
+    }
+    if let Some(a) = &patch.default_agent {
+        p.default_agent = blank_to_none(a);
+    }
+    if let Some(d) = &patch.due {
+        p.due = blank_to_none(d).map(|d| validate_project_due(&d)).transpose()?;
+    }
+    Ok(p)
+}
+
+const PROJECT_COLUMNS: &str = "name, description, status, color, default_agent, due, created, updated";
+
+fn row_to_project(row: &rusqlite::Row) -> rusqlite::Result<Project> {
+    let status: String = row.get(2)?;
+    Ok(Project {
+        name: row.get(0)?,
+        description: row.get(1)?,
+        status: status.parse().unwrap_or_default(),
+        color: row.get(3)?,
+        default_agent: row.get(4)?,
+        due: row.get(5)?,
+        created: row.get(6)?,
+        updated: row.get(7)?,
+    })
+}
+
+fn read_project(conn: &Connection, name: &str) -> Result<Option<Project>, String> {
+    use rusqlite::OptionalExtension;
+    conn.query_row(
+        &format!("SELECT {} FROM projects WHERE name = ?1", PROJECT_COLUMNS),
+        params![name.trim()],
+        row_to_project,
+    )
+    .optional()
+    .map_err(|e| format!("Failed to read project: {}", e))
+}
+
+/// Every project with its metadata, alphabetical. Archived ones only when `include_archived`.
+pub fn list_projects(path: &Path, include_archived: bool) -> Result<Vec<Project>, String> {
+    let conn = open_migrated(path)?;
+    let mut stmt = conn
+        .prepare(&format!("SELECT {} FROM projects ORDER BY name COLLATE NOCASE", PROJECT_COLUMNS))
+        .map_err(|e| format!("Failed to prepare query: {}", e))?;
+    let rows = stmt
+        .query_map([], row_to_project)
+        .map_err(|e| format!("Failed to query projects: {}", e))?;
+    let all = rows
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| format!("Failed to read projects: {}", e))?;
+    Ok(all.into_iter().filter(|p| include_archived || p.status != ProjectStatus::Archived).collect())
+}
+
+pub fn get_project(path: &Path, name: &str) -> Result<Option<Project>, String> {
+    read_project(&open_migrated(path)?, name)
+}
+
+/// Registers a project with metadata. If the name is already registered the existing
+/// project is returned unchanged (same as `create_name`).
+pub fn create_project(path: &Path, patch: &ProjectPatch) -> Result<Project, String> {
+    let name = patch.name.as_deref().unwrap_or("");
+    let mut meta = patch.clone();
+    meta.name = None;
+    let name = clean_name(Registry::Project, name)?;
+    let conn = open_migrated(path)?;
+    conn.execute_batch("BEGIN IMMEDIATE")
+        .map_err(|e| format!("Failed to lock {}: {}", path.display(), e))?;
+    let result = (|| {
+        if let Some(existing) = read_project(&conn, &name)? {
+            return Ok(existing);
+        }
+        let base = Project {
+            name: name.clone(),
+            description: None,
+            status: ProjectStatus::Active,
+            color: None,
+            default_agent: None,
+            due: None,
+            created: None,
+            updated: None,
+        };
+        let mut p = apply_patch(&base, &meta)?;
+        let now = now_stamp();
+        p.created = Some(now.clone());
+        p.updated = Some(now);
+        conn.execute(
+            &format!("INSERT INTO projects ({}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)", PROJECT_COLUMNS),
+            params![p.name, p.description, p.status.to_string(), p.color, p.default_agent, p.due, p.created, p.updated],
+        )
+        .map_err(|e| format!("Failed to create project: {}", e))?;
+        let next = read_version(&conn)? + 1;
+        conn.execute_batch(&format!("PRAGMA user_version = {}", next))
+            .map_err(|e| format!("Failed to bump data version: {}", e))?;
+        Ok(p)
+    })();
+    finish(&conn, result)
+}
+
+/// Applies `patch` to a project. A new `name` renames it and every task using it,
+/// atomically. Returns `None` if no such project is registered.
+pub fn update_project(path: &Path, name: &str, patch: &ProjectPatch) -> Result<Option<Project>, String> {
+    let mut txn = begin(path)?;
+    let Some(existing) = read_project(&txn.conn, name)? else {
+        return Ok(None);
+    };
+    let mut updated = apply_patch(&existing, patch)?;
+    updated.updated = Some(now_stamp());
+    let renamed = updated.name != existing.name;
+    if renamed && !updated.name.eq_ignore_ascii_case(&existing.name) && read_project(&txn.conn, &updated.name)?.is_some() {
+        return Err(format!("Project '{}' already exists", updated.name));
+    }
+    txn.conn
+        .execute(
+            "UPDATE projects SET name = ?1, description = ?2, status = ?3, color = ?4, default_agent = ?5, due = ?6, updated = ?7 WHERE name = ?8",
+            params![updated.name, updated.description, updated.status.to_string(), updated.color, updated.default_agent, updated.due, updated.updated, existing.name],
+        )
+        .map_err(|e| format!("Failed to update project: {}", e))?;
+    if renamed {
+        for t in txn.task_file.tasks.iter_mut() {
+            if t.project.as_deref().is_some_and(|p| p.eq_ignore_ascii_case(&existing.name)) {
+                t.project = Some(updated.name.clone());
+            }
+        }
+    }
+    txn.commit()?;
+    Ok(Some(updated))
 }
 
 fn finish<T>(conn: &Connection, result: Result<T, String>) -> Result<T, String> {
@@ -1135,5 +1343,114 @@ mod tests {
         reloaded.tasks[0].instructions = Some("do it".to_string());
         save(&path, &reloaded).unwrap();
         assert_eq!(load(&path).unwrap().tasks[0].instructions.as_deref(), Some("do it"));
+    }
+
+    fn patch(f: impl FnOnce(&mut ProjectPatch)) -> ProjectPatch {
+        let mut p = ProjectPatch::default();
+        f(&mut p);
+        p
+    }
+
+    #[test]
+    fn project_migration_adds_columns_to_old_schema() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("tasks.db");
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch("CREATE TABLE projects (name TEXT PRIMARY KEY COLLATE NOCASE); INSERT INTO projects (name) VALUES ('Old');").unwrap();
+        }
+        let projects = list_projects(&path, true).unwrap();
+        assert_eq!(projects.len(), 1);
+        assert_eq!(projects[0].name, "Old");
+        assert_eq!(projects[0].status, ProjectStatus::Active);
+        assert_eq!(projects[0].description, None);
+        // Opening again must not fail on the already-added columns.
+        assert_eq!(list_projects(&path, true).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn create_and_update_project_metadata() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("tasks.db");
+        let p = create_project(&path, &patch(|p| {
+            p.name = Some("Home Lab".into());
+            p.description = Some("Rack".into());
+            p.color = Some("Teal".into());
+            p.due = Some("2027-01-31".into());
+            p.default_agent = Some("Home".into());
+        })).unwrap();
+        assert_eq!(p.color.as_deref(), Some("teal"));
+        assert!(p.created.is_some());
+
+        let before = version(&path).unwrap();
+        let u = update_project(&path, "home lab", &patch(|p| {
+            p.status = Some("on-hold".into());
+            p.description = Some("".into());
+        })).unwrap().unwrap();
+        assert_eq!(u.name, "Home Lab");
+        assert_eq!(u.status, ProjectStatus::OnHold);
+        assert_eq!(u.description, None);
+        assert_eq!(u.color.as_deref(), Some("teal"));
+        assert!(version(&path).unwrap() > before);
+
+        assert!(update_project(&path, "Nope", &patch(|p| p.status = Some("done".into()))).unwrap().is_none());
+    }
+
+    #[test]
+    fn project_validation_rejects_bad_values() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("tasks.db");
+        create_project(&path, &patch(|p| p.name = Some("P".into()))).unwrap();
+        for bad in [
+            patch(|p| p.status = Some("paused".into())),
+            patch(|p| p.color = Some("#12".into())),
+            patch(|p| p.color = Some("mauve".into())),
+            patch(|p| p.due = Some("tomorrow".into())),
+            patch(|p| p.name = Some("  ".into())),
+        ] {
+            assert!(update_project(&path, "P", &bad).is_err());
+        }
+        assert!(create_project(&path, &patch(|p| p.color = Some("nope".into()))).is_err());
+        assert_eq!(get_project(&path, "P").unwrap().unwrap().status, ProjectStatus::Active);
+    }
+
+    #[test]
+    fn archived_projects_hidden_unless_all() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("tasks.db");
+        create_project(&path, &patch(|p| p.name = Some("A".into()))).unwrap();
+        create_project(&path, &patch(|p| { p.name = Some("B".into()); p.status = Some("archived".into()); })).unwrap();
+        let names = |all| list_projects(&path, all).unwrap().into_iter().map(|p| p.name).collect::<Vec<_>>();
+        assert_eq!(names(false), vec!["A"]);
+        assert_eq!(names(true), vec!["A", "B"]);
+    }
+
+    #[test]
+    fn rename_project_cascades_to_tasks_and_rejects_collisions() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("tasks.db");
+        let mut tf = TaskFile::new();
+        let mut t1 = sample_task(1, "one");
+        t1.project = Some("Old".into());
+        let mut t2 = sample_task(2, "two");
+        t2.project = Some("Other".into());
+        tf.tasks = vec![t1, t2];
+        tf.next_id = 3;
+        save(&path, &tf).unwrap();
+
+        let renamed = update_project(&path, "Old", &patch(|p| p.name = Some("New".into()))).unwrap().unwrap();
+        assert_eq!(renamed.name, "New");
+        let tf = load(&path).unwrap();
+        assert_eq!(tf.find_task(1).unwrap().project.as_deref(), Some("New"));
+        assert_eq!(tf.find_task(2).unwrap().project.as_deref(), Some("Other"));
+        assert!(get_project(&path, "Old").unwrap().is_none());
+
+        let err = update_project(&path, "New", &patch(|p| p.name = Some("other".into()))).unwrap_err();
+        assert!(err.contains("already exists"), "{}", err);
+        assert_eq!(load(&path).unwrap().find_task(1).unwrap().project.as_deref(), Some("New"));
+
+        // Case-only rename is allowed.
+        update_project(&path, "New", &patch(|p| p.name = Some("NEW".into()))).unwrap().unwrap();
+        assert_eq!(load(&path).unwrap().find_task(1).unwrap().project.as_deref(), Some("NEW"));
     }
 }
