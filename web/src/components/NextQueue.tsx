@@ -129,6 +129,9 @@ function QueueRow({ task: t, band, today, selected, deferred, mobile, projectCol
           <span style={{ ...chip, fontFamily: 'var(--font-mono)', color: 'var(--accent)' }}>{t.agent}</span>
         )}
         {t.due_date && <span style={{ ...chip, color: dueColor(t, today) }}>{dueLabel(t, today)}</span>}
+        {/* Triage rows already say "no due date" in their reason line. */}
+        {!t.due_date && band !== 'triage' && <span style={{ ...chip, color: 'var(--citrine)' }}>No due date</span>}
+        {t.recurrence && <span title="Recurrence" style={chip}>↻ {t.recurrence}</span>}
         {t.project && (
           <span style={{ ...chip, display: 'inline-flex', alignItems: 'center', gap: 5 }}>
             <ProjectDot color={projectColor} size={7} />{t.project}
@@ -169,6 +172,9 @@ function QueueRow({ task: t, band, today, selected, deferred, mobile, projectCol
       data-task-row={t.id}
       aria-current={selected ? 'true' : undefined}
       onClick={onSelect}
+      // Selecting with the mouse must not move keyboard focus onto the row: Enter and Space then still act
+      // on the selected task, as they did when rows were plain divs. Tab still reaches the row.
+      onMouseDown={(e) => e.preventDefault()}
       style={{
         display: 'flex', alignItems: 'flex-start', gap: 12, width: '100%', textAlign: 'left', color: 'inherit', font: 'inherit',
         minHeight: mobile ? 68 : 0, padding: mobile ? '14px 16px' : '10px 16px', cursor: 'pointer', border: 'none',

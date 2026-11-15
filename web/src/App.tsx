@@ -71,6 +71,10 @@ function isTypingTarget(target: EventTarget | null): boolean {
   return tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || target.isContentEditable;
 }
 
+function isActivatable(target: EventTarget | null): boolean {
+  return target instanceof HTMLElement && !!target.closest('button, summary, a, [role="button"]');
+}
+
 function countLabel(n: number): string {
   return `${n} ${n === 1 ? 'task' : 'tasks'}`;
 }
@@ -548,6 +552,8 @@ export default function App() {
     }
     if (e.metaKey || e.ctrlKey || e.altKey) return;
     if (paletteOpen || isTypingTarget(e.target)) return;
+    // Enter and Space activate the focused button, link or fold on their own; they must not also complete the task.
+    if ((e.key === 'Enter' || e.key === ' ') && isActivatable(e.target)) return;
 
     const quick = QUICK_DUE.find(([key]) => key === e.key);
     if (quick) {
@@ -560,7 +566,8 @@ export default function App() {
     const field = FIELD_KEYS.find(([key]) => key === e.key);
     if (field) {
       if (selected && inspectorVisible) {
-        if (e.key === 'A') e.preventDefault();
+        // The field opens an editor that takes focus, so without this the keystroke would be typed into it.
+        e.preventDefault();
         clickFieldById(field[2]);
       }
       return;
@@ -687,12 +694,9 @@ export default function App() {
       cmd('New task', 'a', () => setShowNewTaskForm(true)),
       cmd('Go to Next', '', () => setView('next')),
       cmd('Go to All tasks', '', () => setView('all')),
-      ...(view === 'all'
-        ? [
-            ...ALL_TASKS_FILTERS.map((f) => cmd(`Filter: ${f.label}`, '[ ]', () => setDueFilter(f.value))),
-            ...GROUP_BY_OPTIONS.map((g) => cmd(`Group by ${g.label.toLowerCase()}`, 'G', () => setGroupBy(g.value))),
-          ]
-        : []),
+      // Filters and grouping belong to All tasks, so choosing one from anywhere takes you there.
+      ...ALL_TASKS_FILTERS.map((f) => cmd(`Filter: ${f.label}`, view === 'all' ? '[ ]' : '', () => { setView('all'); setDueFilter(f.value); })),
+      ...GROUP_BY_OPTIONS.map((g) => cmd(`Group by ${g.label.toLowerCase()}`, view === 'all' ? 'G' : '', () => { setView('all'); setGroupBy(g.value); })),
       cmd('Next task', 'j ↓', () => moveSelection(1)),
       cmd('Previous task', 'k ↑', () => moveSelection(-1)),
       ...(selected
@@ -855,6 +859,7 @@ export default function App() {
 
         <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', borderTop: '1px solid var(--hairline)', paddingBottom: 96 }}>
           {view === 'next' ? (
+            <>
             <NextQueue
               mobile
               {...queueProps}
@@ -865,6 +870,10 @@ export default function App() {
                 onQuickDue: (t, days) => setQuickDue(t, addDays(today, days)),
               }}
             />
+            {nextOrder.length > 0 && (
+              <div style={{ padding: 16, textAlign: 'center', fontSize: 12, color: 'var(--fg-5)' }}>Swipe right to complete · left to set a due date</div>
+            )}
+            </>
           ) : (
             <>
               {[...grouped.entries()].map(([groupName, groupTasksList]) => (
