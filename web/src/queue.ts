@@ -1,25 +1,25 @@
 import type { Task } from './types';
 import { byDeferredThenDue, needsHumanAction } from './filters';
+import { formatLocalDate } from './taskFormat';
 
 /**
- * The Next view is one queue split into bands, most pressing first:
- * `review` (an agent finished and wants approval), `input` (an agent asked a
- * question), `triage` (unassigned or assigned to the human), and `working`
- * (an agent is on it; shown for awareness only).
+ * What a task in the Next view is waiting on: `review` (an agent finished and wants approval),
+ * `input` (an agent asked a question), `triage` (unassigned or assigned to the human), or
+ * `working` (an agent is on it). It drives the row's icon and reason line, not its position:
+ * the first three share one list ordered by urgency.
  */
 export type Band = 'review' | 'input' | 'triage' | 'working';
 
-export const BAND_ORDER: Band[] = ['review', 'input', 'triage', 'working'];
+/** The Next view lists `needs` (everything waiting on the human, one ordered list) above `working` (awareness only). */
+export type Section = 'needs' | 'working';
 
-export const BAND_LABEL: Record<Band, string> = {
-  review: 'Review',
-  input: 'Needs your input',
-  triage: 'Triage',
+export const SECTION_LABEL: Record<Section, string> = {
+  needs: 'Needs you',
   working: 'Agents working',
 };
 
-export interface QueueBand {
-  band: Band;
+export interface QueueSection {
+  section: Section;
   tasks: Task[];
 }
 
@@ -37,18 +37,44 @@ export function bandOf(t: Task): Band | null {
   return null;
 }
 
-/** Every band in order (empty ones included), each sorted with deferred tasks sinking to its bottom. */
-export function buildQueue(tasks: Task[], deferred: ReadonlySet<number> = new Set()): QueueBand[] {
-  const compare = byDeferredThenDue(deferred);
-  return BAND_ORDER.map((band) => ({
-    band,
-    tasks: tasks.filter((t) => bandOf(t) === band).sort(compare),
-  }));
+/**
+ * Focus mode keeps only what can be worked right now: waiting on the human (not the agents' work),
+ * not snoozed with Defer, and not due after today. Overdue, due-today and undated tasks stay.
+ */
+export function isFocusable(t: Task, deferred: ReadonlySet<number>, today: Date): boolean {
+  const band = bandOf(t);
+  if (band === null || band === 'working') return false;
+  if (deferred.has(t.id)) return false;
+  return !t.due_date || t.due_date <= formatLocalDate(today);
 }
 
-/** The tasks in keyboard order. A collapsed working band is skipped because its rows are not on screen. */
-export function queueOrder(queue: QueueBand[], opts: { workingExpanded: boolean }): Task[] {
-  return queue.filter((b) => b.band !== 'working' || opts.workingExpanded).flatMap((b) => b.tasks);
+export interface QueueOptions {
+  /** Show only what can be worked right now (see `isFocusable`). Needs `today`. */
+  focus?: boolean;
+  today?: Date;
+}
+
+/**
+ * The queue: "Needs you" as one list in the order the Next view has always used (see
+ * `byDeferredThenDue`: tasks missing an agent or due date first, then due date and priority, oldest
+ * last, deferred tasks last of all), then "Agents working" in the same order.
+ */
+export function buildQueue(tasks: Task[], deferred: ReadonlySet<number> = new Set(), opts: QueueOptions = {}): QueueSection[] {
+  const compare = byDeferredThenDue(deferred);
+  const pool = opts.focus && opts.today ? tasks.filter((t) => isFocusable(t, deferred, opts.today!)) : tasks;
+  const needs = pool.filter((t) => { const b = bandOf(t); return b !== null && b !== 'working'; }).sort(compare);
+  const working = pool.filter((t) => bandOf(t) === 'working').sort(compare);
+  return [{ section: 'needs', tasks: needs }, { section: 'working', tasks: working }];
+}
+
+/** How many tasks a queue lists, across all its sections. */
+export function queueSize(queue: QueueSection[]): number {
+  return queue.reduce((n, s) => n + s.tasks.length, 0);
+}
+
+/** The tasks in keyboard order. A collapsed working section is skipped because its rows are not on screen. */
+export function queueOrder(queue: QueueSection[], opts: { workingExpanded: boolean }): Task[] {
+  return queue.filter((s) => s.section !== 'working' || opts.workingExpanded).flatMap((s) => s.tasks);
 }
 
 /** Tasks that need the human: the badge on the Next toggle. */

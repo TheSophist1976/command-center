@@ -31,13 +31,18 @@ function setup(over: Partial<Parameters<typeof NextQueue>[0]> = {}) {
 }
 
 describe('NextQueue', () => {
-  it('groups tasks into labelled bands in priority order', () => {
+  it('lists what needs you in one section and the agents’ work in another', () => {
     setup();
-    const labels = screen.getAllByRole('region').map((r) => r.getAttribute('aria-label'));
-    expect(labels).toEqual(['Review', 'Needs your input', 'Triage', 'Agents working']);
-    expect(within(screen.getByRole('region', { name: 'Review' })).getByText('Ship release')).toBeInTheDocument();
-    expect(within(screen.getByRole('region', { name: 'Needs your input' })).getByText('Pick a calendar')).toBeInTheDocument();
-    expect(within(screen.getByRole('region', { name: 'Triage' })).getByText('Unowned idea')).toBeInTheDocument();
+    expect(screen.getAllByRole('region').map((r) => r.getAttribute('aria-label'))).toEqual(['Needs you', 'Agents working']);
+    const needs = within(screen.getByRole('region', { name: 'Needs you' }));
+    for (const title of ['Ship release', 'Pick a calendar', 'Unowned idea']) expect(needs.getByText(title)).toBeInTheDocument();
+  });
+
+  it('lists tasks in the order the queue gives them, whatever kind each is', () => {
+    setup();
+    const titles = within(screen.getByRole('region', { name: 'Needs you' })).getAllByRole('button').map((b) => b.textContent ?? '');
+    // The unowned task has no agent or date, so it leads; then due-date order.
+    expect(titles[0]).toContain('Unowned idea');
   });
 
   it('shows why each task is queued', () => {
@@ -94,5 +99,32 @@ describe('reasonFor', () => {
     const row = screen.getByText('Ship release').closest('button')!;
     expect(within(row).getByTestId('project-dot')).toBeInTheDocument();
     expect(within(screen.getByText('Unowned idea').closest('button')!).queryByTestId('project-dot')).toBeNull();
+  });
+});
+
+describe('NextQueue with Focus on and nothing to show', () => {
+  it('explains what is hidden and offers a way out', async () => {
+    const onExit = vi.fn();
+    setup({ queue: buildQueue([]), focus: { hidden: 3, onExit } });
+    expect(screen.getByText('Nothing to work on right now.')).toBeInTheDocument();
+    expect(screen.getByText(/3 tasks are hidden/)).toBeInTheDocument();
+    await userEvent.click(screen.getByRole('button', { name: 'Show everything' }));
+    expect(onExit).toHaveBeenCalled();
+  });
+
+  it('uses the singular for one hidden task', () => {
+    setup({ queue: buildQueue([]), focus: { hidden: 1, onExit: vi.fn() } });
+    expect(screen.getByText(/1 task is hidden/)).toBeInTheDocument();
+  });
+
+  it('does not offer a way out when nothing is hidden', () => {
+    setup({ queue: buildQueue([]), focus: { hidden: 0, onExit: vi.fn() } });
+    expect(screen.getByText('No open tasks are waiting on you.')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Show everything' })).not.toBeInTheDocument();
+  });
+
+  it('keeps the usual empty message when Focus is off', () => {
+    setup({ queue: buildQueue([]) });
+    expect(screen.getByText('Nothing needs you.')).toBeInTheDocument();
   });
 });

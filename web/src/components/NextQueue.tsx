@@ -1,18 +1,19 @@
-import { ChevronDown, ChevronRight, Eye, HelpCircle, Inbox, RefreshCw, type LucideIcon } from 'lucide-react';
+import { ChevronDown, ChevronRight, Eye, HelpCircle, Inbox, ListChecks, RefreshCw, type LucideIcon } from 'lucide-react';
 import type { Project, Task } from '../types';
 import { ProjectDot } from './ProjectDot';
-import { BAND_LABEL, reasonFor, type Band, type QueueBand } from '../queue';
+import { SECTION_LABEL, bandOf, reasonFor, type Band, type QueueSection, type Section } from '../queue';
 import { dueColor, dueLabel } from '../taskFormat';
 import { PriorityBadge } from './Badges';
 import { SwipeableRow } from './SwipeableRow';
 
+const SECTION_ICON: Record<Section, LucideIcon> = { needs: ListChecks, working: RefreshCw };
 const BAND_ICON: Record<Band, LucideIcon> = { review: Eye, input: HelpCircle, triage: Inbox, working: RefreshCw };
 const BAND_COLOR: Record<Band, string> = {
   review: 'var(--cyan)', input: 'var(--citrine)', triage: 'var(--fg-3)', working: 'var(--teal)',
 };
 
 interface NextQueueProps {
-  queue: QueueBand[];
+  queue: QueueSection[];
   selectedId: number | null;
   onSelect: (task: Task) => void;
   today: Date;
@@ -23,6 +24,8 @@ interface NextQueueProps {
   mobile?: boolean;
   /** Project metadata by lowercase name, for the color dot on a row's project chip. */
   projectMeta?: Map<string, Project>;
+  /** Focus is on: the empty state explains what is hidden and offers a way out. */
+  focus?: { hidden: number; onExit: () => void };
   /** Phone swipe gestures: right to mark done, left to set a due date. Only one row is open at a time. */
   swipe?: {
     openId: number | null;
@@ -33,28 +36,46 @@ interface NextQueueProps {
 }
 
 /** The Next view's list: bands of tasks, each row a title, why it is here, and a few chips. */
-export function NextQueue({ queue, selectedId, onSelect, today, deferredIds, workingExpanded, onToggleWorking, mobile, projectMeta, swipe }: NextQueueProps) {
+export function NextQueue({ queue, selectedId, onSelect, today, deferredIds, workingExpanded, onToggleWorking, mobile, projectMeta, swipe, focus }: NextQueueProps) {
   const visible = queue.filter((b) => b.tasks.length > 0);
-  const needsYou = queue.some((b) => b.band !== 'working' && b.tasks.length > 0);
+  const needsYou = queue.some((s) => s.section === 'needs' && s.tasks.length > 0);
 
   return (
     <div>
       {!needsYou && (
         <div style={{ padding: mobile ? '40px 24px 24px' : '32px 20px 20px', textAlign: 'center' }}>
-          <div style={{ fontFamily: 'var(--font-display)', fontWeight: 600, fontSize: 18 }}>Nothing needs you.</div>
-          <div style={{ marginTop: 6, fontSize: 14, color: 'var(--fg-4)' }}>
-            No open tasks are unassigned, assigned to you, awaiting review, or blocked on your input.
+          <div style={{ fontFamily: 'var(--font-display)', fontWeight: 600, fontSize: 18 }}>
+            {focus ? 'Nothing to work on right now.' : 'Nothing needs you.'}
           </div>
+          <div style={{ marginTop: 6, fontSize: 14, color: 'var(--fg-4)' }}>
+            {focus
+              ? focus.hidden > 0
+                ? `${focus.hidden} ${focus.hidden === 1 ? 'task is' : 'tasks are'} hidden: deferred, due later, or with an agent.`
+                : 'No open tasks are waiting on you.'
+              : 'No open tasks are unassigned, assigned to you, awaiting review, or blocked on your input.'}
+          </div>
+          {focus && focus.hidden > 0 && (
+            <button
+              type="button"
+              onClick={focus.onExit}
+              style={{
+                marginTop: 14, height: mobile ? 44 : 34, padding: '0 16px', borderRadius: 5, cursor: 'pointer',
+                border: '1px solid var(--hairline)', background: 'transparent', color: 'var(--fg-1)', fontSize: 13.5, fontWeight: 600,
+              }}
+            >
+              Show everything
+            </button>
+          )}
         </div>
       )}
-      {visible.map(({ band, tasks }) => {
-        const Icon = BAND_ICON[band];
-        const collapsible = band === 'working';
+      {visible.map(({ section, tasks }) => {
+        const Icon = SECTION_ICON[section];
+        const collapsible = section === 'working';
         const expanded = !collapsible || workingExpanded;
         const header = (
           <>
-            <Icon size={13} color={BAND_COLOR[band]} aria-hidden />
-            <span>{BAND_LABEL[band]}</span>
+            <Icon size={13} color={section === 'working' ? BAND_COLOR.working : 'var(--fg-3)'} aria-hidden />
+            <span>{SECTION_LABEL[section]}</span>
             <span style={{ fontFamily: 'var(--font-mono)', color: 'var(--accent)' }}>{tasks.length}</span>
             {collapsible && (
               <span style={{ marginLeft: 'auto', display: 'flex' }}>
@@ -71,7 +92,7 @@ export function NextQueue({ queue, selectedId, onSelect, today, deferredIds, wor
           color: 'var(--fg-5)',
         };
         return (
-          <section key={band} aria-label={BAND_LABEL[band]}>
+          <section key={section} aria-label={SECTION_LABEL[section]}>
             {collapsible ? (
               <button type="button" onClick={onToggleWorking} aria-expanded={expanded} style={{ ...headerStyle, cursor: 'pointer' }}>
                 {header}
@@ -83,7 +104,7 @@ export function NextQueue({ queue, selectedId, onSelect, today, deferredIds, wor
               <QueueRow
                 key={t.id}
                 task={t}
-                band={band}
+                band={bandOf(t) ?? 'triage'}
                 today={today}
                 selected={t.id === selectedId}
                 deferred={deferredIds.has(t.id)}
