@@ -17,6 +17,7 @@ import { MobileTaskRow } from './components/MobileTaskRow';
 import { MobileNewTaskSheet } from './components/MobileNewTaskSheet';
 import { CommandPalette, type PaletteCommand } from './components/CommandPalette';
 import { ViewToggle, type View } from './components/ViewToggle';
+import { FocusToggle } from './components/FocusToggle';
 import { FilterPills } from './components/FilterPills';
 import { NextQueue } from './components/NextQueue';
 import { StatusStrip, MobileStatusBar } from './components/StatusStrip';
@@ -26,7 +27,7 @@ import { indexProjects } from './projects';
 import { ProjectDot } from './components/ProjectDot';
 import { startOfToday } from './dueWindow';
 import { agentActivity, serviceSummary } from './status';
-import { bandOf, buildQueue, needsYouCount, nextSelection, queueOrder } from './queue';
+import { bandOf, buildQueue, needsYouCount, nextSelection, queueOrder, queueSize } from './queue';
 import { addDays, addMonths, formatLocalDate } from './taskFormat';
 import {
   ALL_TASKS_FILTERS, GROUP_BY_OPTIONS,
@@ -37,6 +38,7 @@ import { loadDeferrals, loadSettings, saveDeferrals, saveSettings, type Deferral
 import { diffNotifications, loadSnapshot, saveSnapshot, showNotification, snapshotOf } from './notifications';
 
 const VIEW_KEY = 'ccView';
+const FOCUS_KEY = 'ccFocus';
 const PANEL_MIN_WIDTH = 352;
 const PANEL_MAX_WIDTH = 880;
 const PANEL_DEFAULT_WIDTH = 440;
@@ -97,6 +99,8 @@ export default function App() {
   const [dueFilter, setDueFilter] = useState<DueFilter>('all-tasks');
   // The "Agents working" band is awareness only, so it starts folded away.
   const [workingExpanded, setWorkingExpanded] = useState(false);
+  // Focus narrows Next to what can be worked right now. Remembered like the view.
+  const [focus, setFocusState] = useState(() => localStorage.getItem(FOCUS_KEY) === 'on');
   const [rightOpen, setRightOpen] = useState(true);
   const [panelPhase, setPanelPhase] = useState<'closed' | 'entering' | 'open' | 'leaving'>('open');
   const [panelWidth, setPanelWidth] = useState(() => {
@@ -141,6 +145,11 @@ export default function App() {
   const filterItem: FilterItem = ALL_TASKS_FILTERS.find((i) => i.value === dueFilter) ?? ALL_TASKS_FILTERS[0];
   // The docked pane (Next) is always visible; the All tasks inspector slides in and out.
   const inspectorVisible = view === 'next' || rightOpen;
+
+  function setFocus(on: boolean) {
+    setFocusState(on);
+    localStorage.setItem(FOCUS_KEY, on ? 'on' : 'off');
+  }
 
   function setView(next: View) {
     setViewState(next);
@@ -453,7 +462,12 @@ export default function App() {
   );
 
   // Next: the queue in bands. All tasks: the filtered, grouped list.
-  const queue = useMemo(() => buildQueue(searchedTasks, deferredIds), [searchedTasks, deferredIds]);
+  const queue = useMemo(
+    () => buildQueue(searchedTasks, deferredIds, { focus, today }),
+    [searchedTasks, deferredIds, focus, today],
+  );
+  const fullQueue = useMemo(() => buildQueue(searchedTasks, deferredIds), [searchedTasks, deferredIds]);
+  const focusHidden = focus ? queueSize(fullQueue) - queueSize(queue) : 0;
   const nextOrder = useMemo(() => queueOrder(queue, { workingExpanded }), [queue, workingExpanded]);
   const filteredTasks = useMemo(
     () => searchedTasks.filter((t) => matchesFilter(t, today, dueFilter)),
@@ -462,7 +476,11 @@ export default function App() {
   const grouped = useMemo(() => groupTasks(filteredTasks, groupBy), [filteredTasks, groupBy]);
   const allOrder = useMemo(() => [...grouped.values()].flat(), [grouped]);
   const flatOrder = view === 'next' ? nextOrder : allOrder;
-  const nextCount = useMemo(() => needsYouCount(tasks), [tasks]);
+  // The badge counts what the queue lists: with Focus on, only what can be worked now.
+  const nextCount = useMemo(
+    () => (focus ? queue.filter((s) => s.section === 'needs').reduce((n, s) => n + s.tasks.length, 0) : needsYouCount(tasks)),
+    [focus, queue, tasks],
+  );
   const activity = useMemo(() => agentActivity(tasks, agents), [tasks, agents]);
   const serviceStatus = useMemo(() => serviceSummary(services), [services]);
 
@@ -605,6 +623,12 @@ export default function App() {
       case 'g':
         openFirstNote();
         break;
+      case 'f':
+        if (view === 'next') {
+          e.preventDefault();
+          setFocus(!focus);
+        }
+        break;
       case '/':
       case '?':
         e.preventDefault();
@@ -693,6 +717,7 @@ export default function App() {
     return [
       cmd('New task', 'a', () => setShowNewTaskForm(true)),
       cmd('Go to Next', '', () => setView('next')),
+      cmd(focus ? 'Turn Focus off' : 'Turn Focus on', view === 'next' ? 'f' : '', () => { setView('next'); setFocus(!focus); }),
       cmd('Go to All tasks', '', () => setView('all')),
       // Filters and grouping belong to All tasks, so choosing one from anywhere takes you there.
       ...ALL_TASKS_FILTERS.map((f) => cmd(`Filter: ${f.label}`, view === 'all' ? '[ ]' : '', () => { setView('all'); setDueFilter(f.value); })),
@@ -772,6 +797,7 @@ export default function App() {
     onToggleWorking: () => setWorkingExpanded((v) => !v),
     onSelect: (t: Task) => (isMobile ? setSelected(t) : selectTask(t)),
     projectMeta,
+    focus: focus ? { hidden: focusHidden, onExit: () => setFocus(false) } : undefined,
   };
 
   function swipeToNeighbor(e: React.TouchEvent, phase: 'start' | 'end') {
@@ -834,6 +860,12 @@ export default function App() {
             >
               Cancel
             </button>
+          </div>
+        )}
+
+        {view === 'next' && (
+          <div style={{ flex: 'none', padding: '2px 16px 10px' }}>
+            <FocusToggle mobile on={focus} onChange={setFocus} hidden={focusHidden} />
           </div>
         )}
 
@@ -991,6 +1023,7 @@ export default function App() {
         <main style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column' }}>
           <header style={{ height: 52, flex: 'none', padding: '0 16px', borderBottom: '1px solid var(--hairline)', display: 'flex', alignItems: 'center', gap: 12 }}>
             <ViewToggle view={view} onChange={setView} nextCount={nextCount} allCount={tasks.length} />
+            {view === 'next' && <FocusToggle on={focus} onChange={setFocus} hidden={focusHidden} />}
             <div style={{ flex: 1 }} />
             {view === 'all' && (
               <div style={{ display: 'flex', alignItems: 'center', gap: 8, height: 30, padding: '0 10px', border: '1px solid var(--hairline)', borderRadius: 5 }}>

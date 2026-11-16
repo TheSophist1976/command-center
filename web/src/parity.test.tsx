@@ -24,7 +24,7 @@ const queueRow = (title: string) => screen.getByRole('button', { name: new RegEx
 
 async function renderNext() {
   render(<App />);
-  await screen.findByRole('region', { name: 'Review' });
+  await screen.findByRole('region', { name: 'Needs you' });
   await waitFor(() => expect(queueRow('Ship release')).toHaveAttribute('aria-current', 'true'));
 }
 
@@ -156,7 +156,7 @@ describe('queue rows carry what the old rows flagged', () => {
       agents,
     });
     render(<App />);
-    await screen.findByRole('region', { name: 'Review' });
+    await screen.findByRole('region', { name: 'Needs you' });
     expect(queueRow('Needs a date')).toHaveTextContent('No due date');
     expect(queueRow('Repeats weekly')).toHaveTextContent('weekly:fri');
   });
@@ -166,7 +166,7 @@ describe('phone: the swipe hint', () => {
   it('is shown under the Next queue, as it was under every list before', async () => {
     setViewport(true);
     render(<App />);
-    await screen.findByRole('region', { name: 'Review' });
+    await screen.findByRole('region', { name: 'Needs you' });
     expect(screen.getByText(/Swipe right to complete/)).toBeInTheDocument();
   });
 });

@@ -155,8 +155,8 @@ export async function openNext(page: Page, cc: CommandCenter) {
   await expect(page.getByRole('tab', { name: /Next/ })).toHaveAttribute('aria-selected', 'true');
 }
 
-/** A band of the Next queue ("Review", "Needs your input", "Triage", "Agents working"). */
-export function band(page: Page, name: string) {
+/** A section of the Next queue ("Needs you" or "Agents working"). */
+export function section(page: Page, name: string) {
   return page.getByRole('region', { name, exact: true });
 }
 

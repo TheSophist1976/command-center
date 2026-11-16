@@ -12,7 +12,7 @@ const tasks = [
   makeTask({ id: 1, title: 'Ship release', agent: 'CommandCenter', work_status: 'waiting-for-review', due_date: '2030-01-01' }),
   makeTask({ id: 2, title: 'Reorganise notes', agent: 'Vault', work_status: 'waiting-for-review', due_date: '2030-01-02' }),
   makeTask({ id: 3, title: 'Pick a calendar', agent: 'HabitWise', work_status: 'needs-input', due_date: '2030-01-03' }),
-  makeTask({ id: 4, title: 'Unowned idea', agent: undefined, due_date: undefined }),
+  makeTask({ id: 4, title: 'Unowned idea', agent: 'human', due_date: '2030-01-04' }),
   makeTask({ id: 5, title: 'Fix drawer', agent: 'Vault', work_status: 'in-progress', due_date: '2030-01-05' }),
   makeTask({ id: 6, title: 'Water plants', agent: 'Home', work_status: 'todo', due_date: '2030-01-06', recurrence: 'weekly:sun' }),
 ];
@@ -21,7 +21,7 @@ let api: FakeApi;
 
 async function renderApp() {
   render(<App />);
-  await screen.findByRole('region', { name: 'Review' });
+  await screen.findByRole('region', { name: 'Needs you' });
 }
 
 const docked = () => screen.getByRole('region', { name: 'Selected task' });
@@ -36,11 +36,11 @@ beforeEach(() => {
 });
 
 describe('desktop: Next', () => {
-  it('opens on the queue, in bands, with no sidebar or Inbox', async () => {
+  it('opens on the queue, with no sidebar or Inbox', async () => {
     await renderApp();
     expect(screen.getByRole('tab', { name: /Next/ })).toHaveAttribute('aria-selected', 'true');
     expect(screen.getAllByRole('region').map((r) => r.getAttribute('aria-label')).filter((l) => l !== 'Selected task'))
-      .toEqual(['Review', 'Needs your input', 'Triage', 'Agents working']);
+      .toEqual(['Needs you', 'Agents working']);
     expect(screen.queryByText('Inbox')).not.toBeInTheDocument();
     expect(screen.queryByText('Due window')).not.toBeInTheDocument();
   });
@@ -117,15 +117,35 @@ describe('desktop: Next', () => {
     await waitFor(() => expect(within(docked()).getByText('Reorganise notes')).toBeInTheDocument());
   });
 
-  it('z defers the selected task to the bottom of its band', async () => {
+  it('z defers the selected task to the bottom of the queue', async () => {
     await renderApp();
     await waitFor(() => expect(within(docked()).getByText('Ship release')).toBeInTheDocument());
     await userEvent.keyboard('z');
     await waitFor(() => expect(within(docked()).getByText('Reorganise notes')).toBeInTheDocument());
-    const review = within(screen.getByRole('region', { name: 'Review' })).getAllByRole('button').map((b) => b.textContent);
-    expect(review[0]).toContain('Reorganise notes');
-    expect(review[1]).toContain('Ship release');
-    expect(review[1]).toContain('deferred');
+    const rows = within(screen.getByRole('region', { name: 'Needs you' })).getAllByRole('button').map((b) => b.textContent ?? '');
+    expect(rows[0]).toContain('Reorganise notes');
+    expect(rows[rows.length - 1]).toContain('Ship release');
+    expect(rows[rows.length - 1]).toContain('deferred');
+  });
+
+  it('orders the queue by the old rules: missing agent or date first, then by urgency, deferred last', async () => {
+    const day = (n: number) => { const d = new Date(); d.setDate(d.getDate() + n); return d.toISOString().slice(0, 10); };
+    localStorage.setItem('ccDeferrals', JSON.stringify({ 4: Date.now() + 3_600_000 }));
+    installFakeApi({
+      tasks: [
+        makeTask({ id: 1, title: 'Later review', agent: 'Vault', work_status: 'waiting-for-review', due_date: day(9) }),
+        makeTask({ id: 2, title: 'Overdue question', agent: 'Vault', work_status: 'needs-input', due_date: day(-5) }),
+        makeTask({ id: 3, title: 'Unassigned', agent: undefined, due_date: undefined }),
+        makeTask({ id: 4, title: 'Snoozed review', agent: 'Vault', work_status: 'waiting-for-review', due_date: day(0) }),
+      ],
+      agents,
+    });
+    await renderApp();
+    const rows = within(screen.getByRole('region', { name: 'Needs you' })).getAllByRole('button').map((b) => b.textContent ?? '');
+    expect(rows.map((r) => ['Unassigned', 'Overdue question', 'Later review', 'Snoozed review'].find((t) => r.includes(t)))).toEqual([
+      'Unassigned', 'Overdue question', 'Later review', 'Snoozed review',
+    ]);
+    expect(rows[3]).toContain('deferred');
   });
 
   it('keeps Agents working folded, and unfolds it on request', async () => {
@@ -155,7 +175,7 @@ describe('desktop: All tasks', () => {
     expect(screen.getByRole('group', { name: 'Filter tasks' })).toBeInTheDocument();
     for (const title of ['Ship release', 'Unowned idea', 'Water plants']) expect(hasRow(title)).toBe(true);
     expect(screen.getAllByText('Effort').length).toBeGreaterThan(0);
-    expect(screen.queryByRole('region', { name: 'Review' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('region', { name: 'Needs you' })).not.toBeInTheDocument();
   });
 
   it('keeps recurring tasks reachable through a Recurring filter', async () => {
@@ -169,9 +189,10 @@ describe('desktop: All tasks', () => {
   it('groups by agent by default and can regroup', async () => {
     await renderApp();
     await userEvent.click(screen.getByRole('tab', { name: /All tasks/ }));
-    expect(screen.getByText('unassigned')).toBeInTheDocument();
+    const groupHeaders = () => screen.queryAllByText(/^\d+ tasks?$/);
+    expect(groupHeaders().length).toBeGreaterThan(0);
     await userEvent.selectOptions(screen.getByLabelText('Group'), 'none');
-    expect(screen.queryByText('unassigned')).not.toBeInTheDocument();
+    expect(groupHeaders()).toHaveLength(0);
   });
 
   it('remembers the chosen view across reloads', async () => {
@@ -196,7 +217,7 @@ describe('mobile', () => {
 
   async function renderMobile() {
     render(<App />);
-    await screen.findByRole('region', { name: 'Review' });
+    await screen.findByRole('region', { name: 'Needs you' });
   }
   const detail = () => document.querySelector('.mobile-detail') as HTMLElement;
 
